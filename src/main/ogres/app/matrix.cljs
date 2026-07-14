@@ -10,6 +10,7 @@
 
 (defprotocol IMatrix
   (inverse [m])
+  (multiply [m n])
   (rotate [m d])
   (scale [m s])
   (translate [m v] [m x y]))
@@ -42,6 +43,8 @@
   IMatrix
   (inverse [_]
     (Matrix. (.inverse m)))
+  (multiply [_ ^Matrix n]
+    (Matrix. (.multiply m (.-m n))))
   (rotate [_ d]
     (Matrix. (.rotate m d)))
   (scale [_ s]
@@ -52,3 +55,8 @@
     (Matrix. (.translate m x y))))
 
 (def identity (Matrix. (js/DOMMatrixReadOnly.)))
+
+(defn from-coeffs
+  "Constructs a Matrix directly from its 6 affine coefficients [a b c d e f]."
+  [a b c d e f]
+  (Matrix. (js/DOMMatrixReadOnly. #js [a b c d e f])))

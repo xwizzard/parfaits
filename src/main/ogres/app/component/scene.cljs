@@ -6,7 +6,8 @@
             [ogres.app.component.scene-draw :refer [draw]]
             [ogres.app.component.scene-objects :refer [objects]]
             [ogres.app.component.scene-pattern :refer [pattern]]
-            [ogres.app.const :refer [grid-size half-size]]
+            [ogres.app.const :refer [grid-size half-size hex-width hex-row token-radius]]
+            [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.modifiers :as modifiers]
             [ogres.app.svg :refer [circle->path poly->path]]
@@ -220,18 +221,85 @@
                :mask-toggle (dispatch :mask/toggle id (not enabled?))
                :mask-remove (dispatch :mask/remove id)))})))))
 
+(def ^:private grid-defs-query
+  [{:user/camera
+    [{:camera/scene
+      [[:scene/grid-type :default :square]
+       [:scene/grid-shape :default :line]]}]}])
+
+(def ^:private grid-dot-radius 3)
+
+(defui ^:private grid-dot
+  "Renders a single grid-line 'dot' marker at (cx, cy). On isometric
+   grid-types, the dot is counter-transformed so it stays a true circle
+   -- a position marker, not board-plane geometry -- instead of being
+   squished into an ellipse by the ambient isometric projection."
+  [{:keys [cx cy grid-type]}]
+  (if (geom/iso? grid-type)
+    ;; SVG <pattern> content isn't part of the normal layout/formatting
+    ;; tree, so a CSS `transform` (as used elsewhere for asset
+    ;; counter-transforms) is not reliably applied here -- use the SVG
+    ;; presentation `transform` attribute instead, which SVG guarantees
+    ;; to apply regardless of where the element sits.
+    ($ :circle.scene-grid-dot
+      {:cx 0 :cy 0 :r grid-dot-radius
+       :transform (str "translate(" cx ", " cy ") " (geom/iso-inverse-matrix grid-type))})
+    ($ :circle.scene-grid-dot {:cx cx :cy cy :r grid-dot-radius})))
+
 (defui ^:private grid-defs []
-  ($ :defs
-    ($ :pattern
-      {:id "grid-pattern"
-       :width grid-size
-       :height grid-size
-       :patternUnits "userSpaceOnUse"}
-      ($ :path.scene-grid-path {:d "M 0 0 H 70 V 70"}))
-    ($ :g {:id "scene-grid"}
-      ($ :path
-        {:d "M -100000 -100000 H 100000 V 100000 H -100000"
-         :fill "url(#grid-pattern)"}))))
+  (let [result (hooks/use-query grid-defs-query)
+        {{{grid-type :scene/grid-type
+           grid-shape :scene/grid-shape} :camera/scene} :user/camera} result
+        dots? (= grid-shape :dot)]
+    ($ :defs
+      (case (geom/base-grid-type grid-type)
+        :hex-pointy
+        ($ :pattern
+          {:id "grid-pattern"
+           :width hex-width
+           :height (* 2 hex-row)
+           :patternUnits "userSpaceOnUse"}
+          (if dots?
+            ($ :<>
+              ;; The interior, unclipped hex center for this tile.
+              ($ grid-dot {:cx (/ hex-width 2) :cy hex-row :grid-type grid-type})
+              ;; The other hex center sits on all 4 corners of the tile;
+              ;; each corner draws a clipped fragment that, together with
+              ;; its counterparts in neighboring tiles, reconstructs one
+              ;; full dot per lattice point.
+              ($ grid-dot {:cx 0        :cy 0            :grid-type grid-type})
+              ($ grid-dot {:cx hex-width :cy 0            :grid-type grid-type})
+              ($ grid-dot {:cx 0        :cy (* 2 hex-row) :grid-type grid-type})
+              ($ grid-dot {:cx hex-width :cy (* 2 hex-row) :grid-type grid-type}))
+            ($ :path.scene-grid-path {:d geom/hex-pattern-path})))
+        :hex-flat
+        ($ :pattern
+          {:id "grid-pattern"
+           :width (* 2 hex-row)
+           :height hex-width
+           :patternUnits "userSpaceOnUse"}
+          (if dots?
+            ($ :<>
+              ($ grid-dot {:cx hex-row :cy (/ hex-width 2) :grid-type grid-type})
+              ($ grid-dot {:cx 0            :cy 0        :grid-type grid-type})
+              ($ grid-dot {:cx (* 2 hex-row) :cy 0        :grid-type grid-type})
+              ($ grid-dot {:cx 0            :cy hex-width :grid-type grid-type})
+              ($ grid-dot {:cx (* 2 hex-row) :cy hex-width :grid-type grid-type}))
+            ($ :path.scene-grid-path {:d geom/hex-pattern-path-flat})))
+        ($ :pattern
+          {:id "grid-pattern"
+           :width grid-size
+           :height grid-size
+           :patternUnits "userSpaceOnUse"}
+          (if dots?
+            ;; The token snap center for a square cell sits at the middle
+            ;; of the tile, safely clear of any tile boundary.
+            ($ grid-dot {:cx half-size :cy half-size :grid-type grid-type})
+            ($ :path.scene-grid-path {:d (str "M 0 0 H " grid-size " V " grid-size)}))))
+      ($ :g {:id "scene-grid"}
+        ($ :path
+          {:d "M -100000 -100000 H 100000 V 100000 H -100000"
+           :fill "url(#grid-pattern)"})))))
 
 (defn ^:private token-flags [data]
   (let [{[{turn :initiative/turn}] :scene/_initiative} data]
@@ -249,7 +317,7 @@
     (take 4 (filter (difference (token-flags data) exclu) order))))
 
 (defui ^:private token [{:keys [node data]}]
-  (let [radius (- half-size 2)
+  (let [radius token-radius
         scale (/ (:token/size data) 5)
         hash (:image/hash (:image/thumbnail (:token/image data)))
         fill (if (some? hash) (str "token-face-" hash) "token-face-default")]
@@ -388,9 +456,9 @@
       children)))
 
 (defui ^:private scene-camera
-  [{:keys [scale on-translate children]
+  [{:keys [scale grid-type on-translate children]
     :or   {on-translate identity}}]
-  (let [scale-fn (uix/use-memo (fn [] (modifiers/scale-fn scale)) [scale])]
+  (let [scale-fn (uix/use-memo (fn [] (modifiers/scale-fn scale grid-type)) [scale grid-type])]
     ($ dnd-context
       #js {"modifiers" #js [modifiers/trunc]
            "onDragEnd"
@@ -485,6 +553,7 @@
       [:db/id
        [:scene/dark-mode :default false]
        [:scene/show-grid :default true]
+       [:scene/grid-type :default :square]
        [:scene/lighting :default :revealed]
        [:scene/masked :default false]
        {:scene/image [:image/hash]}]}]}])
@@ -496,6 +565,7 @@
           scale :camera/scale
           mode  :camera/draw-mode
           point :camera/point} :user/camera} (:data props)
+        grid-type (:scene/grid-type scene)
         multi-select? (use-key "shift")]
     ($ :svg.scene
       {:ref (:ref props)
@@ -507,6 +577,7 @@
       ($ :g.scene-handler {:data-type "scene" :tab-index 0 :style {:outline "none"}})
       ($ scene-camera
         {:scale scale
+         :grid-type grid-type
          :on-translate
          (uix/use-callback
           (fn [delta]
@@ -517,7 +588,10 @@
         (if (and (= mode :select) multi-select?)
           ($ :g.scene-draw {:data-type "select"}
             ($ draw {:mode :select})))
-        ($ :g {:transform  (str "scale(" scale ") " (vec/rnd (vec/mul point -1)))}
+        ($ :g {:transform
+               (str "scale(" scale ") "
+                    (if (geom/iso? grid-type) (str (geom/iso-forward-matrix grid-type) " ") "")
+                    (vec/rnd (vec/mul point -1)))}
           (:children props)))
       ($ hooks/create-portal {:name :multiselect}
         (fn [{:keys [ref]}]

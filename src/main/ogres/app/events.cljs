@@ -2,7 +2,7 @@
   (:require [datascript.core :as ds]
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
-            [ogres.app.const :refer [grid-size half-size]]
+            [ogres.app.const :refer [grid-size half-size hex-radius]]
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
             [ogres.app.segment :as seg]
@@ -184,14 +184,14 @@
                bounds (or (:user/bounds user) seg/zero)]
            [[:db.fn/call event-tx-fn event scale (seg/midpoint bounds)]])
        (let [[next-scale point] args
-             {{id :db/id scale :camera/scale camera :camera/point} :user/camera} user]
+             {{id :db/id scale :camera/scale camera :camera/point
+               {grid-type :scene/grid-type} :camera/scene} :user/camera} user
+             delta (-> (vec/mul point (/ next-scale (or scale 1)))
+                       (vec/sub point)
+                       (vec/div next-scale))]
          [{:db/id id
            :camera/scale next-scale
-           :camera/point
-           (-> (vec/mul point (/ next-scale (or scale 1)))
-               (vec/sub point)
-               (vec/div next-scale)
-               (vec/add camera))}])))))
+           :camera/point (vec/add (geom/iso-inverse grid-type delta) camera)}])))))
 
 (defmethod
   ^{:doc "Changes the zoom value for the current camera by offsetting it from
@@ -363,6 +363,20 @@
   [[:db.fn/call assoc-scene :scene/grid-size size]])
 
 (defmethod
+  ^{:doc "Updates the grid type (:square, :hex-pointy, or :hex-flat) for
+          the current scene."}
+  event-tx-fn :scene/change-grid-type
+  [_ _ type]
+  [[:db.fn/call assoc-scene :scene/grid-type type]])
+
+(defmethod
+  ^{:doc "Updates the grid rendering style (:line or :dot) for the
+          current scene."}
+  event-tx-fn :scene/change-grid-shape
+  [_ _ shape]
+  [[:db.fn/call assoc-scene :scene/grid-shape shape]])
+
+(defmethod
   ^{:doc "Applies both a grid origin and tile size to the current scene."}
   event-tx-fn :scene/apply-grid-options
   [data _ origin size]
@@ -445,11 +459,17 @@
           option is enabled."}
   [data _ idxs delta]
   (let [result (ds/entity data [:db/ident :user])
-        align? (-> result :user/camera :camera/scene :scene/grid-align)]
+        {align? :scene/grid-align
+         grid-type :scene/grid-type} (-> result :user/camera :camera/scene)
+        base-type (geom/base-grid-type grid-type)]
     (into [[:db/retract [:db/ident :user] :user/dragging]]
           (for [entity (ds/pull-many data translate-many-select idxs)
                 :let [{id :db/id point :object/point} entity]]
             (cond
+              (and align? (= base-type :hex-pointy) (= (:object/type entity) :token/token))
+              {:db/id id :object/point (vec/nearest-hex (vec/add point delta) hex-radius)}
+              (and align? (= base-type :hex-flat) (= (:object/type entity) :token/token))
+              {:db/id id :object/point (vec/nearest-hex-flat (vec/add point delta) hex-radius)}
               (and align? (= (:object/type entity) :token/token))
               (let [bounds (vec/rnd (vec/add (geom/object-bounding-rect entity) delta) grid-size)]
                 {:db/id id :object/point (seg/midpoint bounds)})
@@ -565,8 +585,10 @@
           shift :camera/point
           scale :camera/scale
           {scene :db/id
-           align? :scene/grid-align} :camera/scene} :user/camera} user
-        point (vec/add (vec/div point (or scale 1)) shift)]
+           align? :scene/grid-align
+           grid-type :scene/grid-type} :camera/scene} :user/camera} user
+        base-type (geom/base-grid-type grid-type)
+        point (vec/add (geom/screen->scene-vec point scale grid-type) shift)]
     (cond->
      [[:db/add scene :scene/tokens -1]
       [:db/add camera :camera/selected -1]
@@ -578,7 +600,11 @@
       (conj [:db/add -1 :token/label (:token-image/default-label image)])
       (not align?)
       (conj [:db/add -1 :object/point point])
-      align?
+      (and align? (= base-type :hex-pointy))
+      (conj [:db/add -1 :object/point (vec/nearest-hex point hex-radius)])
+      (and align? (= base-type :hex-flat))
+      (conj [:db/add -1 :object/point (vec/nearest-hex-flat point hex-radius)])
+      (and align? (not (#{:hex-pointy :hex-flat} base-type)))
       (conj
        [:db/add -1 :object/point
         (-> (vec/shift point (- half-size))
@@ -1026,7 +1052,8 @@
        [:camera/point :default vec/zero]
        {:camera/scene
         [:db/id
-         [:scene/grid-align :default false]]}]}]}
+         [:scene/grid-align :default false]
+         [:scene/grid-type :default :square]]}]}]}
    {:root/token-images [:image/hash]}
    {:root/props-images [:image/hash]}])
 
@@ -1043,10 +1070,11 @@
           {camera :db/id
            scale :camera/scale
            point :camera/point
-           {scene :db/id align? :scene/grid-align}
+           {scene :db/id align? :scene/grid-align grid-type :scene/grid-type}
            :camera/scene} :user/camera} :root/user
          token-images :root/token-images
          props-images :root/props-images} result
+        base-type (geom/base-grid-type grid-type)
         props-hashes (into #{} (map :image/hash) props-images)
         token-hashes (into #{} (map :image/hash) token-images)
         pastable-xf
@@ -1056,7 +1084,7 @@
                (props-hashes (:image/hash (:prop/image data))))))
         bound (transduce (mapcat geom/object-bounding-rect) geom/bounding-rect-rf clipboard)
         delta (vec/sub
-               (vec/add point (vec/div (seg/midpoint screen) scale))
+               (vec/add point (geom/screen->scene-vec (seg/midpoint screen) scale grid-type))
                (seg/midpoint bound))]
     (for [[idx copy] (sequence (comp pastable-xf (indexed)) clipboard)
           :let [{point :object/point
@@ -1074,7 +1102,11 @@
                        (assoc :object/point
                               (let [bounds (geom/object-bounding-rect copy)
                                     aligns (vec/rnd (vec/add bounds delta) grid-size)]
-                                (seg/midpoint aligns))))]]
+                                (seg/midpoint aligns)))
+                       (and (= type :token) align? (= base-type :hex-pointy))
+                       (assoc :object/point (vec/nearest-hex (vec/add point delta) hex-radius))
+                       (and (= type :token) align? (= base-type :hex-flat))
+                       (assoc :object/point (vec/nearest-hex-flat (vec/add point delta) hex-radius)))]]
       {:db/id camera
        :camera/selected idx
        :camera/scene
@@ -1124,14 +1156,14 @@
   (let [user (ds/entity data [:db/ident :user])
         {bounds :user/bounds
          {camera :db/id
-          {scene :db/id} :camera/scene
+          {scene :db/id grid-type :scene/grid-type} :camera/scene
           shift :camera/point
           scale :camera/scale} :user/camera} user]
     [{:db/id -1
       :object/type :note/note
       :object/point
       (-> (vec/sub point (.-a bounds))
-          (vec/div (or scale 1))
+          (geom/screen->scene-vec scale grid-type)
           (vec/add shift)
           (vec/shift -16)
           (vec/rnd))
@@ -1230,7 +1262,7 @@
           {camera-point :camera/point
            camera-scale :camera/scale
            camera-id :db/id
-           {scene-id :db/id}
+           {scene-id :db/id grid-type :scene/grid-type}
            :camera/scene}
           :user/camera} :root/user}
         (ds/entity data [:db/ident :root])
@@ -1240,7 +1272,7 @@
         xform
         (-> (matrix/translate matrix/identity camera-point)
             (matrix/translate (/ width -2) (/ height -2))
-            (matrix/scale (/ (or camera-scale 1)))
+            (matrix/multiply (geom/scene-scale-matrix camera-scale grid-type))
             (matrix/translate (vec/mul (.-a bounds) -1)))]
     (if (geom/point-within-rect? point bounds)
       [[:db/add -1 :object/point (xform point)]

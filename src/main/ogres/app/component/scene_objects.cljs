@@ -3,7 +3,7 @@
             [ogres.app.component :refer [icon]]
             [ogres.app.component.scene-context-menu :refer [context-menu]]
             [ogres.app.component.scene-pattern :refer [pattern]]
-            [ogres.app.const :refer [grid-size]]
+            [ogres.app.const :refer [grid-size hex-radius]]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.matrix :as matrix]
@@ -360,9 +360,10 @@
            height :image/height} :prop/image
           [{selected :camera/selected
             [{user :root/_user}] :user/_camera
-            zoom :camera/scale}] :camera/_selected} :entity} props
+            zoom :camera/scale
+            {grid-type :scene/grid-type} :camera/scene}] :camera/_selected} :entity} props
         url-image (hooks/use-image hash)
-        mod-scale (uix/use-memo (fn [] (modifiers/scale-fn zoom)) [zoom])
+        mod-scale (uix/use-memo (fn [] (modifiers/scale-fn zoom grid-type)) [zoom grid-type])
         transform (geom/object-transform (:entity props))
         selected (into #{} (map :db/id) selected)]
     (if (and (some? user) (not locked) (= #{id} selected))
@@ -386,12 +387,30 @@
         ($ :rect.scene-prop-bounds
           {:width width :height height})))))
 
+(def ^:private asset-object-types
+  "Object types whose own artwork must render undistorted on an isometric
+   scene -- tokens, notes, and props are all user-facing assets (images,
+   icons, UI-like widgets), unlike shapes, which represent board-plane
+   geometry and are meant to deform along with the projected grid."
+  #{:token/token :note/note :prop/prop})
+
 (defui ^:private object [props]
-  (case (:object/type (:entity props))
-    :token/token ($ object-token props)
-    :note/note ($ object-note props)
-    :prop/prop ($ object-prop props)
-    ($ object-shape props)))
+  (let [type (:object/type (:entity props))
+        grid-type (:grid-type props)
+        content (case type
+                  :token/token ($ object-token props)
+                  :note/note ($ object-note props)
+                  :prop/prop ($ object-prop props)
+                  ($ object-shape props))]
+    (if (and (geom/iso? grid-type) (contains? asset-object-types type))
+      ;; Counter-transform the asset's own content with the isometric
+      ;; inverse so its artwork stays undistorted -- no rotation, no
+      ;; squish -- while the position translate applied by this object's
+      ;; parent (unaffected by this wrapper) still correctly reflects the
+      ;; projected board location. Isometric assets, if desired, are the
+      ;; table's own art to provide; the framework does not stretch them.
+      ($ :g {:style {:transform (geom/iso-inverse-matrix grid-type)}} content)
+      content)))
 
 (defn ^:private use-drag-listener []
   (let [dispatch (hooks/use-dispatch)]
@@ -428,10 +447,24 @@
          portal :portal
          delta :delta
          is-outline :is-outline
-         is-aligned :is-aligned} props
-        is-aligning (and is-aligned (not= delta vec/zero))]
+         is-aligned :is-aligned
+         grid-type :grid-type} props
+        is-aligning (and is-aligned (not= delta vec/zero))
+        base-type (geom/base-grid-type grid-type)]
     ($ :<>
-      (if (and (= type :token/token) is-aligning)
+      (if (and (= type :token/token) is-aligning (= base-type :hex-pointy))
+        (let [center (vec/nearest-hex (vec/add point delta) hex-radius)
+              points (geom/hex-points center hex-radius)]
+          (dom/create-portal
+           ($ :polygon.scene-object-align
+             {:points (join " " (mapcat seq points))}) portal)))
+      (if (and (= type :token/token) is-aligning (= base-type :hex-flat))
+        (let [center (vec/nearest-hex-flat (vec/add point delta) hex-radius)
+              points (geom/hex-points-flat center hex-radius)]
+          (dom/create-portal
+           ($ :polygon.scene-object-align
+             {:points (join " " (mapcat seq points))}) portal)))
+      (if (and (= type :token/token) is-aligning (not (#{:hex-pointy :hex-flat} base-type)))
         (let [rect (vec/rnd (vec/add (geom/object-bounding-rect entity) delta) grid-size)]
           (dom/create-portal
            ($ :rect.scene-object-align
@@ -466,6 +499,7 @@
        [:camera/point :default vec/zero]
        {:camera/scene
         [[:scene/grid-align :default false]
+         [:scene/grid-type :default :square]
          [:scene/show-object-outlines :default true]
          {:scene/tokens
           [:db/id
@@ -502,6 +536,7 @@
            {:camera/_selected
             [[:camera/scale :default 1]
              :camera/selected
+             {:camera/scene [[:scene/grid-type :default :square]]}
              {:user/_camera [:root/_user]}]}]}
          {:scene/notes
           [:db/id
@@ -532,6 +567,7 @@
            selected :camera/selected
            {outline? :scene/show-object-outlines
             align? :scene/grid-align
+            grid-type :scene/grid-type
             shapes :scene/shapes
             tokens :scene/tokens
             props :scene/props
@@ -605,14 +641,15 @@
                              :data-color (:user/color user)
                              :data-type (name (keyword (namespace (:object/type entity))))
                              :data-id id}
-                            ($ object {:entity entity})
+                            ($ object {:entity entity :grid-type grid-type})
                             (if-let [portal (deref portal)]
                               ($ object-hint
                                 {:entity entity
                                  :portal portal
                                  :delta delta
                                  :is-outline outline?
-                                 :is-aligned align?})))))))))))))
+                                 :is-aligned align?
+                                 :grid-type grid-type})))))))))))))
       ($ hooks/use-portal {:name :selected}
         (let [select (filter (comp selected :db/id) entities)
               bounds (transduce bound-xf geom/bounding-rect-rf entities)
@@ -657,17 +694,20 @@
                                      :data-drag-local (.-isDragging drag)
                                      :data-color (:user/color user)
                                      :data-id id}
-                                    ($ object {:entity entity})
+                                    ($ object {:entity entity :grid-type grid-type})
                                     (if-let [portal (deref portal)]
                                       ($ object-hint
                                         {:entity entity
                                          :portal portal
                                          :delta delta
                                          :is-outline outline?
-                                         :is-aligned align?})))))))))))
+                                         :is-aligned align?
+                                         :grid-type grid-type})))))))))))
                   (if (seq select)
                     (let [sz 400
-                          xf (matrix/scale matrix/identity scale)
+                          xf (cond-> (matrix/scale matrix/identity scale)
+                               (geom/iso? grid-type)
+                               (matrix/multiply (geom/iso-forward-matrix grid-type)))
                           bn (xf bounds)]
                       ($ :foreignObject.context-menu-object
                         {:x (.-x (vec/shift (seg/midpoint bn) (/ sz -2)))

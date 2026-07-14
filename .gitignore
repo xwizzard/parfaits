@@ -28,3 +28,16 @@ manifest.edn
 cljs-runtime
 ogres.app.js
 ogres.app.css
+
+# Local-only dev shim: symlinks so non-"localhost" hostnames (LAN IP, VPN
+# address, etc.) can also load the shadow-cljs dev build via index.html's
+# release-detection fallback path. Not part of the app; never committed.
+/web/release/latest/
+
+# Licensed third-party game assets (e.g. worldhaven/any2cards images) must
+# never be committed to or bundled with this project. Any local development
+# mount, symlink, cache, or config referencing such sources stays local-only.
+/dev-assets/
+/local-assets/
+local.edn
+.env.local

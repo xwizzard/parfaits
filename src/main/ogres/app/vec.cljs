@@ -89,3 +89,42 @@
       (Vec2. (.-x t) (.-y t)))))
 
 (def zero (Vec2. 0 0))
+
+(defn nearest-hex
+  "Given a point and a hexagon radius (the distance from center to a
+   vertex), returns the center of the nearest pointy-top hexagon as a Vec2.
+   Hexagons tile in rows spaced `1.5 * radius` apart vertically; odd rows
+   are offset horizontally by half a hexagon's width. This matches the
+   layout of real Gloomhaven/Frosthaven board tiles, and is the hex
+   analogue of `rnd` for the square grid. Ported from the brute-force
+   nearest-center search in worldhaven-asset-browser/public/builder.js."
+  [point radius]
+  (let [x (.-x point)
+        y (.-y point)
+        hex-w (* (js/Math.sqrt 3) radius)
+        row-h (* 1.5 radius)
+        approx-row (js/Math.round (/ y row-h))
+        candidates
+        (for [r (range (- approx-row 1) (+ approx-row 2))
+              :let [x-off (if (zero? (clojure.core/mod r 2)) 0 (/ hex-w 2))
+                    cy (* r row-h)
+                    approx-col (js/Math.round (/ (- x x-off) hex-w))]
+              c (range (- approx-col 1) (+ approx-col 2))
+              :let [cx (+ (* c hex-w) x-off)
+                    dx (- cx x)
+                    dy (- cy y)]]
+          [(Vec2. cx cy) (+ (* dx dx) (* dy dy))])]
+    (first (apply min-key second candidates))))
+
+(defn nearest-hex-flat
+  "Given a point and a hexagon radius, returns the center of the nearest
+   flat-top hexagon as a Vec2. A flat-top hex grid is a pointy-top hex
+   grid rotated 90 degrees: hexagons tile in offset columns spaced
+   `1.5 * radius` apart horizontally instead of offset rows. Rather than
+   re-deriving the geometry, this swaps x and y, delegates to `nearest-hex`
+   (which handles the offset-lattice math), then swaps back -- valid
+   because transposing both axes of a honeycomb yields another honeycomb
+   with the same edge structure, just rotated."
+  [point radius]
+  (let [swapped (nearest-hex (Vec2. (.-y point) (.-x point)) radius)]
+    (Vec2. (.-y swapped) (.-x swapped))))

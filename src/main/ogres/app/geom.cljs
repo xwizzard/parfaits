@@ -1,12 +1,121 @@
 (ns ogres.app.geom
   (:require [clojure.math :refer [floor ceil]]
-            [ogres.app.const :refer [grid-size half-size]]
+            [ogres.app.const :refer [grid-size half-size hex-radius hex-width hex-row]]
             [ogres.app.matrix :as matrix]
             [ogres.app.segment :as seg :refer [Segment]]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
 (def ^:const deg45->rad (/ js/Math.PI 4))
 (def ^:const deg45->sin (js/Math.sin deg45->rad))
+
+(def ^:private iso-square-forward
+  "The fixed isometric projection for square grids: rotate 45 degrees, then
+   scale the Y axis by half (the classic 2:1 dimetric diamond look). Has no
+   translation component, which is what allows the same substitution to
+   work for both absolute points and pure deltas everywhere it's used."
+  (matrix/from-coeffs deg45->sin (* 0.5 deg45->sin)
+                       (- deg45->sin) (* 0.5 deg45->sin)
+                       0 0))
+
+(def ^:private iso-square-inverse
+  (matrix/inverse iso-square-forward))
+
+(def ^:private iso-hex-forward
+  "The fixed isometric projection for hex grids: just a vertical squish (Y
+   scaled by half), with NO rotation -- rotating 45 degrees doesn't align
+   with a hexagon's 6-fold symmetry the way it does with a square's 4-fold
+   symmetry, so hex grids are simply squished flat rather than turned into
+   a diamond."
+  (matrix/from-coeffs 1 0 0 0.5 0 0))
+
+(def ^:private iso-hex-inverse
+  (matrix/inverse iso-hex-forward))
+
+(def ^:private iso-square-vertical-forward
+  "A 90-degree-rotated 'vertical' variant of `iso-square-forward` -- rarely
+   used, but some scenarios read better as a portrait diamond instead of
+   the classic landscape one. Composed from the existing forward matrix
+   rather than re-derived by hand, so it inherits the same correctness."
+  (matrix/multiply (matrix/rotate matrix/identity 90) iso-square-forward))
+
+(def ^:private iso-square-vertical-inverse
+  (matrix/inverse iso-square-vertical-forward))
+
+(def ^:private iso-hex-vertical-forward
+  "A 90-degree-rotated 'vertical' variant of `iso-hex-forward` -- squishes
+   the X axis instead of Y, giving a tall/narrow hex instead of a
+   wide/flat one."
+  (matrix/multiply (matrix/rotate matrix/identity 90) iso-hex-forward))
+
+(def ^:private iso-hex-vertical-inverse
+  (matrix/inverse iso-hex-vertical-forward))
+
+(def ^:private iso-grid-types
+  #{:iso-square :iso-hex-pointy :iso-hex-flat
+    :iso-square-vertical :iso-hex-pointy-vertical :iso-hex-flat-vertical})
+
+(defn iso?
+  "True if the given :scene/grid-type is one of the isometric variants."
+  [grid-type]
+  (contains? iso-grid-types grid-type))
+
+(defn base-grid-type
+  "Maps an isometric grid-type to the base grid-type whose pattern/snapping
+   logic it reuses (e.g. :iso-hex-pointy -> :hex-pointy). Non-iso grid-types
+   are returned unchanged."
+  [grid-type]
+  (case grid-type
+    (:iso-square :iso-square-vertical) :square
+    (:iso-hex-pointy :iso-hex-pointy-vertical) :hex-pointy
+    (:iso-hex-flat :iso-hex-flat-vertical) :hex-flat
+    grid-type))
+
+(defn iso-forward-matrix
+  "The fixed isometric projection Matrix for the given grid-type, or nil if
+   grid-type isn't an iso variant."
+  [grid-type]
+  (case grid-type
+    :iso-square iso-square-forward
+    :iso-square-vertical iso-square-vertical-forward
+    (:iso-hex-pointy :iso-hex-flat) iso-hex-forward
+    (:iso-hex-pointy-vertical :iso-hex-flat-vertical) iso-hex-vertical-forward
+    nil))
+
+(defn iso-inverse-matrix
+  "The inverse of `iso-forward-matrix` for the given grid-type, or nil if
+   grid-type isn't an iso variant. Computed by DOMMatrix itself rather than
+   by hand -- used to convert a screen-space point/delta on an iso scene
+   back into the scene's pre-projection logical coordinates."
+  [grid-type]
+  (case grid-type
+    :iso-square iso-square-inverse
+    :iso-square-vertical iso-square-vertical-inverse
+    (:iso-hex-pointy :iso-hex-flat) iso-hex-inverse
+    (:iso-hex-pointy-vertical :iso-hex-flat-vertical) iso-hex-vertical-inverse
+    nil))
+
+(defn iso-inverse
+  "Applies the isometric inverse projection to v when grid-type is an iso
+   variant; otherwise returns v unchanged."
+  [grid-type v]
+  (if-let [m (iso-inverse-matrix grid-type)] (m v) v))
+
+(defn screen->scene-vec
+  "Converts a screen-space vector (an absolute point already relative to
+   the viewport origin, or a pure delta) into scene-space units, accounting
+   for camera scale and, for iso grid-types, the fixed isometric
+   projection. Safe for both points and deltas since the projection has no
+   translation component."
+  [v scale grid-type]
+  (iso-inverse grid-type (vec/div v (or scale 1))))
+
+(defn scene-scale-matrix
+  "The Matrix equivalent of `screen->scene-vec`'s scaling step, for
+   composing into existing matrix/translate chains (e.g. :props/create,
+   the scene_draw drawing tools) in place of a plain `matrix/scale`."
+  [scale grid-type]
+  (let [s (matrix/scale matrix/identity (/ 1 (or scale 1)))]
+    (if-let [m (iso-inverse-matrix grid-type)] (matrix/multiply m s) s)))
 
 (defn clockwise-triangle?
   [a b c]
@@ -64,6 +173,82 @@
         bx (* hyp (js/Math.cos (+ rad 0.46)))
         by (* hyp (js/Math.sin (+ rad 0.46)))]
     [src (vec/add src (Vec2. ax ay)) (vec/add src (Vec2. bx by))]))
+
+(def hex-pattern-path
+  "An SVG path `d` string for one repeating tile of a pointy-top hexagonal
+   grid, sized to `hex-radius`. Intended as the content of an SVG <pattern>
+   whose width is `hex-width` and height is `(* 2 hex-row)` (one full
+   vertical period of the offset-row hex layout, matching real
+   Gloomhaven/Frosthaven board tiles).
+
+   Each hexagon contributes only its upper-left diagonal, upper-right
+   diagonal, and right vertical edge; the remaining three edges (left
+   vertical, bottom-left diagonal, bottom-right diagonal) are supplied by
+   neighboring hexes' own copies of this same drawing once the pattern
+   tiles, so no edge is ever stroked twice. Candidates are enumerated with
+   a generous margin (extra rows/columns whose geometry falls entirely
+   outside the tile are harmless — they contribute no visible pixels)."
+  (apply str
+         (for [row (range 3)
+               col (range -1 3)
+               :let [x-off (if (odd? row) (/ hex-width 2) 0)
+                     cx (+ (* col hex-width) x-off)
+                     cy (* row hex-row)
+                     v5x (- cx (/ hex-width 2)) v5y (- cy (/ hex-radius 2))
+                     v0x cx                     v0y (- cy hex-radius)
+                     v1x (+ cx (/ hex-width 2)) v1y (- cy (/ hex-radius 2))
+                     v2x (+ cx (/ hex-width 2)) v2y (+ cy (/ hex-radius 2))]]
+           (str "M" v5x "," v5y
+                "L" v0x "," v0y
+                "L" v1x "," v1y
+                "L" v2x "," v2y " "))))
+
+(def hex-pattern-path-flat
+  "An SVG path `d` string for one repeating tile of a flat-top hexagonal
+   grid, sized to `hex-radius`. Intended as the content of an SVG <pattern>
+   whose width is `(* 2 hex-row)` and height is `hex-width` -- the
+   transpose of `hex-pattern-path`'s tile.
+
+   A flat-top hex grid is a pointy-top hex grid rotated 90 degrees:
+   hexagons tile in offset columns instead of offset rows. This reuses the
+   exact same candidate generation as `hex-pattern-path` (same edge
+   ownership: upper-left diagonal, upper-right diagonal, right vertical)
+   but swaps x and y in the emitted coordinates, which is a valid tiling
+   because transposing both axes of a honeycomb preserves which edges
+   belong to which hexagon -- it just rotates the whole pattern."
+  (apply str
+         (for [row (range 3)
+               col (range -1 3)
+               :let [x-off (if (odd? row) (/ hex-width 2) 0)
+                     cx (+ (* col hex-width) x-off)
+                     cy (* row hex-row)
+                     v5x (- cx (/ hex-width 2)) v5y (- cy (/ hex-radius 2))
+                     v0x cx                     v0y (- cy hex-radius)
+                     v1x (+ cx (/ hex-width 2)) v1y (- cy (/ hex-radius 2))
+                     v2x (+ cx (/ hex-width 2)) v2y (+ cy (/ hex-radius 2))]]
+           (str "M" v5y "," v5x
+                "L" v0y "," v0x
+                "L" v1y "," v1x
+                "L" v2y "," v2x " "))))
+
+(defn hex-points
+  "Returns the 6 vertices of a pointy-top hexagon centered at `center`
+   with the given radius, as a vector of Vec2s, suitable for an SVG
+   <polygon points=\"...\">. Vertex angles match `hex-pattern-path`."
+  [center radius]
+  (vec (for [i (range 6)
+             :let [rad (* (/ js/Math.PI 180) (- (* 60 i) 90))]]
+         (vec/add center (Vec2. (* radius (js/Math.cos rad)) (* radius (js/Math.sin rad)))))))
+
+(defn hex-points-flat
+  "Returns the 6 vertices of a flat-top hexagon centered at `center` with
+   the given radius, as a vector of Vec2s -- the transpose of
+   `hex-points`, matching how `hex-pattern-path-flat` is derived from
+   `hex-pattern-path`."
+  [center radius]
+  (vec (for [i (range 6)
+             :let [rad (* (/ js/Math.PI 180) (- (* 60 i) 90))]]
+         (vec/add center (Vec2. (* radius (js/Math.sin rad)) (* radius (js/Math.cos rad)))))))
 
 (defn tile-points [point]
   [point

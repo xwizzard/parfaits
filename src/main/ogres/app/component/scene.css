@@ -239,6 +239,12 @@
   stroke: var(--scene-stroke);
 }
 
+.scene-grid-dot {
+  fill: var(--scene-stroke);
+  fill-opacity: 0.6;
+  stroke: none;
+}
+
 .scene {
   &.appear {
     opacity: 0;

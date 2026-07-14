@@ -1,8 +1,11 @@
 (ns events-test
   (:require [cljs.test :refer-macros [deftest is]]
             [datascript.core :as ds :refer [transact! entity]]
+            [ogres.app.const :refer [grid-size half-size hex-radius]]
             [ogres.app.events :refer [event-tx-fn]]
-            [ogres.app.provider.state :refer [initial-data]]))
+            [ogres.app.geom :as geom]
+            [ogres.app.provider.state :refer [initial-data]]
+            [ogres.app.vec :as vec :refer [Vec2]]))
 
 (defn dispatch [conn event & args]
   (transact! conn [[:db.fn/call (fn [db] (apply event-tx-fn db event args))]]))
@@ -51,3 +54,66 @@
     (let [{conns :session/conns} (entity @conn [:db/ident :session])]
       (is (every? (comp not #{sc} :db/id :camera/scene :user/camera) conns)
           "Users remain on the scene even if the host changes theirs."))))
+
+(deftest test-hex-pointy-grid-token-create
+  (let [conn (ds/conn-from-db (initial-data true))
+        point (Vec2. 3 -2)]
+    (dispatch conn :scene/toggle-grid-align true)
+    (dispatch conn :scene/change-grid-type :hex-pointy)
+    (dispatch conn :token/create point nil)
+    (let [scene (:camera/scene (:user/camera (user conn)))
+          token (first (:scene/tokens scene))]
+      (is (= (:scene/grid-type scene) :hex-pointy)
+          "The scene's grid type was updated.")
+      (is (= (:object/point token) (vec/nearest-hex point hex-radius))
+          "A token created while aligned to a pointy-top hex grid snaps to
+           the nearest hex center rather than the nearest square cell."))))
+
+(deftest test-hex-flat-grid-token-create
+  (let [conn (ds/conn-from-db (initial-data true))
+        point (Vec2. 3 -2)]
+    (dispatch conn :scene/toggle-grid-align true)
+    (dispatch conn :scene/change-grid-type :hex-flat)
+    (dispatch conn :token/create point nil)
+    (let [scene (:camera/scene (:user/camera (user conn)))
+          token (first (:scene/tokens scene))]
+      (is (= (:scene/grid-type scene) :hex-flat)
+          "The scene's grid type was updated.")
+      (is (= (:object/point token) (vec/nearest-hex-flat point hex-radius))
+          "A token created while aligned to a flat-top hex grid snaps to
+           the nearest hex center rather than the nearest square cell."))))
+
+(deftest test-iso-square-grid-token-create
+  (let [conn (ds/conn-from-db (initial-data true))
+        point (Vec2. 3 -2)]
+    (dispatch conn :scene/toggle-grid-align true)
+    (dispatch conn :scene/change-grid-type :iso-square)
+    (dispatch conn :token/create point nil)
+    (let [scene (:camera/scene (:user/camera (user conn)))
+          token (first (:scene/tokens scene))
+          logical (geom/screen->scene-vec point 1 :iso-square)
+          expected (-> (vec/shift logical (- half-size))
+                       (vec/rnd grid-size)
+                       (vec/shift half-size))]
+      (is (= (:scene/grid-type scene) :iso-square)
+          "The scene's grid type was updated.")
+      (is (= (:object/point token) expected)
+          "A token created on an isometric square grid converts the click
+           through the isometric inverse before snapping to the nearest
+           square cell."))))
+
+(deftest test-iso-hex-pointy-grid-token-create
+  (let [conn (ds/conn-from-db (initial-data true))
+        point (Vec2. 3 -2)]
+    (dispatch conn :scene/toggle-grid-align true)
+    (dispatch conn :scene/change-grid-type :iso-hex-pointy)
+    (dispatch conn :token/create point nil)
+    (let [scene (:camera/scene (:user/camera (user conn)))
+          token (first (:scene/tokens scene))
+          logical (geom/screen->scene-vec point 1 :iso-hex-pointy)]
+      (is (= (:scene/grid-type scene) :iso-hex-pointy)
+          "The scene's grid type was updated.")
+      (is (= (:object/point token) (vec/nearest-hex logical hex-radius))
+          "A token created on an isometric pointy-top hex grid converts the
+           click through the isometric inverse before snapping to the
+           nearest hex center."))))

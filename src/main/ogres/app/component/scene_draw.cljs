@@ -122,6 +122,7 @@
       [[:scene/grid-align :default false]
        [:scene/grid-origin :default vec/zero]
        [:scene/grid-size :default grid-size]
+       [:scene/grid-type :default :square]
        [:scene/show-object-outlines :default true]]}]}])
 
 (defui ^:private draw-segment [props]
@@ -132,11 +133,12 @@
          {point :camera/point
           scale :camera/scale
           {grid-paths :scene/show-object-outlines
-           grid-align :scene/grid-align}
+           grid-align :scene/grid-align
+           grid-type :scene/grid-type}
           :camera/scene}
          :user/camera} result
         align (if grid-align align-fn align-identity)
-        basis  (matrix/scale (matrix/translate matrix/identity point) (/ scale))
+        basis  (matrix/multiply (matrix/translate matrix/identity point) (geom/scene-scale-matrix scale grid-type))
         camera (matrix/translate basis (vec/mul (.-a bounds) -1))
         invert (matrix/inverse basis)]
     ($ draw-segment-drag
@@ -162,11 +164,12 @@
         {bounds :user/bounds
          {point :camera/point
           scale :camera/scale
-          {align? :scene/grid-align} :camera/scene} :user/camera} result
+          {align? :scene/grid-align
+           grid-type :scene/grid-type} :camera/scene} :user/camera} result
         [points set-points] (uix/use-state [])
         [cursor set-cursor] (uix/use-state nil)
         closing? (and (seq points) (some? cursor) (< (vec/dist (first points) cursor) 32))
-        basis  (matrix/scale (matrix/translate matrix/identity point) (/ scale))
+        basis  (matrix/multiply (matrix/translate matrix/identity point) (geom/scene-scale-matrix scale grid-type))
         camera (matrix/translate basis (vec/mul (.-a bounds) -1))
         invert (matrix/inverse basis)]
     ($ :<>
@@ -319,7 +322,8 @@
          {shift :camera/point
           scale   :camera/scale
           {prev-size :scene/grid-size
-           prev-origin :scene/grid-origin}
+           prev-origin :scene/grid-origin
+           grid-type :scene/grid-type}
           :camera/scene} :user/camera} (hooks/use-query query)
         [origin set-origin] (uix/use-state nil)
         [size     set-size] (uix/use-state prev-size)
@@ -349,7 +353,7 @@
                    (dispatch
                     :scene/apply-grid-options
                     (-> (vec/sub origin basis)
-                        (vec/div scale)
+                        (geom/screen->scene-vec scale grid-type)
                         (vec/add shift)
                         (vec/add (or prev-origin vec/zero))
                         (vec/mul (/ prev-size size))

@@ -21,6 +21,8 @@
        {:camera/scene
         [:db/id
          [:scene/grid-size :default grid-size]
+         [:scene/grid-type :default :square]
+         [:scene/grid-shape :default :line]
          [:scene/show-grid :default true]
          [:scene/grid-align :default false]
          [:scene/dark-mode :default false]
@@ -36,6 +38,21 @@
   [["Revealed" :revealed "sun-fill"]
    ["Obscured" :dimmed "cloud-sun-fill"]
    ["Hidden" :hidden "moon-fill"]])
+
+(def ^:private options-grid-type
+  [["Square" :square "square"]
+   ["Hex (Pointy)" :hex-pointy "hexagon"]
+   ["Hex (Flat)" :hex-flat "hexagon-flat"]
+   ["Iso Square" :iso-square "square"]
+   ["Iso Hex (Pointy)" :iso-hex-pointy "hexagon"]
+   ["Iso Hex (Flat)" :iso-hex-flat "hexagon-flat"]
+   ["Iso Square (Vertical)" :iso-square-vertical "square"]
+   ["Iso Hex Pointy (Vertical)" :iso-hex-pointy-vertical "hexagon"]
+   ["Iso Hex Flat (Vertical)" :iso-hex-flat-vertical "hexagon-flat"]])
+
+(def ^:private options-grid-shape
+  [["Lines" :line "dash"]
+   ["Dots" :dot "circle"]])
 
 (def ^:private per-page 6)
 
@@ -223,6 +240,45 @@
             {:id preview
              :on-change set-preview
              :on-close (fn [] (set-preview nil))})))
+      ($ :fieldset.fieldset.fieldset--radio
+        ($ :legend "Grid type")
+        ($ :.input-group
+          (for [[label value icon-name] options-grid-type
+                :let [on-change #(dispatch :scene/change-grid-type value)]]
+            ($ :<> {:key value}
+              ($ :label.radio
+                ($ :input
+                  {:type "radio"
+                   :name "grid-type"
+                   :value value
+                   :checked (= (:scene/grid-type scene) value)
+                   :on-change on-change})
+                ($ icon {:name icon-name :size 16})
+                label))))
+        ($ :details
+          ($ :summary "More Information")
+          "Square grids suit most tabletop systems. Hex grids match the
+           layout of games like Gloomhaven and Frosthaven."))
+      ($ :fieldset.fieldset.fieldset--radio
+        ($ :legend "Grid style")
+        ($ :.input-group
+          (for [[label value icon-name] options-grid-shape
+                :let [on-change #(dispatch :scene/change-grid-shape value)]]
+            ($ :<> {:key value}
+              ($ :label.radio
+                ($ :input
+                  {:type "radio"
+                   :name "grid-shape"
+                   :value value
+                   :checked (= (:scene/grid-shape scene) value)
+                   :on-change on-change})
+                ($ icon {:name icon-name :size 16})
+                label))))
+        ($ :details
+          ($ :summary "More Information")
+          "Lines draw the full grid. Dots mark only the position each
+           token or shape will snap to, useful when you don't want the
+           grid to obscure the scene image."))
       ($ :fieldset.fieldset
         ($ :legend "Tile size ( px )")
         ($ :input.text.text-ghost
