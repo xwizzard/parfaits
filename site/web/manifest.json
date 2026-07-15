@@ -14,7 +14,7 @@
             "type": "image/png"
         }
     ],
-    "name": "Ogres Tabletop",
+    "name": "Parfaits Virtual Tabletop",
     "scope": "/",
     "screenshots": [
         {
@@ -35,7 +35,7 @@
             "form_factor": "narrow"
         }
     ],
-    "short_name": "Ogres",
+    "short_name": "Parfaits",
     "start_url": "/",
     "theme_color": "#312e81"
 }
