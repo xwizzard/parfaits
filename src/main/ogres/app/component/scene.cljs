@@ -7,6 +7,7 @@
             [ogres.app.component.scene-objects :refer [objects]]
             [ogres.app.component.scene-pattern :refer [pattern]]
             [ogres.app.const :refer [grid-size half-size hex-width hex-row token-radius]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.modifiers :as modifiers]
@@ -104,6 +105,8 @@
     [{:camera/scene
       [[:scene/masked :default false]
        [:scene/lighting :default :revealed]
+       {:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}
        {:scene/masks
         [:db/id
          [:mask/vecs :default []]
@@ -119,8 +122,15 @@
         {host :user/host
          {{tokens :scene/tokens
            masks  :scene/masks
-           light  :scene/lighting
-           masked :scene/masked} :camera/scene} :user/camera} result]
+           lighting :scene/lighting
+           masked :scene/masked
+           game-type-entity :scene/game-type} :camera/scene} :user/camera} result
+        ;; See scene-content's `light` binding -- disabling :unit/light
+        ;; overrides the darkness/masking system back to :revealed here too,
+        ;; so the two stay in lockstep regardless of which one re-renders.
+        light (if (contains? (:game-type/enabled-elements game-type-entity #{}) :unit/light)
+                lighting
+                :revealed)]
     ($ :defs
       ($ pattern {:id "mask-pattern" :name :crosses})
       ($ :path {:id "masks-path" :d (transduce mask-area-xf poly->path masks)})
@@ -316,9 +326,14 @@
         exclu #{:player :dead}]
     (take 4 (filter (difference (token-flags data) exclu) order))))
 
-(defui ^:private token [{:keys [node data]}]
+(defui ^:private token [{:keys [node data base-scale] :or {base-scale 1}}]
   (let [radius token-radius
-        scale (/ (:token/size data) 5)
+        ;; `base-scale` is the scene's per-grid-type "Token scale" setting
+        ;; (panel_scene.cljs) -- it multiplies uniformly on top of this
+        ;; token's own :token/size, the same way both feed into every use
+        ;; of `scale` below (the token's shape, aura anchor, and ring all
+        ;; stay proportional to one another regardless of which one moved).
+        scale (* (/ (:token/size data) 5) base-scale)
         hash (:image/hash (:image/thumbnail (:token/image data)))
         fill (if (some? hash) (str "token-face-" hash) "token-face-default")]
     ($ :g.scene-token
@@ -349,7 +364,9 @@
   [[:user/host :default true]
    {:user/camera
     [{:camera/scene
-      [{:scene/tokens
+      [[:scene/grid-type :default :square]
+       [:scene/token-scale :default {}]
+       {:scene/tokens
         [:db/id
          [:initiative/suffix :default nil]
          [:object/point :default vec/zero]
@@ -364,7 +381,12 @@
 
 (defui ^:private tokens-defs []
   (let [result (hooks/use-query tokens-defs-query)
-        tokens (-> result :user/camera :camera/scene :scene/tokens)]
+        scene  (-> result :user/camera :camera/scene)
+        tokens (:scene/tokens scene)
+        ;; The base-scale multiplier is tuned per grid-type (see
+        ;; panel_scene.cljs's "Token scale" fieldset), so it comes from
+        ;; whichever grid-type the scene is currently on.
+        base-scale (/ (get (:scene/token-scale scene) (:scene/grid-type scene) 100) 100)]
     ($ :defs
       ($ :filter {:id "token-status-dead" :filterRes 1 :color-interpolation-filters "sRGB"}
         ($ :feColorMatrix {:in "SourceGraphic" :type "saturate" :values 0 :result "Next"})
@@ -403,7 +425,7 @@
       ($ TransitionGroup {:component nil}
         (for [{id :db/id :as data} tokens :let [node (uix/create-ref)]]
           ($ Transition {:key id :nodeRef node :timeout 240}
-            ($ token {:node node :data data})))))))
+            ($ token {:node node :data data :base-scale base-scale})))))))
 
 (def ^:private player-cursors-query
   [{:root/user [{:user/camera [:camera/scene]}]}
@@ -556,6 +578,8 @@
        [:scene/grid-type :default :square]
        [:scene/lighting :default :revealed]
        [:scene/masked :default false]
+       {:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}
        {:scene/image [:image/hash]}]}]}])
 
 (defui ^:private scene-content [props]
@@ -566,13 +590,26 @@
           mode  :camera/draw-mode
           point :camera/point} :user/camera} (:data props)
         grid-type (:scene/grid-type scene)
+        enabled-elements (:game-type/enabled-elements (:scene/game-type scene) #{})
+        ;; A game-type with no grid layout enabled overrides "Show grid"
+        ;; unconditionally -- the grid is hidden regardless of the
+        ;; scene's own stored preference, and that preference is never
+        ;; destructively overwritten, so re-enabling a grid layout on the
+        ;; game-type makes it reappear without any extra "restore" step.
+        has-grid? (pos? (game-type/grid-count enabled-elements))
+        ;; Likewise, disabling :unit/light overrides the scene's lighting
+        ;; mode back to :revealed unconditionally -- the darkness/masking
+        ;; system and per-token light radii are one feature (see
+        ;; panel_scene.cljs and scene_context_menu.cljs), and its stored
+        ;; :scene/lighting value is never destructively overwritten either.
+        light (if (contains? enabled-elements :unit/light) (:scene/lighting scene) :revealed)
         multi-select? (use-key "shift")]
     ($ :svg.scene
       {:ref (:ref props)
        :data-user   (if host "host" "conn")
-       :data-grid   (and (not= mode :grid) (:scene/show-grid scene))
+       :data-grid   (and (not= mode :grid) (:scene/show-grid scene) has-grid?)
        :data-theme  (if (:scene/dark-mode scene) "dark" "light")
-       :data-light  (name (:scene/lighting scene))
+       :data-light  (name light)
        :data-masked (:scene/masked scene)}
       ($ :g.scene-handler {:data-type "scene" :tab-index 0 :style {:outline "none"}})
       ($ scene-camera

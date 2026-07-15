@@ -40,3 +40,13 @@
        (if (not= (f cur) val)
          (reduced false)
          true)) true (rest coll))))
+
+(defn download
+  "Triggers a browser file download of `data` (a Blob) as `filename`."
+  [data filename]
+  (let [anchor (js/document.createElement "a")
+        url    (js/URL.createObjectURL data)]
+    (set! anchor -href url)
+    (set! anchor -download filename)
+    (.click anchor)
+    (.remove anchor)))

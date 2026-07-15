@@ -1,6 +1,7 @@
 (ns ogres.app.component.panel
   (:require [ogres.app.component :refer [icon]]
             [ogres.app.component.panel-data :as data]
+            [ogres.app.component.panel-game-type-builder :as game-type-builder]
             [ogres.app.component.panel-initiative :as initiative]
             [ogres.app.component.panel-lobby :as lobby]
             [ogres.app.component.panel-scene :as scene]
@@ -11,8 +12,13 @@
 
 (def ^:private query
   [[:user/host :default true]
+   [:user/mode :default :setup]
    [:panel/selected :default :tokens]
-   [:panel/expanded :default true]])
+   [:panel/expanded :default true]
+   {:user/camera
+    [{:camera/scene
+      [{:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}]}]}])
 
 (def ^:private query-status
   [{:root/user [:user/host [:session/status :default :initial]]
@@ -41,11 +47,8 @@
    :lobby      {:icon "people-fill" :label "Online options"}
    :scene      {:icon "easel" :label "Scene options"}
    :tokens     {:icon "person-circle" :label "Token images"}
-   :props      {:icon "images" :label "Prop images"}})
-
-(def ^:private forms
-  {true  [:tokens :scene :props :initiative :lobby :data]
-   false [:tokens :initiative :lobby]})
+   :props      {:icon "images" :label "Prop images"}
+   :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
   {:data       {:form data/panel}
@@ -53,14 +56,39 @@
    :lobby      {:form lobby/panel :footer lobby/actions}
    :scene      {:form scene/panel}
    :tokens     {:form tokens/panel :footer tokens/actions}
-   :props      {:form props/panel :footer props/actions}})
+   :props      {:form props/panel :footer props/actions}
+   :game-type-builder {:form game-type-builder/panel}})
+
+(defn ^:private visible-tabs
+  "The ordered list of visible panel tab keys for the given host status,
+   interface mode, and the active scene's game-type enabled-elements set.
+   Builder mode shows only the game-type editor, decoupled from any scene.
+   Play mode drops the setup-only tabs. The Initiative tab additionally
+   requires the active game-type to have :system/initiative-roll enabled,
+   in either mode -- if a game type doesn't use that system at all, the
+   tab shouldn't appear while setting up the scene either."
+  [host mode enabled-elements]
+  (cond
+    (not host) [:tokens :initiative :lobby]
+    (= mode :builder) [:game-type-builder]
+    :else
+    (cond-> (if (= mode :play)
+              [:tokens :initiative :lobby]
+              [:tokens :scene :props :initiative :lobby :data])
+      (not (contains? enabled-elements :system/initiative-roll))
+      (->> (remove #{:initiative}) vec))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)
         result   (hooks/use-query query)
         {host :user/host
+         mode :user/mode
          selected :panel/selected
-         expanded :panel/expanded} result]
+         expanded :panel/expanded
+         {{{enabled-elements :game-type/enabled-elements}
+           :scene/game-type} :camera/scene} :user/camera} result
+        tabs     (visible-tabs host mode enabled-elements)
+        selected (if ((set tabs) selected) selected (first tabs))]
     ($ :.panel
       {:data-expanded expanded}
       (if expanded
@@ -70,7 +98,7 @@
         {:role "tablist"
          :aria-controls "form-panel"
          :aria-orientation "vertical"}
-        (for [[key data] (map (juxt identity data) (forms host))
+        (for [[key data] (map (juxt identity data) tabs)
               :let [selected (= selected key)]]
           ($ :li.panel-tabs-tab
             {:key key :role "tab" :aria-selected (and expanded selected)}

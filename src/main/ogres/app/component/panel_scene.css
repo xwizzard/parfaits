@@ -217,6 +217,22 @@
   }
 }
 
+.scene-token-scale {
+  display: flex;
+  gap: 6px;
+
+  input {
+    text-align: center;
+    width: auto;
+  }
+
+  .button {
+    flex: 0 0 auto;
+    min-height: auto;
+    padding: 6px;
+  }
+}
+
 .scene-gallery-grid-align {
   button {
     align-items: center;

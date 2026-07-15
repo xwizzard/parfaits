@@ -42,19 +42,43 @@
   [:session/_host
    :user/clipboard
    [:user/host :default true]
+   [:user/mode :default :setup]
    {:user/camera
     [:camera/selected
      [:camera/draw-mode :default :select]
-     [:camera/scale :default 1]]}])
+     [:camera/scale :default 1]
+     {:camera/scene
+      [{:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}]}]}])
+
+(def ^:private mode-options
+  [["Game Builder" :builder "sliders"]
+   ["Setup" :setup "easel"]
+   ["Play" :play "play-fill"]])
+
+(defui ^:private mode-switch [{:keys [mode dispatch]}]
+  ($ :.toolbar-mode
+    (for [[label value icon-name] mode-options]
+      ($ :button
+        {:key value
+         :type "button"
+         :aria-pressed (= mode value)
+         :aria-label label
+         :data-tooltip label
+         :on-click #(dispatch :user/change-mode value)}
+        ($ icon {:name icon-name})))))
 
 (defui toolbar []
   (let [[focused set-focused] (uix/use-state nil)
         dispatch  (hooks/use-dispatch)
         result    (hooks/use-query query)
         {host      :user/host
+         interface-mode :user/mode
          {scale    :camera/scale
           mode     :camera/draw-mode
-          selected :camera/selected} :user/camera} result
+          selected :camera/selected
+          {{enabled :game-type/enabled-elements}
+           :scene/game-type} :camera/scene} :user/camera} result
         on-focus (uix/use-callback
                   (fn [event]
                     (if-let [node (.. event -target (closest "button"))]
@@ -86,37 +110,44 @@
           ($ icon {:name "files"}))
         ($ action {:name "copy-paste" :aria-disabled (nil? (:user/clipboard result))}
           ($ icon {:name "clipboard2-plus"}))
-        ($ action {:name "scene-ruler" :aria-pressed (= mode :ruler)}
-          ($ icon {:name "rulers"}))
+        (if (contains? enabled :tool/measurement)
+          ($ action {:name "scene-ruler" :aria-pressed (= mode :ruler)}
+            ($ icon {:name "rulers"})))
         ($ action {:name "note" :aria-pressed (= mode :note)}
           ($ icon {:name "journal-bookmark-fill"}))
         ($ action {:name "scene-focus" :aria-disabled (not (some? (:session/_host result)))}
           ($ icon {:name "camera2" :size 22}))
-        ($ action {:name "draw-circle" :aria-pressed (= mode :circle)}
-          ($ icon {:name "circle"}))
-        ($ action {:name "draw-rect" :aria-pressed (= mode :rect)}
-          ($ icon {:name "square"}))
-        ($ action {:name "draw-cone" :aria-pressed (= mode :cone)}
-          ($ icon {:name "triangle"}))
-        ($ action {:name "draw-poly" :aria-pressed (= mode :poly)}
-          ($ icon {:name "star"}))
-        ($ action {:name "draw-line" :aria-pressed (= mode :line)}
-          ($ icon {:name "slash-lg"}))
+        (if (contains? enabled :tool/shapes)
+          ($ :<>
+            ($ action {:name "draw-circle" :aria-pressed (= mode :circle)}
+              ($ icon {:name "circle"}))
+            ($ action {:name "draw-rect" :aria-pressed (= mode :rect)}
+              ($ icon {:name "square"}))
+            ($ action {:name "draw-cone" :aria-pressed (= mode :cone)}
+              ($ icon {:name "triangle"}))
+            ($ action {:name "draw-poly" :aria-pressed (= mode :poly)}
+              ($ icon {:name "star"}))
+            ($ action {:name "draw-line" :aria-pressed (= mode :line)}
+              ($ icon {:name "slash-lg"}))))
         ($ action {:name "zoom-out" :aria-disabled (= scale 0.15)}
           ($ icon {:name "zoom-out"}))
         ($ action {:name "zoom-reset" :aria-disabled (= scale 1)}
           (-> scale (* 100) (js/Math.trunc) (str "%")))
         ($ action {:name "zoom-in" :aria-disabled (= scale 4)}
           ($ icon {:name "zoom-in"}))
-        ($ action {:name "mask-create" :aria-pressed (= mode :mask)}
-          ($ icon {:name "star-half"}))
-        ($ action {:name "mask-toggle" :aria-pressed (= mode :mask-toggle)}
-          ($ icon {:name "magic"}))
-        ($ action {:name "mask-remove" :aria-pressed (= mode :mask-remove)}
-          ($ icon {:name "eraser-fill"}))
-        ($ action {:name "mask-show"}
-          ($ icon {:name "eye-fill"}))
-        ($ action {:name "mask-hide"}
-          ($ icon {:name "eye-slash-fill"}))
+        (if (contains? enabled :tool/mask)
+          ($ :<>
+            ($ action {:name "mask-create" :aria-pressed (= mode :mask)}
+              ($ icon {:name "star-half"}))
+            ($ action {:name "mask-toggle" :aria-pressed (= mode :mask-toggle)}
+              ($ icon {:name "magic"}))
+            ($ action {:name "mask-remove" :aria-pressed (= mode :mask-remove)}
+              ($ icon {:name "eraser-fill"}))
+            ($ action {:name "mask-show"}
+              ($ icon {:name "eye-fill"}))
+            ($ action {:name "mask-hide"}
+              ($ icon {:name "eye-slash-fill"}))))
         ($ action {:name "scene-grid" :aria-pressed (= mode :grid)}
-          ($ icon {:name "compass"}))))))
+          ($ icon {:name "compass"})))
+      (if host
+        ($ mode-switch {:mode interface-mode :dispatch dispatch})))))

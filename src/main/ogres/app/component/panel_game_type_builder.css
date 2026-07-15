@@ -1,0 +1,25 @@
+.game-type-builder-template {
+  align-items: center;
+  display: flex;
+
+  label.radio {
+    flex: 1;
+    width: auto;
+  }
+}
+
+.game-type-builder-remove {
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--color-black-500);
+  cursor: pointer;
+  display: flex;
+  flex: 0 0 auto;
+  padding: 4px;
+
+  &:hover,
+  &:focus-visible {
+    color: var(--color-danger-500);
+  }
+}

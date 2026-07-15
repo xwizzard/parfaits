@@ -4,6 +4,7 @@
             [ogres.app.component.scene-context-menu :refer [context-menu]]
             [ogres.app.component.scene-pattern :refer [pattern]]
             [ogres.app.const :refer [grid-size hex-radius]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.matrix :as matrix]
@@ -501,6 +502,8 @@
         [[:scene/grid-align :default false]
          [:scene/grid-type :default :square]
          [:scene/show-object-outlines :default true]
+         {:scene/game-type
+          [[:game-type/enabled-elements :default #{}]]}
          {:scene/tokens
           [:db/id
            [:object/type :default :token/token]
@@ -568,6 +571,7 @@
            {outline? :scene/show-object-outlines
             align? :scene/grid-align
             grid-type :scene/grid-type
+            game-type-entity :scene/game-type
             shapes :scene/shapes
             tokens :scene/tokens
             props :scene/props
@@ -575,6 +579,7 @@
            :camera/scene}
           :user/camera} :root/user
          {conns :session/conns} :root/session} result
+        align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
         portal (uix/use-ref)
         screen (Segment. point (vec/add point (vec/div (.-b (seg/rebase bounds)) scale)))
         selected (into #{} (map :db/id) selected)

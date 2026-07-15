@@ -3,6 +3,7 @@
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
             [ogres.app.const :refer [grid-size half-size hex-radius]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
             [ogres.app.segment :as seg]
@@ -99,6 +100,14 @@
     [{:db/ident :user :panel/expanded (not (get user :panel/expanded true))}]))
 
 (defmethod
+  ^{:doc "Switches the local user's interface mode (:builder, :setup, or
+          :play). Builder mode edits game-type templates; setup mode
+          constructs a scenario; play mode hides construction tools."}
+  event-tx-fn :user/change-mode
+  [_ _ mode]
+  [{:db/ident :user :user/mode mode}])
+
+(defmethod
   ^{:doc "Changes the character label for the given user."}
   event-tx-fn :user/change-label
   ([_ _ value]
@@ -150,12 +159,19 @@
     [[:db/retract (:db/id (:user/camera user)) :camera/label]]))
 
 (defmethod
-  ^{:doc "Translate the current camera by the offset given by dx and dy."}
+  ^{:doc "Translate the current camera by the screen-space offset given by
+          dx and dy, accounting for camera scale and, for isometric
+          grid-types, the fixed isometric projection -- without this, the
+          live drag preview (a raw, unconverted screen-pixel overlay) and
+          the committed camera position (which renders through the full
+          iso matrix) fall out of sync, and the view visibly jumps the
+          instant the drag ends."}
   event-tx-fn :camera/translate
   [data _ delta]
-  (let [{{id :db/id point :camera/point scale :camera/scale} :user/camera}
+  (let [{{id :db/id point :camera/point scale :camera/scale
+          {grid-type :scene/grid-type} :camera/scene} :user/camera}
         (ds/entity data [:db/ident :user])]
-    [{:db/id id :camera/point (vec/add (or point vec/zero) (vec/div delta (or scale 1)))}]))
+    [{:db/id id :camera/point (vec/add (or point vec/zero) (geom/screen->scene-vec delta scale grid-type))}]))
 
 (defmethod
   ^{:doc "Changes the camera draw mode to the given value. The draw mode is
@@ -249,6 +265,7 @@
   [[:db/add -1 :db/ident :root]
    [:db/add -1 :root/scenes -2]
    [:db/add -2 :db/empty true]
+   [:db/add -2 :scene/game-type [:game-type/key :default]]
    [:db/add -1 :root/user -3]
    [:db/add -3 :db/ident :user]
    [:db/add -3 :user/camera -4]
@@ -311,6 +328,110 @@
               [:db/add -3 :camera/scene next-scn]
               [:db/add -3 :camera/point vec/zero]]))
          (apply concat))))
+
+;; -- Game Types --
+(defmethod
+  ^{:doc "Creates a new game-type template, cloning the given source
+          game-type's enabled elements and icon overrides so it starts
+          non-empty, then opens it for editing in Builder mode."}
+  event-tx-fn :game-type/create
+  [data _ source-id name]
+  (let [source (if source-id (ds/entity data source-id))]
+    [{:db/id -1
+      :game-type/name name
+      :game-type/enabled-elements (into #{} (:game-type/enabled-elements source))
+      :game-type/icon-overrides (into {} (:game-type/icon-overrides source))}
+     [:db/add [:db/ident :root] :root/game-types -1]
+     [:db.fn/call event-tx-fn :user/edit-game-type -1]]))
+
+(defmethod
+  ^{:doc "Renames the given game-type template."}
+  event-tx-fn :game-type/rename
+  [_ _ game-type-id name]
+  [{:db/id game-type-id :game-type/name (trim name)}])
+
+(defmethod
+  ^{:doc "Removes the given game-type template. Refuses to remove the
+          last remaining template -- a scene must always have one to
+          reference. Any scene using it, and the Builder mode 'currently
+          editing' selection, fall back to another remaining template
+          (the bundled Default, if present, otherwise whichever is
+          first)."}
+  event-tx-fn :game-type/remove
+  [data _ game-type-id]
+  (let [root (ds/entity data [:db/ident :root])
+        remaining (remove (comp #{game-type-id} :db/id) (:root/game-types root))]
+    (if (empty? remaining)
+      []
+      (let [fallback (:db/id (or (first (filter (comp #{:default} :game-type/key) remaining))
+                                  (first remaining)))
+            editing (:db/id (:user/game-type-editing (ds/entity data [:db/ident :user])))]
+        (into [[:db/retractEntity game-type-id]]
+              (concat
+               (for [scene (:scene/_game-type (ds/entity data game-type-id))]
+                 {:db/id (:db/id scene) :scene/game-type fallback})
+               (when (= editing game-type-id)
+                 [{:db/ident :user :user/game-type-editing fallback}])))))))
+
+(defmethod
+  ^{:doc "Imports a game-type template from data previously produced by
+          exporting one (see the Game Builder panel), creating a new
+          template and opening it for editing -- same as
+          :game-type/create, except the initial name/elements/overrides
+          come from the imported data rather than being cloned live.
+          Since this data may originate from an arbitrary file, elements
+          and icon overrides are sanitized down to recognized registry
+          ids/shapes regardless of what the caller already did."}
+  event-tx-fn :game-type/import
+  [_ _ {:keys [name enabled-elements icon-overrides]}]
+  [{:db/id -1
+    :game-type/name (str name)
+    :game-type/enabled-elements (game-type/sanitize-enabled-elements enabled-elements)
+    :game-type/icon-overrides (game-type/sanitize-icon-overrides icon-overrides)}
+   [:db/add [:db/ident :root] :root/game-types -1]
+   [:db.fn/call event-tx-fn :user/edit-game-type -1]])
+
+(defmethod
+  ^{:doc "Enables or disables one element (by its namespaced registry id,
+          e.g. :unit/light or :tool/grid-hex-pointy) on the given
+          game-type. If this leaves any scene using it on a grid layout
+          that's no longer enabled, that scene is switched to another
+          available layout.
+
+          'No-grid mode' (a game-type with zero grid layouts enabled)
+          isn't handled here by forcing :scene/show-grid or :scene/grid-
+          align -- that would need to be undone again the moment a grid
+          layout became available, which is exactly the bug this
+          replaced. Instead, rendering and snapping both treat 'the
+          active game-type has zero grid layouts enabled' as an
+          unconditional override (see scene.cljs's `has-grid?` and the
+          `align?` sites in this file), independent of a scene's own
+          stored show-grid/grid-align preference. That preference is
+          therefore never destructively overwritten, so it's simply
+          already correct again the instant a grid layout is re-enabled."}
+  event-tx-fn :game-type/toggle-element
+  [data _ game-type-id element-id enabled?]
+  (let [entity (ds/entity data game-type-id)
+        current (set (:game-type/enabled-elements entity))
+        next-enabled ((if enabled? conj disj) current element-id)]
+    (into [{:db/id game-type-id :game-type/enabled-elements next-enabled}]
+          (when (pos? (game-type/grid-count next-enabled))
+            (for [scene (:scene/_game-type entity)
+                  :when (not (contains? next-enabled (game-type/grid-tool-id (:scene/grid-type scene :square))))]
+              {:db/id (:db/id scene) :scene/grid-type (game-type/pick-grid-type next-enabled)})))))
+
+(defmethod
+  ^{:doc "Sets or clears a flavor-asset icon override for one element on
+          the given game-type. `link` is nil to clear the override (falling
+          back to the registry's default icon), or an :icon/link map, e.g.
+          {:icon/sprite-name \"…\"} or {:icon/url \"…\"}."}
+  event-tx-fn :game-type/set-icon-override
+  [data _ game-type-id element-id link]
+  (let [current (:game-type/icon-overrides (ds/entity data game-type-id))]
+    [{:db/id game-type-id
+      :game-type/icon-overrides (if (some? link)
+                                   (assoc (into {} current) element-id link)
+                                   (dissoc (into {} current) element-id))}]))
 
 ;; -- Scene Images --
 (defmethod event-tx-fn :scene-images/create-many
@@ -375,6 +496,31 @@
   event-tx-fn :scene/change-grid-shape
   [_ _ shape]
   [[:db.fn/call assoc-scene :scene/grid-shape shape]])
+
+(defmethod
+  ^{:doc "Updates the token scale multiplier for the given grid-type on the
+          current scene. Each grid-type remembers its own token scale
+          independently (stored as a sparse map keyed by grid-type) so a
+          host can tune token size to fit their art on one grid type,
+          switch to another to compare, and come back to find their first
+          choice untouched."}
+  event-tx-fn :scene/change-token-scale
+  [data _ grid-type value]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        next  (assoc (:scene/token-scale scene {}) grid-type value)]
+    [[:db.fn/call assoc-scene :scene/token-scale next]]))
+
+(defmethod
+  ^{:doc "Opens the given game-type entity for editing in Game Builder mode
+          and, in the same transaction, makes it the active game-type for
+          the current scene -- game types are isolated to Game Builder
+          mode, so selecting or creating a template there is the only way
+          to change which framework elements (per-unit fields, tools,
+          systems) are available while setting up or playing this scene."}
+  event-tx-fn :user/edit-game-type
+  [_ _ game-type-id]
+  [{:db/ident :user :user/game-type-editing game-type-id}
+   [:db.fn/call assoc-scene :scene/game-type game-type-id]])
 
 (defmethod
   ^{:doc "Applies both a grid origin and tile size to the current scene."}
@@ -459,8 +605,10 @@
           option is enabled."}
   [data _ idxs delta]
   (let [result (ds/entity data [:db/ident :user])
+        scene (-> result :user/camera :camera/scene)
         {align? :scene/grid-align
-         grid-type :scene/grid-type} (-> result :user/camera :camera/scene)
+         grid-type :scene/grid-type} scene
+        align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements (:scene/game-type scene) #{}))))
         base-type (geom/base-grid-type grid-type)]
     (into [[:db/retract [:db/ident :user] :user/dragging]]
           (for [entity (ds/pull-many data translate-many-select idxs)
@@ -586,7 +734,9 @@
           scale :camera/scale
           {scene :db/id
            align? :scene/grid-align
-           grid-type :scene/grid-type} :camera/scene} :user/camera} user
+           grid-type :scene/grid-type
+           game-type-entity :scene/game-type} :camera/scene} :user/camera} user
+        align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
         base-type (geom/base-grid-type grid-type)
         point (vec/add (geom/screen->scene-vec point scale grid-type) shift)]
     (cond->
@@ -1053,7 +1203,9 @@
        {:camera/scene
         [:db/id
          [:scene/grid-align :default false]
-         [:scene/grid-type :default :square]]}]}]}
+         [:scene/grid-type :default :square]
+         {:scene/game-type
+          [[:game-type/enabled-elements :default #{}]]}]}]}]}
    {:root/token-images [:image/hash]}
    {:root/props-images [:image/hash]}])
 
@@ -1070,10 +1222,12 @@
           {camera :db/id
            scale :camera/scale
            point :camera/point
-           {scene :db/id align? :scene/grid-align grid-type :scene/grid-type}
+           {scene :db/id align? :scene/grid-align grid-type :scene/grid-type
+            game-type-entity :scene/game-type}
            :camera/scene} :user/camera} :root/user
          token-images :root/token-images
          props-images :root/props-images} result
+        align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
         base-type (geom/base-grid-type grid-type)
         props-hashes (into #{} (map :image/hash) props-images)
         token-hashes (into #{} (map :image/hash) token-images)

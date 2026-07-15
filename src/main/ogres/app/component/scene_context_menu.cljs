@@ -32,6 +32,16 @@
    {:value :stunned       :icon "stars"}
    {:value :unconscious   :icon "activity"}])
 
+(def ^:private enabled-elements-query
+  [{:user/camera
+    [{:camera/scene
+      [{:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}]}]}])
+
+(defn ^:private use-enabled-elements []
+  (let [result (hooks/use-query enabled-elements-query)]
+    (-> result :user/camera :camera/scene :scene/game-type :game-type/enabled-elements)))
+
 (def ^:private shape-colors
   ["red"   "orange"  "amber"  "yellow" "lime"
    "green" "emerald" "teal"   "cyan"   "sky"
@@ -158,55 +168,58 @@
            (set-dirty true))}))))
 
 (defui ^:private token-form-details
-  [{:keys [on-change values]
-    :or   {values (constantly (list)) on-change identity}}]
+  [{:keys [on-change values enabled-elements]
+    :or   {values (constantly (list)) on-change identity enabled-elements #{}}}]
   (let [value-fn (fn [attr] (first (into (sorted-set-by >) (values attr))))]
     ($ :<>
-      (let [value (value-fn :token/size)]
-        ($ :<>
-          ($ :label "Size")
-          ($ :button
-            {:type "button"
-             :auto-focus true
-             :on-click #(on-change :token/change-size (max (- value 5) 5))
-             :aria-label "Decrease token size by 5 feet"}
-            "-")
-          ($ :data {:value value}
-            (str value  "ft. " (token-size value)))
-          ($ :button
-            {:type "button"
-             :on-click #(on-change :token/change-size (min (+ value 5) 50))
-             :aria-label "Increase token size by 5 feet"} "+")))
-      (let [value (value-fn :token/light)]
-        ($ :<>
-          ($ :label "Light")
-          ($ :button
-            {:type "button"
-             :on-click #(on-change :token/change-light (max (- value 5) 0))
-             :aria-label "Decrease light radius by 5 feet"}
-            "-")
-          ($ :data {:value value}
-            (if (> value 0) (str value "ft. radius") "None"))
-          ($ :button
-            {:type "button"
-             :on-click #(on-change :token/change-light (min (+ value 5) 120))
-             :aria-label "Increase light radius by 5 feet"}
-            "+")))
-      (let [value (value-fn :token/aura-radius)]
-        ($ :<>
-          ($ :label "Aura")
-          ($ :button
-            {:type "button"
-             :on-click #(on-change :token/change-aura (max (- value 5) 0))
-             :aria-label "Decrease aura size by 5 feet"}
-            "-")
-          ($ :data {:value value}
-            (if (> value 0) (str value "ft. radius") "None"))
-          ($ :button
-            {:type "button"
-             :on-click #(on-change :token/change-aura (min (+ value 5) 120))
-             :aria-label "Increase aura size by 5 feet"}
-            "+"))))))
+      (if (contains? enabled-elements :unit/size)
+        (let [value (value-fn :token/size)]
+          ($ :<>
+            ($ :label "Size")
+            ($ :button
+              {:type "button"
+               :auto-focus true
+               :on-click #(on-change :token/change-size (max (- value 5) 5))
+               :aria-label "Decrease token size by 5 feet"}
+              "-")
+            ($ :data {:value value}
+              (str value  "ft. " (token-size value)))
+            ($ :button
+              {:type "button"
+               :on-click #(on-change :token/change-size (min (+ value 5) 50))
+               :aria-label "Increase token size by 5 feet"} "+"))))
+      (if (contains? enabled-elements :unit/light)
+        (let [value (value-fn :token/light)]
+          ($ :<>
+            ($ :label "Light")
+            ($ :button
+              {:type "button"
+               :on-click #(on-change :token/change-light (max (- value 5) 0))
+               :aria-label "Decrease light radius by 5 feet"}
+              "-")
+            ($ :data {:value value}
+              (if (> value 0) (str value "ft. radius") "None"))
+            ($ :button
+              {:type "button"
+               :on-click #(on-change :token/change-light (min (+ value 5) 120))
+               :aria-label "Increase light radius by 5 feet"}
+              "+"))))
+      (if (contains? enabled-elements :unit/aura)
+        (let [value (value-fn :token/aura-radius)]
+          ($ :<>
+            ($ :label "Aura")
+            ($ :button
+              {:type "button"
+               :on-click #(on-change :token/change-aura (max (- value 5) 0))
+               :aria-label "Decrease aura size by 5 feet"}
+              "-")
+            ($ :data {:value value}
+              (if (> value 0) (str value "ft. radius") "None"))
+            ($ :button
+              {:type "button"
+               :on-click #(on-change :token/change-aura (min (+ value 5) 120))
+               :aria-label "Increase aura size by 5 feet"}
+              "+")))))))
 
 (defui ^:private token-form-conditions
   [props]
@@ -235,15 +248,18 @@
 (defui ^:private context-menu-token [props]
   (let [dispatch (hooks/use-dispatch)
         data     (:data props)
-        idxs     (into [] (map :db/id) data)]
+        idxs     (into [] (map :db/id) data)
+        enabled  (use-enabled-elements)
+        details? (some enabled #{:unit/size :unit/light :unit/aura})]
     ($ context-menu-fn
       {:render-toolbar
        (fn [{:keys [selected on-change]}]
          ($ :<>
            (for [[form icon-name tooltip]
-                 [[:label "fonts" "Label"]
-                  [:details "sliders" "Options"]
-                  [:conditions "arrow-through-heart-fill" "Conditions"]]]
+                 (cond-> [[:label "fonts" "Label"]]
+                   details? (conj [:details "sliders" "Options"])
+                   (contains? enabled :unit/conditions)
+                   (conj [:conditions "arrow-through-heart-fill" "Conditions"]))]
              ($ :button
                {:key form
                 :type "button"
@@ -251,27 +267,30 @@
                 :data-tooltip tooltip
                 :on-click #(on-change form)}
                ($ icon {:name icon-name})))
-           (let [on (every? (comp vector? :scene/_initiative) data)]
-             ($ :button
-               {:type "button"
-                :data-selected on
-                :data-tooltip "Initiative"
-                :on-click #(dispatch :initiative/toggle idxs (not on))}
-               ($ icon {:name "hourglass-split"})))
-           (let [on (every? (comp boolean :player :token/flags) data)]
-             ($ :button
-               {:type "button"
-                :data-tooltip "Player"
-                :data-selected on
-                :on-click #(dispatch :token/change-flag idxs :player (not on))}
-               ($ icon {:name "people-fill"})))
-           (let [on (every? (comp boolean :dead :token/flags) data)]
-             ($ :button
-               {:type "button"
-                :data-tooltip "Dead"
-                :data-selected on
-                :on-click #(dispatch :token/change-dead idxs (not on))}
-               ($ icon {:name "skull"})))
+           (if (contains? enabled :unit/initiative)
+             (let [on (every? (comp vector? :scene/_initiative) data)]
+               ($ :button
+                 {:type "button"
+                  :data-selected on
+                  :data-tooltip "Initiative"
+                  :on-click #(dispatch :initiative/toggle idxs (not on))}
+                 ($ icon {:name "hourglass-split"}))))
+           (if (contains? enabled :unit/player)
+             (let [on (every? (comp boolean :player :token/flags) data)]
+               ($ :button
+                 {:type "button"
+                  :data-tooltip "Player"
+                  :data-selected on
+                  :on-click #(dispatch :token/change-flag idxs :player (not on))}
+                 ($ icon {:name "people-fill"}))))
+           (if (contains? enabled :unit/dead)
+             (let [on (every? (comp boolean :dead :token/flags) data)]
+               ($ :button
+                 {:type "button"
+                  :data-tooltip "Dead"
+                  :data-selected on
+                  :on-click #(dispatch :token/change-dead idxs (not on))}
+                 ($ icon {:name "skull"}))))
            (let [xfr (comp :token-image/url :token/image)
                  url (js/URL.parse (xfr (first data)))]
              (if (and (some? url)
@@ -296,6 +315,7 @@
       (fn [{:keys [selected on-change]}]
         (let [props {:on-close  #(on-change nil)
                      :on-change #(apply dispatch %1 idxs %&)
+                     :enabled-elements enabled
                      :values    (fn vs
                                   ([f] (vs f #{}))
                                   ([f init] (into init (map f) data)))}]

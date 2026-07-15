@@ -2,6 +2,7 @@
   (:require [clojure.string :refer [replace]]
             [ogres.app.component :as component :refer [icon]]
             [ogres.app.const :refer [grid-size]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.hooks :as hooks]
             [ogres.app.util :refer [display-size]]
             [uix.core :as uix :refer [defui $]]))
@@ -28,11 +29,14 @@
          [:scene/dark-mode :default false]
          [:scene/show-object-outlines :default true]
          [:scene/lighting :default :revealed]
+         [:scene/token-scale :default {}]
          {:scene/image
           [:image/hash
            :image/name
            {:image/thumbnail
-            [:image/hash]}]}]}]}]}])
+            [:image/hash]}]}
+         {:scene/game-type
+          [[:game-type/enabled-elements :default #{}]]}]}]}]}])
 
 (def ^:private options-vis
   [["Revealed" :revealed "sun-fill"]
@@ -49,6 +53,14 @@
    ["Iso Square (Vertical)" :iso-square-vertical "square"]
    ["Iso Hex Pointy (Vertical)" :iso-hex-pointy-vertical "hexagon"]
    ["Iso Hex Flat (Vertical)" :iso-hex-flat-vertical "hexagon-flat"]])
+
+(defn ^:private grid-type-options [enabled-elements]
+  (filter (fn [[_ value]] (contains? enabled-elements (game-type/grid-tool-id value)))
+          options-grid-type))
+
+(defn ^:private grid-type-label [grid-type]
+  (or (first (first (filter (fn [[_ value]] (= value grid-type)) options-grid-type)))
+      "Square"))
 
 (def ^:private options-grid-shape
   [["Lines" :line "dash"]
@@ -140,7 +152,25 @@
         input    (uix/use-ref)
         data     (hooks/use-query query [:db/ident :root])
         {{{scene :camera/scene} :user/camera
-          camera :user/camera} :root/user} data]
+          camera :user/camera} :root/user} data
+        enabled-elements (:game-type/enabled-elements (:scene/game-type scene) #{})
+        ;; "No-grid mode": the active game-type has no grid layout enabled
+        ;; at all, so the scene is on an invisible, unaligned square grid
+        ;; (see :game-type/toggle-element). Tile size / grid options /
+        ;; grid alignment are all meaningless with no grid to configure.
+        no-grid? (zero? (game-type/grid-count enabled-elements))
+        ;; The scene-level Lighting mode and each token's individual light
+        ;; radius (scene_context_menu.cljs) are two aspects of the same
+        ;; system -- disabling :unit/light hides both together, the same
+        ;; way disabling every grid layout hides both the grid-type picker
+        ;; and its alignment/visibility options above.
+        light-enabled? (contains? enabled-elements :unit/light)
+        grid-type (:scene/grid-type scene :square)
+        ;; Token scale is remembered per grid-type (not one value for the
+        ;; whole scene) so a host can tune token size against each grid
+        ;; type's own geometry -- switching grid types to compare doesn't
+        ;; clobber the scale already tuned for the one switched away from.
+        token-scale-pct (get (:scene/token-scale scene {}) grid-type 100)]
     ($ :form.form-scenes
       {:on-submit (fn [event] (.preventDefault event))}
       ($ :header ($ :h2 "Scene"))
@@ -240,25 +270,63 @@
             {:id preview
              :on-change set-preview
              :on-close (fn [] (set-preview nil))})))
-      ($ :fieldset.fieldset.fieldset--radio
-        ($ :legend "Grid type")
-        ($ :.input-group
-          (for [[label value icon-name] options-grid-type
-                :let [on-change #(dispatch :scene/change-grid-type value)]]
-            ($ :<> {:key value}
-              ($ :label.radio
-                ($ :input
-                  {:type "radio"
-                   :name "grid-type"
-                   :value value
-                   :checked (= (:scene/grid-type scene) value)
-                   :on-change on-change})
-                ($ icon {:name icon-name :size 16})
-                label))))
-        ($ :details
-          ($ :summary "More Information")
-          "Square grids suit most tabletop systems. Hex grids match the
-           layout of games like Gloomhaven and Frosthaven."))
+        (let [available (grid-type-options enabled-elements)]
+          ;; A radio list with zero or one option is nothing to choose --
+          ;; hide it entirely rather than show a foregone conclusion. The
+          ;; active game-type determines which grid layouts even apply.
+          (if (> (count available) 1)
+            ($ :fieldset.fieldset.fieldset--radio
+              ($ :legend "Grid type")
+              ($ :.input-group
+                (for [[label value icon-name] available
+                      :let [on-change #(dispatch :scene/change-grid-type value)]]
+                  ($ :<> {:key value}
+                    ($ :label.radio
+                      ($ :input
+                        {:type "radio"
+                         :name "grid-type"
+                         :value value
+                         :checked (= (:scene/grid-type scene) value)
+                         :on-change on-change})
+                      ($ icon {:name icon-name :size 16})
+                      label))))
+              ($ :details
+                ($ :summary "More Information")
+                "Square grids suit most tabletop systems. Hex grids match the
+                 layout of games like Gloomhaven and Frosthaven."))))
+      (let [set-scale (fn [value] (dispatch :scene/change-token-scale grid-type (max 25 (min 400 value))))]
+        ($ :fieldset.fieldset
+          ($ :legend (str "Token scale ( " (grid-type-label grid-type) " )"))
+          ($ :.scene-token-scale
+            ($ :button.button.button-neutral
+              {:type "button"
+               :on-click #(set-scale (- token-scale-pct 5))
+               :aria-label "Decrease token scale by 5%"}
+              ($ icon {:name "dash" :size 16}))
+            ($ :input.text.text-ghost
+              {:type "number"
+               :name "Token scale"
+               :min 25
+               :max 400
+               :step 5
+               :value token-scale-pct
+               :placeholder "100%"
+               :on-change
+               (fn [event]
+                 (let [value (.. event -target -value)]
+                   (if (not= value "")
+                     (set-scale (js/Number value)))))})
+            ($ :button.button.button-neutral
+              {:type "button"
+               :on-click #(set-scale (+ token-scale-pct 5))
+               :aria-label "Increase token scale by 5%"}
+              ($ icon {:name "plus" :size 16})))
+          ($ :details
+            ($ :summary "More Information")
+            "Uniformly scales the base size of every token on this scene, as
+             a percentage of its default size. Each grid type remembers its
+             own token scale, so switching grid types to compare doesn't
+             lose the value tuned for the one switched away from.")))
       ($ :fieldset.fieldset.fieldset--radio
         ($ :legend "Grid style")
         ($ :.input-group
@@ -279,93 +347,97 @@
           "Lines draw the full grid. Dots mark only the position each
            token or shape will snap to, useful when you don't want the
            grid to obscure the scene image."))
-      ($ :fieldset.fieldset
-        ($ :legend "Tile size ( px )")
-        ($ :input.text.text-ghost
-          {:type "number"
-           :name "Tile size"
-           :value (:scene/grid-size scene)
-           :placeholder "70px"
-           :on-change
-           (fn [event]
-             (let [value (.. event -target -value)
-                   value (js/Number value)]
-               (if (= value 0)
-                 (dispatch :scene/retract-grid-size)
-                 (dispatch :scene/change-grid-size value))))})
-        ($ :details
-          ($ :summary "More Information")
-          "The tile size is the width, in pixels, of one square in the
-           selected background image. Changes to this value will scale the
-           image such that each square will take up the width of one token."))
-      ($ :fieldset.fieldset
-        ($ :legend "Grid options")
-        ($ :.input-group
-          ($ :label.checkbox
-            ($ :input
-              {:type "checkbox"
-               :checked (:scene/show-grid scene)
-               :on-change #(dispatch :scene/toggle-show-grid (.. % -target -checked))})
-            ($ icon {:name "check" :size 20})
-            "Show grid")
-          ($ :label.checkbox
-            ($ :input
-              {:type "checkbox"
-               :checked (:scene/show-object-outlines scene)
-               :on-change #(dispatch :scene/toggle-object-outlines (.. % -target -checked))})
-            ($ icon {:name "check" :size 20})
-            "Show shape outlines")
-          ($ :label.checkbox
-            ($ :input
-              {:type "checkbox"
-               :checked (:scene/grid-align scene)
-               :on-change #(dispatch :scene/toggle-grid-align (.. % -target -checked))})
-            ($ icon {:name "check" :size 20})
-            "Align to grid")
-          ($ :label.checkbox
-            ($ :input
-              {:type "checkbox"
-               :checked (:scene/dark-mode scene)
-               :on-change #(dispatch :scene/toggle-dark-mode (.. % -target -checked))})
-            ($ icon {:name "check" :size 20})
-            "Use dark grid")))
-      ($ :fieldset.fieldset.fieldset--radio
-        ($ :legend "Lighting")
-        ($ :.input-group
-          (for [[label value icon-name] options-vis
-                :let [on-change #(dispatch :scene/change-lighting value)]]
-            ($ :<> {:key value}
-              ($ :label.radio
-                ($ :input
-                  {:type "radio"
-                   :name "visi"
-                   :value value
-                   :checked (= (:scene/lighting scene) value)
-                   :on-change on-change})
-                ($ icon {:name icon-name :size 16})
-                label))))
-        ($ :details
-          ($ :summary "More Information")
-          "When set to " ($ :strong "Obscured") " or " ($ :strong "Hidden")
-          ", the scene will be shrouded in darkness and tokens will emit a
-           radius of light around themselves. The light radius of each token
-           can be customized."))
-      ($ :fieldset.fieldset.scene-gallery-grid-align
-        ($ :legend "Grid alignment")
-        ($ :div.form-notice
-          ($ :button
-            {:on-click #(dispatch :camera/change-mode :grid)}
-            ($ icon {:name "compass" :size 22}))
-          "Use the grid alignment tool to manually pick a point that will serve
-           as the origin of the grid. Use this tool when the grid in your scene
-           image is offset from the edges or is unevenly distributed.")
-        ($ :details
-          ($ :summary "How To Use")
-          ($ :ol
-            ($ :li "Select the grid alignment tool.")
-            ($ :li "Select a corner of one of the tiles in the scene.")
-            ($ :li "Adjust its position carefully if necessary.")
-            ($ :li "Adjust the tile size until the grid lines match up with the lines on the scene."))
-          "Sometimes the widths of the tiles in the image are not whole
-           numbers; it may be necessary to use this tool again in another
-           part of the image as the adventure progresses there.")))))
+      (if-not no-grid?
+        ($ :fieldset.fieldset
+          ($ :legend "Tile size ( px )")
+          ($ :input.text.text-ghost
+            {:type "number"
+             :name "Tile size"
+             :value (:scene/grid-size scene)
+             :placeholder "70px"
+             :on-change
+             (fn [event]
+               (let [value (.. event -target -value)
+                     value (js/Number value)]
+                 (if (= value 0)
+                   (dispatch :scene/retract-grid-size)
+                   (dispatch :scene/change-grid-size value))))})
+          ($ :details
+            ($ :summary "More Information")
+            "The tile size is the width, in pixels, of one square in the
+             selected background image. Changes to this value will scale the
+             image such that each square will take up the width of one token.")))
+      (if-not no-grid?
+        ($ :fieldset.fieldset
+          ($ :legend "Grid options")
+          ($ :.input-group
+            ($ :label.checkbox
+              ($ :input
+                {:type "checkbox"
+                 :checked (:scene/show-grid scene)
+                 :on-change #(dispatch :scene/toggle-show-grid (.. % -target -checked))})
+              ($ icon {:name "check" :size 20})
+              "Show grid")
+            ($ :label.checkbox
+              ($ :input
+                {:type "checkbox"
+                 :checked (:scene/show-object-outlines scene)
+                 :on-change #(dispatch :scene/toggle-object-outlines (.. % -target -checked))})
+              ($ icon {:name "check" :size 20})
+              "Show shape outlines")
+            ($ :label.checkbox
+              ($ :input
+                {:type "checkbox"
+                 :checked (:scene/grid-align scene)
+                 :on-change #(dispatch :scene/toggle-grid-align (.. % -target -checked))})
+              ($ icon {:name "check" :size 20})
+              "Align to grid")
+            ($ :label.checkbox
+              ($ :input
+                {:type "checkbox"
+                 :checked (:scene/dark-mode scene)
+                 :on-change #(dispatch :scene/toggle-dark-mode (.. % -target -checked))})
+              ($ icon {:name "check" :size 20})
+              "Use dark grid"))))
+      (if light-enabled?
+        ($ :fieldset.fieldset.fieldset--radio
+          ($ :legend "Lighting")
+          ($ :.input-group
+            (for [[label value icon-name] options-vis
+                  :let [on-change #(dispatch :scene/change-lighting value)]]
+              ($ :<> {:key value}
+                ($ :label.radio
+                  ($ :input
+                    {:type "radio"
+                     :name "visi"
+                     :value value
+                     :checked (= (:scene/lighting scene) value)
+                     :on-change on-change})
+                  ($ icon {:name icon-name :size 16})
+                  label))))
+          ($ :details
+            ($ :summary "More Information")
+            "When set to " ($ :strong "Obscured") " or " ($ :strong "Hidden")
+            ", the scene will be shrouded in darkness and tokens will emit a
+             radius of light around themselves. The light radius of each token
+             can be customized.")))
+      (if-not no-grid?
+        ($ :fieldset.fieldset.scene-gallery-grid-align
+          ($ :legend "Grid alignment")
+          ($ :div.form-notice
+            ($ :button
+              {:on-click #(dispatch :camera/change-mode :grid)}
+              ($ icon {:name "compass" :size 22}))
+            "Use the grid alignment tool to manually pick a point that will serve
+             as the origin of the grid. Use this tool when the grid in your scene
+             image is offset from the edges or is unevenly distributed.")
+          ($ :details
+            ($ :summary "How To Use")
+            ($ :ol
+              ($ :li "Select the grid alignment tool.")
+              ($ :li "Select a corner of one of the tiles in the scene.")
+              ($ :li "Adjust its position carefully if necessary.")
+              ($ :li "Adjust the tile size until the grid lines match up with the lines on the scene."))
+            "Sometimes the widths of the tiles in the image are not whole
+             numbers; it may be necessary to use this tool again in another
+             part of the image as the adventure progresses there."))))))

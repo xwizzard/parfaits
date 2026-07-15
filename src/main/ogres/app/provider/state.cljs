@@ -3,6 +3,7 @@
             [datascript.core :as ds]
             [goog.functions :refer [throttle]]
             [ogres.app.const :refer [VERSION]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.provider.events :as events]
             [ogres.app.serialize :refer [reader writer]]
             [ogres.app.provider.idb :as idb]
@@ -10,35 +11,50 @@
             [uix.core :as uix :refer [defui $]]))
 
 (def schema
-  {:camera/scene      {:db/valueType :db.type/ref}
-   :camera/selected   {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
-   :db/ident          {:db/unique :db.unique/identity}
-   :image/hash        {:db/unique :db.unique/identity}
-   :image/thumbnail   {:db/valueType :db.type/ref :db/isComponent true}
-   :initiative/played {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
-   :initiative/turn   {:db/valueType :db.type/ref}
-   :prop/image        {:db/valueType :db.type/ref}
-   :root/scene-images {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :root/scenes       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :root/session      {:db/valueType :db.type/ref :db/isComponent true}
-   :root/token-images {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :root/props-images {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :root/user         {:db/valueType :db.type/ref :db/isComponent true}
-   :scene/image       {:db/valueType :db.type/ref}
-   :scene/initiative  {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
-   :scene/masks       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :scene/shapes      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :scene/tokens      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :scene/notes       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :scene/props       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :session/conns     {:db/valueType :db.type/ref :db.cardinality :db.cardinality/many :db/isComponent true}
-   :session/host      {:db/valueType :db.type/ref}
-   :token/image       {:db/valueType :db.type/ref}
-   :user/camera       {:db/valueType :db.type/ref}
-   :user/cameras      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :user/dragging     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
-   :user/image        {:db/valueType :db.type/ref}
-   :user/uuid         {:db/unique :db.unique/identity}})
+  {:camera/scene         {:db/valueType :db.type/ref}
+   :camera/selected      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :db/ident             {:db/unique :db.unique/identity}
+   :game-type/key        {:db/unique :db.unique/identity}
+   :image/hash           {:db/unique :db.unique/identity}
+   :image/thumbnail      {:db/valueType :db.type/ref :db/isComponent true}
+   :initiative/played    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :initiative/turn      {:db/valueType :db.type/ref}
+   :prop/image           {:db/valueType :db.type/ref}
+   :root/game-types      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :root/scene-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :root/scenes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :root/session         {:db/valueType :db.type/ref :db/isComponent true}
+   :root/token-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :root/props-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :root/user            {:db/valueType :db.type/ref :db/isComponent true}
+   :scene/game-type      {:db/valueType :db.type/ref}
+   :scene/image          {:db/valueType :db.type/ref}
+   :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/tokens         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/notes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/props          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :session/conns        {:db/valueType :db.type/ref :db.cardinality :db.cardinality/many :db/isComponent true}
+   :session/host         {:db/valueType :db.type/ref}
+   :token/image          {:db/valueType :db.type/ref}
+   :user/camera          {:db/valueType :db.type/ref}
+   :user/cameras         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :user/dragging        {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :user/game-type-editing {:db/valueType :db.type/ref}
+   :user/image           {:db/valueType :db.type/ref}
+   :user/uuid            {:db/unique :db.unique/identity}})
+
+(def ^:private seed-game-types
+  "Idempotent tx-data (keyed by the unique :game-type/key) that seeds the
+   bundled 'Default' game-type -- every real (non-reserved) element in the
+   registry, enabled. Re-transacting this on every boot is a safe upsert,
+   not a duplicate, so a database saved before this feature existed still
+   gets a fully-populated template to fall back on."
+  [{:db/id [:db/ident :root]
+    :root/game-types [{:game-type/key :default
+                        :game-type/name "Default"
+                        :game-type/enabled-elements game-type/default-enabled-elements}]}])
 
 (defn initial-data [host]
   (ds/db-with
@@ -58,7 +74,12 @@
     [:db/add -3 :panel/selected :tokens]
     [:db/add -4 :camera/scene -2]
     [:db/add -4 :camera/point vec/zero]
-    [:db/add -5 :db/ident :session]]))
+    [:db/add -5 :db/ident :session]
+    [:db/add -1 :root/game-types -6]
+    [:db/add -6 :game-type/key :default]
+    [:db/add -6 :game-type/name "Default"]
+    [:db/add -6 :game-type/enabled-elements game-type/default-enabled-elements]
+    [:db/add -2 :scene/game-type -6]]))
 
 (def context (uix/create-context))
 
@@ -113,8 +134,9 @@
     (uix/use-effect
      (fn []
        (let [tx-data
-             [[:db/add [:db/ident :user] :user/ready true]
-              [:db/add [:db/ident :user] :user/host host]]]
+             (into [[:db/add [:db/ident :user] :user/ready true]
+                    [:db/add [:db/ident :user] :user/host host]]
+                   seed-game-types)]
          (.then (read VERSION)
                 (fn [record]
                   (if (nil? record)
