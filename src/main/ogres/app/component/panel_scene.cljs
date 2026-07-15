@@ -67,16 +67,20 @@
   [["Lines" :line "dash"]
    ["Dots" :dot "circle"]
    ["Circles" :circle "circle"]
-   ["Octo" :octo "square"]])
+   ["Octo" :octo "square"]
+   ["Hex" :hex "hexagon"]])
 
 (defn ^:private grid-shape-options [grid-type]
   ;; "Octo" markers are only meaningful on square-family grids (Square,
-  ;; Iso Square, Iso Square (Vertical)) -- an octagon doesn't have an
-  ;; analogous reading on a hex lattice, so the option isn't offered
-  ;; there at all rather than being selectable but silently ignored.
-  (if (= (geom/base-grid-type grid-type) :square)
-    options-grid-shape
-    (remove (fn [[_ value]] (= value :octo)) options-grid-shape)))
+  ;; Iso Square, Iso Square (Vertical)), and "Hex" markers only on
+  ;; hex-family grids (Hex/Iso Hex, Pointy or Flat) -- neither shape has
+  ;; an analogous reading on the other lattice, so the mismatched option
+  ;; isn't offered at all rather than being selectable but silently
+  ;; ignored (or silently substituted for something else).
+  (let [square? (= (geom/base-grid-type grid-type) :square)]
+    (remove (fn [[_ value]] (or (and (= value :octo) (not square?))
+                                 (and (= value :hex) square?)))
+            options-grid-shape)))
 
 (def ^:private per-page 6)
 
@@ -357,9 +361,10 @@
         ($ :details
           ($ :summary "More Information")
           "Lines draw the full grid. Dots mark only the position each
-           token or shape will snap to. Circles and Octo (square grids
-           only) mark that same position at the size of a default token,
-           useful for previewing how tokens will fit before placing any."))
+           token or shape will snap to. Circles, Octo (square grids only),
+           and Hex (hex grids only) mark that same position at nearly the
+           size of the grid cell, useful for previewing how tokens will
+           fit before placing any."))
       (if-not no-grid?
         ($ :fieldset.fieldset
           ($ :legend "Tile size ( px )")

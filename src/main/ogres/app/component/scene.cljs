@@ -246,6 +246,10 @@
 ;; needs this much larger a circumradius.
 (def ^:private octagon-circumradius-factor (/ 1 (js/Math.cos (/ js/Math.PI 8))))
 
+;; Same idea as `octagon-circumradius-factor`, but for a regular hexagon
+;; (apothem = circumradius * cos(30 deg)).
+(def ^:private hex-circumradius-factor (/ 1 (js/Math.cos (/ js/Math.PI 6))))
+
 (defn ^:private grid-inscribed-radius
   "The radius of the largest circle that fits entirely inside one cell of
    the given grid-type -- half-size for square-family grids (the cell's
@@ -268,6 +272,15 @@
               :let [a (+ (/ js/Math.PI 8) (* i (/ js/Math.PI 4)))]]
           (str (* radius (js/Math.cos a)) "," (* radius (js/Math.sin a))))))
 
+(defn ^:private hex-marker-points
+  "The vertices of a regular hexagon of the given circumradius, centered
+   on the origin, matching the actual grid cell's own orientation (pointy-
+   or flat-top -- reuses `geom/hex-points`/`hex-points-flat`, the same
+   vertex geometry the grid lines themselves are drawn from)."
+  [radius flat?]
+  (let [points ((if flat? geom/hex-points-flat geom/hex-points) vec/zero radius)]
+    (join " " (map (fn [v] (str (.-x v) "," (.-y v))) points))))
+
 (defui ^:private grid-marker
   "Renders a single grid-lattice marker at (cx, cy).
 
@@ -287,7 +300,7 @@
    already sized to nearly fill its cell up into an oversized ellipse/
    octagon that swallowed neighboring cells once un-warped back to a true
    circle, which is what actually made the isometric grids incomprehensible."
-  [{:keys [cx cy grid-type radius octo? filled?]}]
+  [{:keys [cx cy grid-type radius shape filled?]}]
   (if filled?
     ($ :g
       {:transform
@@ -295,37 +308,41 @@
             (if (geom/iso? grid-type) (str " " (geom/iso-inverse-matrix grid-type))))}
       ($ :circle.scene-grid-dot {:r radius}))
     ($ :g {:transform (str "translate(" cx ", " cy ")")}
-      (if octo?
-        ($ :polygon.scene-grid-outline {:points (octagon-points radius)})
+      (case shape
+        :octo ($ :polygon.scene-grid-outline {:points (octagon-points radius)})
+        :hex  ($ :polygon.scene-grid-outline
+                {:points (hex-marker-points radius (= (geom/base-grid-type grid-type) :hex-flat))})
         ($ :circle.scene-grid-outline {:r radius})))))
 
 (defui ^:private grid-defs []
   (let [result (hooks/use-query grid-defs-query)
         {{{grid-type :scene/grid-type
            grid-shape :scene/grid-shape} :camera/scene} :user/camera} result
-        ;; "Octo" markers only make sense on square-family grids (plain
-        ;; square, iso-square, iso-square-vertical) -- if the scene's
-        ;; stored preference is :octo but it's on a hex grid, this falls
-        ;; back to :circle instead of getting stuck showing nothing
-        ;; sensible. Like no-grid mode and the lighting toggle, this is
-        ;; computed at render time rather than destructively overwriting
-        ;; the stored preference, so switching back to a square grid
-        ;; immediately restores "Octo" with no extra step.
-        mode (if (and (= grid-shape :octo) (not= (geom/base-grid-type grid-type) :square))
-               :circle
-               grid-shape)
-        octo? (= mode :octo)
+        base (geom/base-grid-type grid-type)
+        ;; "Octo" only makes sense on square-family grids and "Hex" only
+        ;; on hex-family grids -- if the scene's stored preference doesn't
+        ;; match the grid it's currently on, this falls back to :circle
+        ;; instead of getting stuck showing nothing sensible. Like no-grid
+        ;; mode and the lighting toggle, this is computed at render time
+        ;; rather than destructively overwriting the stored preference, so
+        ;; switching back to a matching grid immediately restores it with
+        ;; no extra step.
+        mode (cond
+               (and (= grid-shape :octo) (not= base :square)) :circle
+               (and (= grid-shape :hex) (= base :square)) :circle
+               :else grid-shape)
         filled? (= mode :dot)
-        ;; Circles/Octo are drawn slightly smaller than the cell they mark
-        ;; (70% of the "just fits" size) so they read as a marker inside
-        ;; the cell rather than tracing its boundary exactly.
+        ;; Circles/Octo/Hex are drawn slightly smaller than the cell they
+        ;; mark (70% of the "just fits" size) so they read as a marker
+        ;; inside the cell rather than tracing its boundary exactly.
         inscribed (* (grid-inscribed-radius grid-type) 0.7)
         radius (case mode
                  :dot grid-dot-radius
                  :octo (* inscribed octagon-circumradius-factor)
+                 :hex (* inscribed hex-circumradius-factor)
                  inscribed)]
     ($ :defs
-      (case (geom/base-grid-type grid-type)
+      (case base
         :hex-pointy
         ($ :pattern
           {:id "grid-pattern"
@@ -336,15 +353,15 @@
             ($ :path.scene-grid-path {:d geom/hex-pattern-path})
             ($ :<>
               ;; The interior, unclipped hex center for this tile.
-              ($ grid-marker {:cx (/ hex-width 2) :cy hex-row :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
+              ($ grid-marker {:cx (/ hex-width 2) :cy hex-row :grid-type grid-type :radius radius :shape mode :filled? filled?})
               ;; The other hex center sits on all 4 corners of the tile;
               ;; each corner draws a clipped fragment that, together with
               ;; its counterparts in neighboring tiles, reconstructs one
               ;; full marker per lattice point.
-              ($ grid-marker {:cx 0        :cy 0            :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx hex-width :cy 0            :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx 0        :cy (* 2 hex-row) :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx hex-width :cy (* 2 hex-row) :grid-type grid-type :radius radius :octo? octo? :filled? filled?}))))
+              ($ grid-marker {:cx 0        :cy 0            :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx hex-width :cy 0            :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx 0        :cy (* 2 hex-row) :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx hex-width :cy (* 2 hex-row) :grid-type grid-type :radius radius :shape mode :filled? filled?}))))
         :hex-flat
         ($ :pattern
           {:id "grid-pattern"
@@ -354,11 +371,11 @@
           (if (= mode :line)
             ($ :path.scene-grid-path {:d geom/hex-pattern-path-flat})
             ($ :<>
-              ($ grid-marker {:cx hex-row :cy (/ hex-width 2) :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx 0            :cy 0        :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx (* 2 hex-row) :cy 0        :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx 0            :cy hex-width :grid-type grid-type :radius radius :octo? octo? :filled? filled?})
-              ($ grid-marker {:cx (* 2 hex-row) :cy hex-width :grid-type grid-type :radius radius :octo? octo? :filled? filled?}))))
+              ($ grid-marker {:cx hex-row :cy (/ hex-width 2) :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx 0            :cy 0        :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx (* 2 hex-row) :cy 0        :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx 0            :cy hex-width :grid-type grid-type :radius radius :shape mode :filled? filled?})
+              ($ grid-marker {:cx (* 2 hex-row) :cy hex-width :grid-type grid-type :radius radius :shape mode :filled? filled?}))))
         ($ :pattern
           {:id "grid-pattern"
            :width grid-size
@@ -368,7 +385,7 @@
             ($ :path.scene-grid-path {:d (str "M 0 0 H " grid-size " V " grid-size)})
             ;; The token snap center for a square cell sits at the middle
             ;; of the tile, safely clear of any tile boundary.
-            ($ grid-marker {:cx half-size :cy half-size :grid-type grid-type :radius radius :octo? octo? :filled? filled?}))))
+            ($ grid-marker {:cx half-size :cy half-size :grid-type grid-type :radius radius :shape mode :filled? filled?}))))
       ($ :g {:id "scene-grid"}
         ($ :path
           {:d "M -100000 -100000 H 100000 V 100000 H -100000"
