@@ -3,6 +3,7 @@
             [ogres.app.component :as component :refer [icon]]
             [ogres.app.const :refer [grid-size]]
             [ogres.app.game-type :as game-type]
+            [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.util :refer [display-size]]
             [uix.core :as uix :refer [defui $]]))
@@ -64,7 +65,18 @@
 
 (def ^:private options-grid-shape
   [["Lines" :line "dash"]
-   ["Dots" :dot "circle"]])
+   ["Dots" :dot "circle"]
+   ["Circles" :circle "circle"]
+   ["Octo" :octo "square"]])
+
+(defn ^:private grid-shape-options [grid-type]
+  ;; "Octo" markers are only meaningful on square-family grids (Square,
+  ;; Iso Square, Iso Square (Vertical)) -- an octagon doesn't have an
+  ;; analogous reading on a hex lattice, so the option isn't offered
+  ;; there at all rather than being selectable but silently ignored.
+  (if (= (geom/base-grid-type grid-type) :square)
+    options-grid-shape
+    (remove (fn [[_ value]] (= value :octo)) options-grid-shape)))
 
 (def ^:private per-page 6)
 
@@ -330,7 +342,7 @@
       ($ :fieldset.fieldset.fieldset--radio
         ($ :legend "Grid style")
         ($ :.input-group
-          (for [[label value icon-name] options-grid-shape
+          (for [[label value icon-name] (grid-shape-options grid-type)
                 :let [on-change #(dispatch :scene/change-grid-shape value)]]
             ($ :<> {:key value}
               ($ :label.radio
@@ -345,8 +357,9 @@
         ($ :details
           ($ :summary "More Information")
           "Lines draw the full grid. Dots mark only the position each
-           token or shape will snap to, useful when you don't want the
-           grid to obscure the scene image."))
+           token or shape will snap to. Circles and Octo (square grids
+           only) mark that same position at the size of a default token,
+           useful for previewing how tokens will fit before placing any."))
       (if-not no-grid?
         ($ :fieldset.fieldset
           ($ :legend "Tile size ( px )")

@@ -230,7 +230,8 @@
   }
 }
 
-.scene-grid-path {
+.scene-grid-path,
+.scene-grid-outline {
   fill: none;
   /* shape-rendering: crispEdges; */
   stroke-dasharray: 2px;
