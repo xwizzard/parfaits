@@ -2,6 +2,7 @@
   (:require [clojure.string :refer [capitalize]]
             [ogres.app.component :refer [icon]]
             [ogres.app.component.scene-pattern :refer [pattern]]
+            [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.util :as util]
             [uix.core :as uix :refer [defui $]]))
@@ -91,6 +92,26 @@
        (fn [event]
          (on-change (.-checked (.-target event))))})
     ($ icon {:name (if value "lock" "unlock")})))
+
+(defui ^:private action-layer-shift
+  "A checkbox-style toggle action, styled and behaving just like
+   action-hide/action-lock above, for a single :object/layer-shift value
+   (:forward for props, :back for tokens) -- see
+   :objects/toggle-layer-shift-selected."
+  [{:keys [value disabled tooltip icon-name on-change]
+    :or   {value false disabled false on-change prevent-default}}]
+  ($ :label.context-menu-action
+    {:data-tooltip tooltip}
+    ($ :input
+      {:type "checkbox"
+       :name "layer-shift"
+       :checked value
+       :disabled disabled
+       :aria-disabled disabled
+       :on-change
+       (fn [event]
+         (on-change (.-checked (.-target event))))})
+    ($ icon {:name icon-name})))
 
 (defui ^:private action-remove
   [{:keys [disabled on-click]
@@ -308,6 +329,14 @@
               :on-change
               (fn []
                 (dispatch :objects/toggle-hidden-selected))})
+           ($ action-layer-shift
+             {:value (every? (comp #{:back} :object/layer-shift) data)
+              :disabled (not (:host props))
+              :tooltip "Send back below props"
+              :icon-name "arrow-down-short"
+              :on-change
+              (fn []
+                (dispatch :objects/toggle-layer-shift-selected :back))})
            ($ action-remove
              {:on-click
               (fn []
@@ -391,41 +420,178 @@
 
 (defui context-menu-prop [props]
   (let [dispatch (hooks/use-dispatch)
-        data     (:data props)]
-    ($ context-menu-fn
-      {:render-toolbar
-       (fn []
-         ($ :button
-           {:type "button"
-            :data-tooltip "Reset size/rotation"
-            :on-click
-            (fn []
-              (dispatch :objects/reset-transform-selected))}
-           ($ icon {:name "arrows-angle-expand"})))
-       :render-aside
-       (fn []
-         ($ :<>
-           ($ action-hide
-             {:value (every? :object/hidden data)
-              :disabled (not (:host props))
-              :on-change
-              (fn []
-                (dispatch :objects/toggle-hidden-selected))})
-           ($ action-lock
-             {:value (every? :object/locked data)
-              :disabled (not (:host props))
-              :on-change
-              (fn []
-                (dispatch :objects/toggle-locked-selected))})
-           ($ action-remove
-             {:on-click
-              (fn []
-                (dispatch :objects/remove-selected))})))}
-      (fn [{:keys []}]))))
+        data     (:data props)
+        entity   (first data)
+        id       (:db/id entity)
+        camera   (first (:camera/_selected entity))
+        anchor-editing? (= (:camera/draw-mode camera) :object-anchor)]
+    (if anchor-editing?
+      ;; While actively dragging the grid-anchor marker (see
+      ;; object-prop-edit in scene_objects.cljs), the confirm/cancel
+      ;; controls render right next to the marker on the canvas instead
+      ;; of here, so this menu steps out of the way entirely rather than
+      ;; showing two separate floating controls over the same piece.
+      nil
+      ($ context-menu-fn
+        {:render-toolbar
+         (fn []
+           ($ :<>
+             ($ :button
+               {:type "button"
+                :data-tooltip "Reset size/rotation"
+                :on-click
+                (fn []
+                  (dispatch :objects/reset-transform-selected))}
+               ($ icon {:name "arrows-angle-expand"}))
+             ($ :button
+               {:type "button"
+                :data-tooltip "Save scale as default"
+                :on-click
+                (fn []
+                  ;; Calibration reads a single entity's own scale/image, so
+                  ;; a multi-selection just uses the first -- this mirrors
+                  ;; the predecessor project's "Save scale as default" button
+                  ;; being a single-piece action.
+                  (dispatch :image/set-cell-scale id))}
+               ($ icon {:name "floppy"}))
+             ($ :button
+               {:type "button"
+                :data-tooltip "Save rotation as default"
+                :on-click
+                (fn []
+                  ;; Same single-piece convention as "Save scale as
+                  ;; default" above -- a multi-selection just uses the
+                  ;; first entity.
+                  (dispatch :image/set-rotation id))}
+               ($ icon {:name "arrow-counterclockwise-lock"}))
+             ($ :button
+               {:type "button"
+                :data-tooltip "Set grid anchor"
+                :on-click
+                (fn []
+                  (dispatch :camera/change-mode :object-anchor))}
+               ($ icon {:name "anchor"}))))
+         :render-aside
+         (fn []
+           ($ :<>
+             ($ action-hide
+               {:value (every? :object/hidden data)
+                :disabled (not (:host props))
+                :on-change
+                (fn []
+                  (dispatch :objects/toggle-hidden-selected))})
+             ($ action-lock
+               {:value (every? :object/locked data)
+                :disabled (not (:host props))
+                :on-change
+                (fn []
+                  (dispatch :objects/toggle-locked-selected))})
+             ($ action-layer-shift
+               {:value (every? (comp #{:forward} :object/layer-shift) data)
+                :disabled (not (:host props))
+                :tooltip "Bring forward above tokens"
+                :icon-name "arrow-up-short"
+                :on-change
+                (fn []
+                  (dispatch :objects/toggle-layer-shift-selected :forward))})
+             ($ action-remove
+               {:on-click
+                (fn []
+                  (dispatch :objects/remove-selected))})))}
+        (fn [{:keys []}])))))
+
+(def ^:private options-board-rotation-hex
+  [["Free" :free] ["15°" 15] ["30°" 30] ["60°" 60] ["90°" 90]])
+
+(def ^:private options-board-rotation-square
+  [["Free" :free] ["45°" 45] ["90°" 90]])
+
+(defn ^:private board-rotation-options
+  "Board piece rotation-snap choices, filtered by grid family -- same
+   split as the panel's own rotation-mode options (panel_scene.cljs),
+   duplicated here rather than shared since panels and this canvas-side
+   menu are different layers of the app."
+  [grid-type]
+  (if (= (geom/base-grid-type grid-type) :square)
+    options-board-rotation-square
+    options-board-rotation-hex))
+
+(defui context-menu-board [props]
+  (let [dispatch (hooks/use-dispatch)
+        data     (:data props)
+        entity   (first data)
+        id       (:db/id entity)
+        camera   (first (:camera/_selected entity))
+        grid-type (:scene/grid-type (:camera/scene camera))
+        anchor-editing? (= (:camera/draw-mode camera) :object-anchor)]
+    (if anchor-editing?
+      ;; While actively dragging the grid-anchor marker (see
+      ;; object-board-edit in scene_objects.cljs), the confirm/cancel
+      ;; controls render right next to the marker on the canvas instead
+      ;; of here, so this menu steps out of the way entirely rather than
+      ;; showing two separate floating controls over the same piece.
+      nil
+      ($ context-menu-fn
+        {:render-toolbar
+         (fn [{:keys [selected on-change]}]
+           ($ :<>
+             ($ :button
+               {:type "button"
+                :data-selected (= selected :rotation)
+                :data-tooltip "Rotation"
+                :on-click #(on-change :rotation)}
+               ($ icon {:name "arrow-counterclockwise"}))
+             ($ :button
+               {:type "button"
+                :data-tooltip "Save scale as default"
+                :on-click
+                (fn []
+                  ;; Calibration reads a single entity's own scale/image,
+                  ;; so a multi-selection just uses the first -- mirrors
+                  ;; context-menu-prop's identical action.
+                  (dispatch :image/set-cell-scale id))}
+               ($ icon {:name "floppy"}))
+             ($ :button
+               {:type "button"
+                :data-tooltip "Set grid anchor"
+                :on-click
+                (fn []
+                  (dispatch :camera/change-mode :object-anchor))}
+               ($ icon {:name "anchor"}))))
+         :render-aside
+         (fn []
+           ($ :<>
+             ($ action-hide
+               {:value (every? :object/hidden data)
+                :disabled (not (:host props))
+                :on-change
+                (fn []
+                  (dispatch :objects/toggle-hidden-selected))})
+             ($ action-lock
+               {:value (every? :object/locked data)
+                :disabled (not (:host props))
+                :on-change
+                (fn []
+                  (dispatch :objects/toggle-locked-selected))})
+             ($ action-remove
+               {:on-click
+                (fn []
+                  (dispatch :objects/remove-selected))})))}
+        (fn [{:keys [selected]}]
+          (if (= selected :rotation)
+            (for [[label mode] (board-rotation-options grid-type)]
+              ($ :label.radio {:key (str mode)}
+                ($ :input
+                  {:type "radio"
+                   :name "board-rotation-mode"
+                   :checked (= (:object/rotation-mode entity) mode)
+                   :on-change #(dispatch :object/change-rotation-mode id mode)})
+                label))))))))
 
 (defui context-menu [props]
   (if (util/uniform-by (comp namespace :object/type) (:data props))
     (case (namespace (:object/type (first (:data props))))
+      "board" ($ context-menu-board props)
       "prop"  ($ context-menu-prop  props)
       "shape" ($ context-menu-shape props)
       "token" ($ context-menu-token props)

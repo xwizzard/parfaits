@@ -11,7 +11,8 @@
             [uix.core :as uix :refer [defui $]]))
 
 (def schema
-  {:camera/scene         {:db/valueType :db.type/ref}
+  {:board/image          {:db/valueType :db.type/ref}
+   :camera/scene         {:db/valueType :db.type/ref}
    :camera/selected      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :db/ident             {:db/unique :db.unique/identity}
    :game-type/key        {:db/unique :db.unique/identity}
@@ -27,8 +28,8 @@
    :root/token-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/props-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/user            {:db/valueType :db.type/ref :db/isComponent true}
+   :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/game-type      {:db/valueType :db.type/ref}
-   :scene/image          {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}

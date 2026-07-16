@@ -218,6 +218,37 @@
     }
   }
 
+  .context-menu-form-rotation {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 120px;
+    padding: 2px;
+
+    label {
+      align-items: center;
+      border-radius: 3px;
+      cursor: pointer;
+      display: flex;
+      gap: 6px;
+      padding: 4px 6px;
+
+      &:hover {
+        background-color: var(--color-blues-800);
+      }
+
+      &:has(:checked) {
+        background-color: var(--color-blues-900);
+        color: var(--color-danger-500);
+      }
+
+      &:has(:focus-visible) {
+        outline: 1px dotted var(--outline-color);
+        outline-offset: 1px;
+      }
+    }
+  }
+
   .context-menu-form-conditions {
     display: grid;
     grid-template-columns: repeat(5, 1fr);

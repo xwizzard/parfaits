@@ -202,7 +202,16 @@
         publish (events/use-publish)
         entity (state/use-query [:user/host])
         write (idb/use-writer "images")
-        xform (if (= type :props)
+        xform (if (contains? #{:props :scene} type)
+                ;; WebP (unlike JPEG, process-file's default) keeps an
+                ;; alpha channel, which board/background pieces need --
+                ;; Gloomhaven-style map tiles are irregular jigsaw shapes
+                ;; with a transparent background around them. Matching
+                ;; props' own format+quality here also means the same
+                ;; source file uploaded to either gallery now hashes the
+                ;; same way, so a saved :image/cell-px or :image/anchor
+                ;; calibration carries over between board pieces and
+                ;; props for that image, not just within one gallery.
                 (map (fn [file] (process-file file "image/webp" 0.80)))
                 (map process-file))]
     (if (:user/host entity)

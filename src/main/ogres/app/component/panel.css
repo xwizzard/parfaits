@@ -87,6 +87,39 @@
   }
 }
 
+.panel-tabs-mode {
+  color: var(--color-paper-900);
+  max-height: 65px;
+
+  button {
+    background-color: var(--color-prime-500);
+    border-color: var(--color-blues-900);
+    border-radius: 2px 0 0 2px;
+    border-style: solid;
+    border-width: 1px 0 0 1px;
+    box-sizing: border-box;
+    color: var(--color-blues-900);
+    cursor: pointer;
+    height: 100%;
+    width: 100%;
+
+    &:hover {
+      background-color: var(--color-prime-300);
+    }
+
+    &:active {
+      background-color: var(--color-prime-700);
+      color: var(--color-paper-500);
+    }
+
+    &:focus-visible {
+      outline-offset: -2px;
+      outline: 2px solid var(--outline-color);
+      z-index: 1;
+    }
+  }
+}
+
 .panel-tabs-control {
   align-items: center;
   box-sizing: border-box;

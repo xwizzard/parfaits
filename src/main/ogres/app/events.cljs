@@ -102,10 +102,15 @@
 (defmethod
   ^{:doc "Switches the local user's interface mode (:builder, :setup, or
           :play). Builder mode edits game-type templates; setup mode
-          constructs a scenario; play mode hides construction tools."}
+          constructs a scenario; play mode hides construction tools.
+          Switching to setup mode always lands on the Scene tab, rather
+          than leaving whatever tab happened to carry over selected from
+          another mode."}
   event-tx-fn :user/change-mode
   [_ _ mode]
-  [{:db/ident :user :user/mode mode}])
+  [(cond-> {:db/ident :user :user/mode mode}
+     (= mode :setup)
+     (assoc :panel/selected :scene))])
 
 (defmethod
   ^{:doc "Changes the character label for the given user."}
@@ -181,7 +186,7 @@
   event-tx-fn :camera/change-mode
   [data _ mode]
   (let [user (ds/entity data [:db/ident :user])]
-    (if (or (:user/host user) (not (#{:mask :mask-toggle :mask-remove :grid :note} mode)))
+    (if (or (:user/host user) (not (#{:mask :mask-toggle :mask-remove :grid :note :object-anchor} mode)))
       [{:db/id (:db/id (:user/camera user)) :camera/draw-mode mode}]
       [])))
 
@@ -455,13 +460,21 @@
              {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}]))))
 
 (defmethod
-  ^{:doc "Removes the scene image by the given identifying hash."}
+  ^{:doc "Removes the scene image by the given identifying hash, along with
+          any board pieces in any scene that reference it -- otherwise
+          they'd be left with a dangling :board/image ref."}
   event-tx-fn :scene-images/remove
-  [_ _ image thumb]
-  (if (= image thumb)
-    [[:db/retractEntity [:image/hash image]]]
-    [[:db/retractEntity [:image/hash image]]
-     [:db/retractEntity [:image/hash thumb]]]))
+  [data _ image thumb]
+  (let [root (ds/entity data [:db/ident :root])
+        pieces (for [scene (:root/scenes root)
+                     piece (:scene/board scene)
+                     :when (= image (:image/hash (:board/image piece)))]
+                 [:db/retractEntity (:db/id piece)])]
+    (into (if (= image thumb)
+            [[:db/retractEntity [:image/hash image]]]
+            [[:db/retractEntity [:image/hash image]]
+             [:db/retractEntity [:image/hash thumb]]])
+          pieces)))
 
 ;; -- Scene --
 (defn ^:private assoc-scene
@@ -470,12 +483,6 @@
         scene (:db/id (:camera/scene (:user/camera user)))]
     [(apply assoc {:db/id scene} kvs)]))
 
-(defmethod
-  ^{:doc "Updates the image being used for the current scene by the given
-          identifying hash."}
-  event-tx-fn :scene/change-image
-  [_ _ hash]
-  [[:db.fn/call assoc-scene :scene/image {:image/hash hash}]])
 
 (defmethod
   ^{:doc "Updates the grid size for the current scene."}
@@ -496,6 +503,20 @@
   event-tx-fn :scene/change-grid-shape
   [_ _ shape]
   [[:db.fn/call assoc-scene :scene/grid-shape shape]])
+
+(defmethod
+  ^{:doc "Updates whether the grid renders :over or :under the board layer
+          (the scene's placed board/map pieces) for the current scene."}
+  event-tx-fn :scene/change-grid-order-board
+  [_ _ value]
+  [[:db.fn/call assoc-scene :scene/grid-order-board value]])
+
+(defmethod
+  ^{:doc "Updates whether the grid renders :over or :under the props layer
+          for the current scene."}
+  event-tx-fn :scene/change-grid-order-props
+  [_ _ value]
+  [[:db.fn/call assoc-scene :scene/grid-order-props value]])
 
 (defmethod
   ^{:doc "Updates the token scale multiplier for the given grid-type on the
@@ -596,8 +617,20 @@
   [:db/id
    :object/type
    :object/point
+   [:object/scale :default 1]
+   [:object/rotation :default 0]
    :shape/points
-   :token/size])
+   :token/size
+   {:prop/image [:image/width :image/height :image/anchor]}
+   {:board/image [:image/width :image/height :image/anchor]}])
+
+(def ^:private snap-to-cell-types
+  "Object types whose true center (not their :object/point, which for
+   props/board pieces is a corner) snaps to the nearest grid-cell center --
+   see geom/snap-to-cell. Tokens are included too: their :object/point
+   already is their center, so snap-to-cell degenerates to exactly the
+   hex/square math they've always used."
+  #{:token/token :prop/prop :board/piece})
 
 (defmethod event-tx-fn :objects/translate-many
   ^{:doc "Translates the objects given by idxs by the given delta,
@@ -612,16 +645,11 @@
         base-type (geom/base-grid-type grid-type)]
     (into [[:db/retract [:db/ident :user] :user/dragging]]
           (for [entity (ds/pull-many data translate-many-select idxs)
-                :let [{id :db/id point :object/point} entity]]
+                :let [{id :db/id point :object/point type :object/type} entity]]
             (cond
-              (and align? (= base-type :hex-pointy) (= (:object/type entity) :token/token))
-              {:db/id id :object/point (vec/nearest-hex (vec/add point delta) hex-radius)}
-              (and align? (= base-type :hex-flat) (= (:object/type entity) :token/token))
-              {:db/id id :object/point (vec/nearest-hex-flat (vec/add point delta) hex-radius)}
-              (and align? (= (:object/type entity) :token/token))
-              (let [bounds (vec/rnd (vec/add (geom/object-bounding-rect entity) delta) grid-size)]
-                {:db/id id :object/point (seg/midpoint bounds)})
-              (and align? (not= (:object/type entity) :note/note))
+              (and align? (contains? snap-to-cell-types type))
+              {:db/id id :object/point (geom/snap-to-cell entity delta base-type)}
+              (and align? (not= type :note/note))
               (let [round (geom/object-alignment entity)]
                 {:db/id id :object/point (vec/rnd (vec/add point delta) round)})
               :else
@@ -696,6 +724,107 @@
   event-tx-fn :object/change-rotation
   [_ _ id rotation]
   [[:db/add id :object/rotation rotation]])
+
+(defmethod
+  ^{:doc "Change the rotation-snap mode of the given object -- :free, or a
+          degree number (15/30/45/60/90) to hard-snap rotation drags to
+          that increment. Currently used by board pieces; the available
+          choices are filtered by grid family in the UI (see
+          panel_scene.cljs)."}
+  event-tx-fn :object/change-rotation-mode
+  [_ _ id mode]
+  [[:db/add id :object/rotation-mode mode]])
+
+(defmethod
+  ^{:doc "Toggles a layer-shift override on the given object -- :forward
+          moves a prop to render above the token layer, :back moves a
+          token to render below the prop layer (both still always render
+          above the board layer). Toggling the same value again clears
+          the override back to the default band for that type. Toggling
+          it on a type that doesn't consult it at render time (see
+          scene_objects.cljs's `objects` component) is a harmless no-op."}
+  event-tx-fn :object/toggle-layer-shift
+  [data _ id value]
+  (let [entity (ds/entity data id)]
+    [[:db/add id :object/layer-shift (if (= (:object/layer-shift entity) value) nil value)]]))
+
+(defmethod
+  ^{:doc "Toggles a layer-shift override (:forward or :back) on all
+          currently selected objects at once -- if every selected object
+          already has the given value, clears it back to nil (the default
+          band for that type) on all of them, otherwise sets it on all of
+          them. Mirrors the every?/not toggling convention already used by
+          :objects/toggle-hidden-selected and :objects/toggle-locked-selected."}
+  event-tx-fn :objects/toggle-layer-shift-selected
+  [data _ value]
+  (let [user (ds/entity data [:db/ident :user])
+        selected (:camera/selected (:user/camera user))
+        clear? (every? (comp #{value} :object/layer-shift) selected)]
+    (for [{id :db/id} selected]
+      [:db/add id :object/layer-shift (if clear? nil value)])))
+
+(defmethod
+  ^{:doc "Saves the given object's current effective scale as its source
+          image's default cell-scale calibration (grid-size / scale =
+          native-pixels-per-grid-cell), so future drops of that same image
+          -- as either a prop or a board piece -- automatically scale to
+          match the grid instead of dropping at native size. Retroactively
+          re-scales every other already-placed instance of the same image
+          too, across every scene, the same way saving a hex-scale in the
+          predecessor project (worldhaven-asset-browser's builder tool)
+          fixed up existing copies on its canvas."}
+  event-tx-fn :image/set-cell-scale
+  [data _ id]
+  (let [entity (ds/entity data id)
+        scale (:object/scale entity 1)
+        hash (:image/hash (or (:prop/image entity) (:board/image entity)))
+        cell-px (/ grid-size scale)
+        root (ds/entity data [:db/ident :root])
+        image-hash (fn [e] (:image/hash (or (:prop/image e) (:board/image e))))
+        others (mapcat (fn [scene] (concat (:scene/props scene) (:scene/board scene)))
+                       (:root/scenes root))]
+    (into [[:db/add [:image/hash hash] :image/cell-px cell-px]]
+          (for [other others :when (and (= hash (image-hash other)) (not= (:db/id other) id))]
+            [:db/add (:db/id other) :object/scale scale]))))
+
+(defmethod
+  ^{:doc "Saves the given object's current rotation as its source image's
+          default rotation, so future drops of that same image -- as
+          either a prop or a board piece -- start out pre-rotated to
+          match instead of always dropping at 0 degrees. Retroactively
+          re-rotates every other already-placed instance of the same
+          image too, across every scene, mirroring
+          :image/set-cell-scale's identical retroactive-update
+          behavior for scale."}
+  event-tx-fn :image/set-rotation
+  [data _ id]
+  (let [entity (ds/entity data id)
+        rotation (:object/rotation entity 0)
+        hash (:image/hash (or (:prop/image entity) (:board/image entity)))
+        root (ds/entity data [:db/ident :root])
+        image-hash (fn [e] (:image/hash (or (:prop/image e) (:board/image e))))
+        others (mapcat (fn [scene] (concat (:scene/props scene) (:scene/board scene)))
+                       (:root/scenes root))]
+    (into [[:db/add [:image/hash hash] :image/rotation rotation]]
+          (for [other others :when (and (= hash (image-hash other)) (not= (:db/id other) id))]
+            [:db/add (:db/id other) :object/rotation rotation]))))
+
+(defmethod
+  ^{:doc "Saves the given point (in the object's own local, unrotated,
+          unscaled image-pixel space -- the same space as its width/height)
+          as its source image's grid anchor -- the point within the
+          artwork that should snap to a grid cell center, for images (like
+          irregular jigsaw-shaped map tiles) whose true hex/square grid
+          isn't centered on the plain bounding box. See geom/snap-to-cell
+          and geom/object-anchor-point. Unlike :image/set-cell-scale, this
+          intentionally does NOT retroactively move any other already-
+          placed instance of the same image -- only future placements and
+          re-alignments are affected."}
+  event-tx-fn :image/set-anchor
+  [data _ id local-point]
+  (let [entity (ds/entity data id)
+        hash (:image/hash (or (:prop/image entity) (:board/image entity)))]
+    [[:db/add [:image/hash hash] :image/anchor local-point]]))
 
 (defmethod
   ^{:doc "Removes the objects given by idxs."}
@@ -1151,6 +1280,8 @@
    :object/locked
    :object/scale
    :object/rotation
+   :object/rotation-mode
+   :object/layer-shift
    :note/icon
    :note/label
    :note/description
@@ -1163,14 +1294,16 @@
    :token/size
    :token/aura-radius
    :token/image
-   :prop/image])
+   :prop/image
+   :board/image])
 
 (def ^:private clipboard-copy-select
   [{:user/camera
     [{:camera/selected
       (into clipboard-copy-attrs
             [:db/id
-             {:prop/image [:image/hash]}
+             {:prop/image [:image/hash :image/width :image/height :image/anchor]}
+             {:board/image [:image/hash :image/width :image/height :image/anchor]}
              {:token/image [:image/hash]}])}]}])
 
 (defmethod
@@ -1207,7 +1340,8 @@
          {:scene/game-type
           [[:game-type/enabled-elements :default #{}]]}]}]}]}
    {:root/token-images [:image/hash]}
-   {:root/props-images [:image/hash]}])
+   {:root/props-images [:image/hash]}
+   {:root/scene-images [:image/hash]}])
 
 (defmethod
   ^{:doc "Creates objects on the current scene from the data stored in the
@@ -1226,47 +1360,48 @@
             game-type-entity :scene/game-type}
            :camera/scene} :user/camera} :root/user
          token-images :root/token-images
-         props-images :root/props-images} result
+         props-images :root/props-images
+         scene-images :root/scene-images} result
         align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
         base-type (geom/base-grid-type grid-type)
         props-hashes (into #{} (map :image/hash) props-images)
         token-hashes (into #{} (map :image/hash) token-images)
+        board-hashes (into #{} (map :image/hash) scene-images)
         pastable-xf
         (filter
          (fn [data]
-           (or (not= (:object/type data) :prop/prop)
-               (props-hashes (:image/hash (:prop/image data))))))
+           (case (:object/type data)
+             :prop/prop (props-hashes (:image/hash (:prop/image data)))
+             :board/piece (board-hashes (:image/hash (:board/image data)))
+             true)))
         bound (transduce (mapcat geom/object-bounding-rect) geom/bounding-rect-rf clipboard)
         delta (vec/sub
                (vec/add point (geom/screen->scene-vec (seg/midpoint screen) scale grid-type))
                (seg/midpoint bound))]
     (for [[idx copy] (sequence (comp pastable-xf (indexed)) clipboard)
-          :let [{point :object/point
-                 {hash-prop :image/hash} :prop/image
-                 {hash-token :image/hash} :token/image} copy
+          :let [{hash-prop :image/hash} (:prop/image copy)
+                hash-board (:image/hash (:board/image copy))
+                hash-token (:image/hash (:token/image copy))
                 type (keyword (namespace (:object/type copy)))
-                data (cond-> (assoc copy :db/id idx :object/point (vec/add point delta))
+                moved (assoc copy :db/id idx :object/point (vec/add (:object/point copy) delta))
+                data (cond-> moved
                        align?
-                       (assoc :object/point (vec/rnd (vec/add point delta) grid-size))
+                       (assoc :object/point (vec/rnd (:object/point moved) grid-size))
                        (and (= type :prop) (props-hashes hash-prop))
                        (assoc :prop/image [:image/hash (props-hashes hash-prop)])
+                       (and (= type :board) (board-hashes hash-board))
+                       (assoc :board/image [:image/hash (board-hashes hash-board)])
                        (and (= type :token) (token-hashes hash-token))
                        (assoc :token/image [:image/hash (token-hashes hash-token)])
-                       (and (= type :token) align?)
-                       (assoc :object/point
-                              (let [bounds (geom/object-bounding-rect copy)
-                                    aligns (vec/rnd (vec/add bounds delta) grid-size)]
-                                (seg/midpoint aligns)))
-                       (and (= type :token) align? (= base-type :hex-pointy))
-                       (assoc :object/point (vec/nearest-hex (vec/add point delta) hex-radius))
-                       (and (= type :token) align? (= base-type :hex-flat))
-                       (assoc :object/point (vec/nearest-hex-flat (vec/add point delta) hex-radius)))]]
+                       (and align? (contains? snap-to-cell-types (:object/type copy)))
+                       (assoc :object/point (geom/snap-to-cell moved vec/zero base-type)))]]
       {:db/id camera
        :camera/selected idx
        :camera/scene
        (cond-> {:db/id scene}
          (= type :note)  (assoc :scene/notes data)
          (= type :prop)  (assoc :scene/props data)
+         (= type :board) (assoc :scene/board data)
          (= type :shape) (assoc :scene/shapes data)
          (= type :token) (assoc :scene/tokens data))})))
 
@@ -1409,29 +1544,108 @@
 
 (defmethod
   ^{:doc "Creates a new prop image in the current scene at the given
-          screen-space point."}
+          screen-space point. If the image has a saved cell-scale
+          calibration (:image/cell-px, set via :image/set-cell-scale on
+          some earlier placed copy), the prop drops pre-scaled to match
+          the scene's grid instead of at native size (1:1). If the image
+          has a saved default rotation (:image/rotation, set via
+          :image/set-rotation), the prop also drops pre-rotated to match
+          instead of always starting at 0 degrees. If grid-align is
+          enabled, the prop's true center also snaps to the nearest grid
+          cell, the same way tokens already do on drop."}
   event-tx-fn :props/create
   [data _ point hash]
   (let [{{bounds :user/bounds
           {camera-point :camera/point
            camera-scale :camera/scale
            camera-id :db/id
-           {scene-id :db/id grid-type :scene/grid-type}
+           {scene-id :db/id grid-type :scene/grid-type
+            align? :scene/grid-align
+            game-type-entity :scene/game-type}
            :camera/scene}
           :user/camera} :root/user}
         (ds/entity data [:db/ident :root])
         {width :image/width
-         height :image/height}
+         height :image/height
+         cell-px :image/cell-px
+         rotation :image/rotation
+         anchor :image/anchor}
         (ds/entity data [:image/hash hash])
+        scale (if cell-px (/ grid-size cell-px) 1)
+        rotation (or rotation 0)
+        align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
+        base-type (geom/base-grid-type grid-type)
         xform
         (-> (matrix/translate matrix/identity camera-point)
             (matrix/translate (/ width -2) (/ height -2))
             (matrix/multiply (geom/scene-scale-matrix camera-scale grid-type))
-            (matrix/translate (vec/mul (.-a bounds) -1)))]
+            (matrix/translate (vec/mul (.-a bounds) -1)))
+        object-point (xform point)
+        object-point
+        (if align?
+          (geom/snap-to-cell
+           {:object/type :prop/prop
+            :object/point object-point :object/scale scale :object/rotation rotation
+            :prop/image {:image/width width :image/height height :image/anchor anchor}}
+           vec/zero base-type)
+          object-point)]
     (if (geom/point-within-rect? point bounds)
-      [[:db/add -1 :object/point (xform point)]
+      [[:db/add -1 :object/point object-point]
+       [:db/add -1 :object/scale scale]
+       [:db/add -1 :object/rotation rotation]
        [:db/add -1 :object/type :prop/prop]
        [:db/add -1 :prop/image [:image/hash hash]]
        [:db/add camera-id :camera/selected -1]
        [:db/add scene-id :scene/props -1]]
+      [])))
+
+;; --- Board ---
+
+(defmethod
+  ^{:doc "Creates a new board (map/background) piece in the current scene
+          at the given screen-space point. Same calibrated-scale and
+          grid-align-snap behavior as :props/create -- see its doc."}
+  event-tx-fn :board/create
+  [data _ point hash]
+  (let [{{bounds :user/bounds
+          {camera-point :camera/point
+           camera-scale :camera/scale
+           camera-id :db/id
+           {scene-id :db/id grid-type :scene/grid-type
+            align? :scene/grid-align
+            game-type-entity :scene/game-type}
+           :camera/scene}
+          :user/camera} :root/user}
+        (ds/entity data [:db/ident :root])
+        {width :image/width
+         height :image/height
+         cell-px :image/cell-px
+         anchor :image/anchor}
+        (ds/entity data [:image/hash hash])
+        scale (if cell-px (/ grid-size cell-px) 1)
+        align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
+        base-type (geom/base-grid-type grid-type)
+        rotation-mode (if (= base-type :square) 90 60)
+        xform
+        (-> (matrix/translate matrix/identity camera-point)
+            (matrix/translate (/ width -2) (/ height -2))
+            (matrix/multiply (geom/scene-scale-matrix camera-scale grid-type))
+            (matrix/translate (vec/mul (.-a bounds) -1)))
+        object-point (xform point)
+        object-point
+        (if align?
+          (geom/snap-to-cell
+           {:object/type :board/piece
+            :object/point object-point :object/scale scale :object/rotation 0
+            :board/image {:image/width width :image/height height :image/anchor anchor}}
+           vec/zero base-type)
+          object-point)]
+    (if (geom/point-within-rect? point bounds)
+      [[:db/add -1 :object/point object-point]
+       [:db/add -1 :object/scale scale]
+       [:db/add -1 :object/rotation-mode rotation-mode]
+       [:db/add -1 :object/type :board/piece]
+       [:db/add -1 :board/image [:image/hash hash]]
+       [:db/add camera-id :camera/selected -1]
+       [:db/add scene-id :scene/board -1]]
       [])))

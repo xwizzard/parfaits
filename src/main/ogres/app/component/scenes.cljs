@@ -9,7 +9,11 @@
 (defn ^:private render-scene-name [camera]
   (if-let [label (:camera/label camera)]
     label
-    (if-let [filename (-> camera :camera/scene :scene/image :image/name)]
+    ;; With no custom label, fall back to the name of the scene's first
+    ;; placed board piece (there's no longer one single background image
+    ;; to name the scene after -- this is an arbitrary but reasonable
+    ;; pick among however many pieces make up the board).
+    (if-let [filename (-> camera :camera/scene :scene/board first :board/image :image/name)]
       (replace filename filename-re "")
       "Untitled scene")))
 
@@ -22,7 +26,7 @@
     [:db/id
      :camera/label
      {:camera/scene
-      [{:scene/image [:image/name]}]}]}])
+      [{:scene/board [{:board/image [:image/name]}]}]}]}])
 
 (defui scenes []
   (let [dispatch (hooks/use-dispatch)

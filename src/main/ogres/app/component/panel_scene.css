@@ -3,16 +3,6 @@
   gap: 6px;
   grid-template-columns: repeat(3, 1fr);
   grid-template-rows: repeat(2, 1fr);
-
-  &:has(input:focus-visible) .scene-gallery-thumbnail {
-    filter: opacity(0.4);
-  }
-
-  &:has(input:focus-visible) .scene-gallery-thumbnail:has(:checked) {
-    outline: 2px dotted var(--outline-color);
-    outline-offset: 1px;
-    filter: none;
-  }
 }
 
 .scene-gallery-thumbnail {
@@ -23,19 +13,11 @@
   display: flex;
   position: relative;
 
-  &:has(:checked) {
-    outline: 3px solid var(--color-prime-500);
-  }
-
   &[data-type="image"] {
     background-color: var(--color-blues-700);
     background-position: 50%;
     background-repeat: no-repeat;
     background-size: contain;
-
-    &[data-selected="false"] {
-      cursor: pointer;
-    }
   }
 
   &[data-type="placeholder"] {
@@ -43,18 +25,16 @@
     border-style: dashed;
   }
 
-  label {
+  .scene-gallery-thumbnail-drag {
+    background: none;
+    border: none;
+    cursor: grab;
     flex: 1;
-    &:has(input:not(:checked)) {
-      cursor: pointer;
-    }
-  }
+    padding: 0;
 
-  input {
-    position: absolute;
-    margin: 0;
-    opacity: 0;
-    width: 0;
+    &:active {
+      cursor: grabbing;
+    }
   }
 
   .button {
@@ -89,6 +69,12 @@
   &:hover .button {
     visibility: visible;
   }
+}
+
+.scene-gallery-overlay-content {
+  cursor: grab;
+  max-width: 380px;
+  opacity: 0.8;
 }
 
 .scene-gallery-form {

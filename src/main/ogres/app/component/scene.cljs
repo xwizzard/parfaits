@@ -11,6 +11,7 @@
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.modifiers :as modifiers]
+            [ogres.app.segment :as seg :refer [Segment]]
             [ogres.app.svg :refer [circle->path poly->path]]
             [ogres.app.util :refer [key-by]]
             [ogres.app.vec :as vec :refer [Vec2]]
@@ -65,24 +66,30 @@
     (string? label) (str label)
     (number? suffix) (str " " (char (+ suffix 64)))))
 
-(def ^:private image-defs-query
+(def ^:private board-bounds-query
   [{:user/camera
     [{:camera/scene
-      [[:scene/grid-size :default grid-size]
-       [:scene/grid-origin :default vec/zero]
-       [:scene/lighting :default :revealed]
-       {:scene/image [:image/hash :image/width :image/height]}]}]}])
+      [{:scene/board
+        [[:object/type :default :board/piece]
+         [:object/point :default vec/zero]
+         [:object/scale :default 1]
+         [:object/rotation :default 0]
+         {:board/image [[:image/width :default 0] [:image/height :default 0]]}]}]}]}])
 
-(defui ^:private image-defs []
-  (let [result (hooks/use-query image-defs-query)
-        {{{{width  :image/width
-            height :image/height
-            hash :image/hash} :scene/image
-           origin :scene/grid-origin
-           size :scene/grid-size} :camera/scene} :user/camera} result
-        transform
-        (str (vec/rnd (vec/mul origin -1)) " "
-             "scale(" (/ grid-size size) ")")]
+(defui ^:private image-defs
+  "Defines the scene's masking/lighting bounds (#scene-image-cover,
+   #scene-image-clip) as the union of every placed board piece's own
+   (rotated/scaled) bounding rect -- there's no longer one single
+   full-scene image to size the scene off of, so the playable/maskable
+   area grows and shrinks automatically as board pieces are placed,
+   moved, or removed. With no pieces placed at all, falls back to one
+   grid cell rather than a degenerate zero-size rect."
+  []
+  (let [result (hooks/use-query board-bounds-query)
+        board (-> result :user/camera :camera/scene :scene/board)
+        bound (if (seq board)
+                (transduce (mapcat geom/object-bounding-rect) geom/bounding-rect-rf board)
+                (Segment. vec/zero (Vec2. grid-size grid-size)))]
     ($ :defs
       ($ :filter {:id "scene-image-filter" :filterRes 1 :color-interpolation-filters "sRGB"}
         ($ :feColorMatrix {:in "SourceGraphic" :type "saturate" :values 0.2 :result "Next"})
@@ -90,12 +97,12 @@
           ($ :feFuncR {:type "linear" :slope 0.60})
           ($ :feFuncG {:type "linear" :slope 0.60})
           ($ :feFuncB {:type "linear" :slope 0.60})))
-      (if (some? hash)
-        ($ image {:hash hash}
-          (fn [url]
-            ($ :image
-              {:id "scene-image" :href url :width width :height height :transform transform}))))
-      ($ :rect {:id "scene-image-cover" :width width :height height :transform transform})
+      ($ :rect
+        {:id "scene-image-cover"
+         :x (.-x (.-a bound))
+         :y (.-y (.-a bound))
+         :width (seg/width bound)
+         :height (seg/height bound)})
       ($ :clipPath {:id "scene-image-clip"}
         ($ :use {:href "#scene-image-cover"})))))
 
@@ -575,60 +582,101 @@
           #js {"modifiers" #js [scale-fn modifiers/trunc]}
           children)))))
 
+(def ^:private grid-order-query
+  [{:user/camera
+    [{:camera/scene
+      [[:scene/grid-order-board :default :under]
+       [:scene/grid-order-props :default :under]]}]}])
+
+(defn ^:private grid-slot
+  "Resolves the single shared grid line's position relative to the board
+   and props/tokens bands, given the scene's two independent grid-order
+   settings. Board is always the bottommost band and props/tokens are
+   always above it, so of the four (board-order, props-order)
+   combinations only three distinct positions are actually possible --
+   :bottom (grid under both), :middle (grid over board, under props), or
+   :top (grid over both). The fourth combination (board :under + props
+   :over -- asking for the grid to be simultaneously under the board and
+   over the props that are themselves always above the board) has no
+   valid single position; board's setting wins in that conflict since it's
+   the more fundamental of the two (whether the map is visible through the
+   grid at all)."
+  [board-order props-order]
+  (if (= board-order :over)
+    (if (= props-order :over) :top :middle)
+    :bottom))
+
 (defui ^:private ^:memo scene-elements []
-  ($ :<>
-    ;; Defines the standard square grid pattern for the scene.
-    ($ grid-defs)
+  (let [result (hooks/use-query grid-order-query)
+        {{{grid-order-board :scene/grid-order-board
+           grid-order-props :scene/grid-order-props} :camera/scene} :user/camera} result
+        ;; The board and props/tokens bands each get their own portal
+        ;; target -- `objects` (scene_objects.cljs) mounts once (one
+        ;; query, one drag-listener) but teleports its rendered board
+        ;; pieces and its rendered props/shapes/notes/tokens into these
+        ;; two separate DOM locations, which is what lets the grid render
+        ;; independently over/under each one without needing two
+        ;; separate mounted instances of the drag machinery.
+        board-layer
+        ($ hooks/create-portal {:name :board-layer}
+          (fn [{:keys [ref]}] ($ :g.scene-board {:ref ref})))
+        props-layer
+        ($ hooks/create-portal {:name :props-layer}
+          (fn [{:keys [ref]}] ($ :g {:ref ref})))]
+    ($ :<>
+      ;; Defines the standard square grid pattern for the scene.
+      ($ grid-defs)
 
-    ;; Defines clip paths and masks for tokens which emit
-    ;; radial lighting.
-    ($ mask-defs)
+      ;; Defines clip paths and masks for tokens which emit
+      ;; radial lighting.
+      ($ mask-defs)
 
-    ;; Defines the scene <image> element as well as a <rect>
-    ;; which has the same dimensions as the image.
-    ($ image-defs)
+      ;; Defines the scene's masking/lighting bounds, derived from the
+      ;; union of every placed board piece.
+      ($ image-defs)
 
-    ;; Defines token patterns, images, and the tokens themselves.
-    ($ tokens-defs)
+      ;; Defines token patterns, images, and the tokens themselves.
+      ($ tokens-defs)
 
-    ($ :g.scene-exterior
-      ($ :use.scene-grid {:href "#scene-grid" :style {:clip-path "unset"}}))
+      ($ :g.scene-exterior
+        ($ :use.scene-grid {:href "#scene-grid" :style {:clip-path "unset"}}))
 
-    ;; When the scene is using the "Obscured" lighting option,
-    ;; this element becomes visible for players. It renders a
-    ;; darkened and desaturated version of the scene image
-    ;; that is drawn underneath the foreground scene.
-    ($ :g.scene-background
-      ($ :use.scene-image {:href "#scene-image"})
-      ($ :use.scene-grid {:href "#scene-grid"}))
-
-    ;; The primary scene object contains all interactable objects.
-    ;; This element is clipped twice: first by tokens which emit
-    ;; light around them, and then second by user-created mask
-    ;; areas.
-    ($ :g.scene-foreground
-      ($ :g.scene-interior
-        ($ :use.scene-image {:href "#scene-image"})
-        ($ :use.scene-grid {:href "#scene-grid"})
-        ($ objects))
-
-      ;; Portal target for the host's cursor which must remain obscured
-      ;; by visibility controls so that nosey players don't get any
-      ;; clues about what the host may be doing on the scene.
-      ($ hooks/create-portal {:name :host-cursor}
-        (fn [{:keys [ref]}]
-          ($ :g {:ref ref :style {:outline "none"} :tab-index -1}))))
-
-    ;; Masking elements that fully or partially obscure the scene.
-    ($ :g.scene-mask
-      ($ :g.scene-mask-primary
-        ($ :use.scene-mask-fill {:href "#scene-image-cover"})
-        ($ :use.scene-mask-pattern {:href "#scene-image-cover"})
+      ;; When the scene is using the "Obscured" lighting option, this
+      ;; element becomes visible for players -- just the grid, since
+      ;; there's no longer a single scene-wide image to show a
+      ;; darkened/desaturated copy of underneath the foreground scene.
+      ($ :g.scene-background
         ($ :use.scene-grid {:href "#scene-grid"}))
-      ($ :g.scene-mask-secondary
-        ($ :use.scene-mask-fill {:href "#scene-image-cover"})
-        ($ :use.scene-mask-pattern {:href "#scene-image-cover"})
-        ($ :use.scene-grid {:href "#scene-grid"})))
+
+      ;; The primary scene object contains all interactable objects.
+      ;; This element is clipped twice: first by tokens which emit
+      ;; light around them, and then second by user-created mask
+      ;; areas.
+      ($ :g.scene-foreground
+        ($ :g.scene-interior
+          (case (grid-slot grid-order-board grid-order-props)
+            :bottom ($ :<> ($ :use.scene-grid {:href "#scene-grid"}) board-layer props-layer)
+            :middle ($ :<> board-layer ($ :use.scene-grid {:href "#scene-grid"}) props-layer)
+            :top    ($ :<> board-layer props-layer ($ :use.scene-grid {:href "#scene-grid"})))
+          ($ objects))
+
+        ;; Portal target for the host's cursor which must remain obscured
+        ;; by visibility controls so that nosey players don't get any
+        ;; clues about what the host may be doing on the scene.
+        ($ hooks/create-portal {:name :host-cursor}
+          (fn [{:keys [ref]}]
+            ($ :g {:ref ref :style {:outline "none"} :tab-index -1}))))
+
+      ;; Masking elements that fully or partially obscure the scene.
+      ($ :g.scene-mask
+        ($ :g.scene-mask-primary
+          ($ :use.scene-mask-fill {:href "#scene-image-cover"})
+          ($ :use.scene-mask-pattern {:href "#scene-image-cover"})
+          ($ :use.scene-grid {:href "#scene-grid"}))
+        ($ :g.scene-mask-secondary
+          ($ :use.scene-mask-fill {:href "#scene-image-cover"})
+          ($ :use.scene-mask-pattern {:href "#scene-image-cover"})
+          ($ :use.scene-grid {:href "#scene-grid"})))
 
     ;; Portal target for selected tokens and shapes. This brings
     ;; selected objects to the foreground so they are not obscured
@@ -642,7 +690,7 @@
 
     ;; Renders mask area boundaries, allowing the host to interact
     ;; with them individually.
-    ($ mask-polys)))
+    ($ mask-polys))))
 
 (def ^:private scene-query
   [:user/host
@@ -659,8 +707,7 @@
        [:scene/lighting :default :revealed]
        [:scene/masked :default false]
        {:scene/game-type
-        [[:game-type/enabled-elements :default #{}]]}
-       {:scene/image [:image/hash]}]}]}])
+        [[:game-type/enabled-elements :default #{}]]}]}]}])
 
 (defui ^:private scene-content [props]
   (let [dispatch (hooks/use-dispatch)
@@ -719,13 +766,15 @@
           ($ draw {:key mode :mode mode :node nil}))))))
 
 (defui ^:private scene-transition [props]
-  (let [id   (-> props :data :user/camera :camera/scene :db/id)
-        hash (-> props :data :user/camera :camera/scene :scene/image :image/hash)
-        url  (hooks/use-image hash)]
+  ;; Board pieces are now a per-scene collection rather than one single
+  ;; image, so there's no single hash left to gate this transition on
+  ;; loading -- it now just fades in on scene switch (by :db/id), without
+  ;; waiting for any particular piece's image to finish loading first.
+  (let [id (-> props :data :user/camera :camera/scene :db/id)]
     ($ CSSTransition
-      {:key (str "id:" id "/" "hash:" hash)
+      {:key (str "id:" id)
        :nodeRef (:ref props)
-       :in (or (nil? hash) (and (some? hash) (some? url)))
+       :in true
        :timeout 250
        :unmountOnExit true
        :mountOnEnter true

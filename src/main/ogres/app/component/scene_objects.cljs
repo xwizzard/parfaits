@@ -247,6 +247,100 @@
                    :default-value (:note/description entity)}))
               ($ :input {:type "submit" :hidden true}))))))))
 
+(def ^:private anchor-marker-angles
+  "The undirected grid-line angles (degrees) that meet at a single cell
+   vertex for each base grid type -- two perpendicular lines for a square
+   grid, three lines 60 degrees apart for a hex grid (matching the edge
+   directions derived from geom/hex-points / hex-points-flat: pointy-top
+   hexes tile with edges at 30/90/150 degrees, flat-top at 0/60/120).
+   Drawing the anchor marker as this same axis, rather than a plain dot,
+   lets it be visually lined up against the grid lines actually drawn in
+   the artwork. Square is offset 45 degrees from a plain edge-crossing
+   cross so its arms point at adjacent cell corners (diagonals) instead
+   of along the cell edges -- easier to eyeball against a square grid's
+   corner points."
+  {:square [45 135]
+   :hex-pointy [30 90 150]
+   :hex-flat [0 60 120]})
+
+(defui ^:private ^:memo object-anchor-marker
+  [{:keys [point size grid-type]}]
+  (let [option #js {"id" "anchor" "data" #js {"type" "anchor"}}
+        drag (use-draggable option)
+        handle (and (.-listeners drag) (.-onPointerDown (.-listeners drag)))
+        px (.-x point) py (.-y point)
+        ;; Each arm spans roughly two grid cells, in the same world-space
+        ;; units the grid itself is drawn in (unscaled by the piece's own
+        ;; :object/scale or rotation -- this marker is rendered in a
+        ;; grid-locked wrapper precisely so it doesn't spin or resize with
+        ;; the piece, only the camera's own zoom naturally applies, same
+        ;; as the real grid lines).
+        len (* 2 grid-size)
+        angles (get anchor-marker-angles (geom/base-grid-type grid-type) (:square anchor-marker-angles))]
+    ($ :g.scene-object-anchor-target
+      {:data-dragging (.-isDragging drag)
+       :on-pointer-down handle
+       :style {:cursor (if (.-isDragging drag) "grabbing" "grab")}}
+      ($ :circle.scene-object-anchor-hit {:cx px :cy py :r (* size 2)})
+      (for [deg angles
+            :let [rad (* deg (/ js/Math.PI 180))
+                  dx (* len (js/Math.cos rad))
+                  dy (* len (js/Math.sin rad))]]
+        ($ :line.scene-object-anchor-line
+          {:key deg
+           :x1 (- px dx) :y1 (- py dy)
+           :x2 (+ px dx) :y2 (+ py dy)}))
+      ($ :circle.scene-object-anchor-dot {:cx px :cy py :r (/ size 2.5)}))))
+
+(def ^:private anchor-nudge-step
+  "Native artwork pixels moved per keyboard nudge of the grid-anchor
+   marker (arrow keys or numpad directions) -- a small, fixed, zoom- and
+   scale-independent step, since :image/anchor is itself stored in the
+   image's own native pixel space."
+  1)
+
+(def ^:private anchor-nudge-arrow-angles
+  {"ArrowRight" 0 "ArrowDown" 90 "ArrowLeft" 180 "ArrowUp" 270})
+
+(def ^:private anchor-nudge-hex-pointy-angles
+  "Numpad-direction angles (screen degrees, clockwise from due east) for a
+   pointy-top hex grid's 6 neighbor-center directions -- pointy-top hexes
+   have flat left/right sides, so they get direct west/east neighbors
+   (4/6) plus the four 60-degree-apart diagonals (7/9/1/3). Derived from
+   vec/nearest-hex's hex-w/row-h lattice spacing, not eyeballed."
+  {"Numpad6" 0 "Numpad3" 60 "Numpad1" 120 "Numpad4" 180 "Numpad7" 240 "Numpad9" 300})
+
+(def ^:private anchor-nudge-hex-flat-angles
+  "Same idea as anchor-nudge-hex-pointy-angles, but for a flat-top hex
+   grid -- flat-top hexes have flat top/bottom edges instead, so they get
+   direct north/south neighbors (8/2) plus the same four diagonals
+   (7/9/1/3), each rotated 30 degrees from the pointy-top set."
+  {"Numpad3" 30 "Numpad2" 90 "Numpad1" 150 "Numpad7" 210 "Numpad8" 270 "Numpad9" 330})
+
+(def ^:private anchor-nudge-codes
+  "Every key code the grid-anchor nudge handler cares about, regardless of
+   grid-type -- used to swallow these keys outright while anchor-editing,
+   even on a code/grid-type combination anchor-nudge-angle itself treats
+   as a no-op (e.g. Numpad8 on a pointy-top hex grid), so they never leak
+   through to dnd-kit's own keyboard handling on the scene's selection
+   draggable."
+  #{"ArrowUp" "ArrowDown" "ArrowLeft" "ArrowRight"
+    "Numpad1" "Numpad2" "Numpad3" "Numpad4" "Numpad6" "Numpad7" "Numpad8" "Numpad9"})
+
+(defn ^:private anchor-nudge-angle
+  "The screen-space angle (degrees) the given key code should nudge the
+   grid-anchor marker along, or nil if that code isn't a nudge key for
+   this grid-type. Plain arrows always work; the numpad directions are
+   hex-family-specific (see the two tables above) since a square grid's
+   anchor only ever needs to move along its own square axis, which the
+   arrow keys already cover."
+  [grid-type code]
+  (or (get anchor-nudge-arrow-angles code)
+      (case (geom/base-grid-type grid-type)
+        :hex-pointy (get anchor-nudge-hex-pointy-angles code)
+        :hex-flat (get anchor-nudge-hex-flat-angles code)
+        nil)))
+
 (defui ^:private ^:memo object-prop-scale
   [{:keys [point size angle]}]
   (let [option #js {"id" (str "resize/" point) "data" #js {"type" "resize" "point" point}}
@@ -291,14 +385,20 @@
           object-scale :object/scale
           object-rotation :object/rotation
           {width :image/width
-           height :image/height} :prop/image
-          [{zoom :camera/scale}] :camera/_selected} :entity
-         transform :transform} props
+           height :image/height
+           anchor :image/anchor} :prop/image
+          [{zoom :camera/scale draw-mode :camera/draw-mode}] :camera/_selected} :entity
+         transform :transform
+         grid-type :grid-type} props
+        default-anchor (Vec2. (/ width 2) (/ height 2))
         [scale set-scale] (uix/use-state object-scale)
         [rotation set-rotation] (uix/use-state object-rotation)
+        [anchor-point set-anchor-point] (uix/use-state (or anchor default-anchor))
+        [anchor-origin set-anchor-origin] (uix/use-state (or anchor default-anchor))
         dispatch (hooks/use-dispatch)
         bounds (Segment. vec/zero (Vec2. width height))
         center (seg/midpoint bounds)
+        anchor-editing? (= draw-mode :object-anchor)
         get-scale
         (fn [^js/Object event]
           (let [data (.. event -active -data -current)
@@ -317,40 +417,126 @@
                        (vec/angle)
                        (+ 90))
                 rd (util/round dg 45)]
-            (if (< (abs (- dg rd)) 5) rd dg)))]
+            (if (< (abs (- dg rd)) 5) rd dg)))
+        get-anchor-point
+        (fn [^js/Object event]
+          (let [dx (.-x (.-delta event))
+                dy (.-y (.-delta event))]
+            ((matrix/inverse transform) (vec/shift (transform anchor-origin) dx dy))))]
     (uix/use-effect
      (fn []
        (set-scale object-scale)
        (set-rotation object-rotation))
      [object-scale object-rotation])
     (use-dnd-monitor
-     #js {"onDragMove"
+     #js {"onDragStart"
+          (fn [event]
+            (case (.. event -active -data -current -type)
+              "anchor" (set-anchor-origin anchor-point)
+              nil))
+          "onDragMove"
           (fn [event]
             (case (.. event -active -data -current -type)
               "resize" (set-scale (get-scale event))
-              "rotate" (set-rotation (get-rotation event))))
+              "rotate" (set-rotation (get-rotation event))
+              "anchor" (set-anchor-point (get-anchor-point event))
+              nil))
           "onDragEnd"
           (fn [event]
             (case (.. event -active -data -current -type)
               "resize" (dispatch :object/change-scale id (get-scale event))
-              "rotate" (dispatch :object/change-rotation id (get-rotation event))))})
-    ($ :g.scene-prop
-      {:style
-       {:transform
-        (-> (matrix/translate matrix/identity center)
-            (matrix/scale scale)
-            (matrix/rotate rotation)
-            (matrix/translate (vec/mul center -1)))}}
-      (:children props)
-      (for [point (geom/rect-points bounds)]
-        ($ object-prop-scale
-          {:key point
-           :point point
-           :size (/ 8 scale zoom)
-           :angle (vec/angle (vec/sub (transform point) center))}))
-      ($ object-prop-rotate
-        {:point (Vec2. (.-x center) (/ 26 scale zoom -1))
-         :size (/ 5 scale zoom)}))))
+              "rotate" (dispatch :object/change-rotation id (get-rotation event))
+              "anchor" (set-anchor-point (get-anchor-point event))
+              nil))})
+    ;; Keyboard nudging while placing the grid anchor -- see the identical
+    ;; effect in object-board-edit for the full rationale (window-level
+    ;; capture-phase keydown, event.code numpad detection, and why the
+    ;; nudge has to round-trip through world space via get-anchor-point's
+    ;; same transform instead of applying dx/dy to the local point
+    ;; directly).
+    (uix/use-effect
+     (fn []
+       (if anchor-editing?
+         (let [handler
+               (fn [^js/Object event]
+                 (let [code (.-code event)]
+                   (cond
+                     (contains? anchor-nudge-codes code)
+                     (let [angle (anchor-nudge-angle grid-type code)]
+                       (.preventDefault event)
+                       (.stopPropagation event)
+                       (if (number? angle)
+                         (let [rad (* angle (/ js/Math.PI 180))
+                               dx (* anchor-nudge-step (js/Math.cos rad))
+                               dy (* anchor-nudge-step (js/Math.sin rad))]
+                           (set-anchor-point
+                            (fn [current]
+                              ((matrix/inverse transform)
+                               (vec/shift (transform current) dx dy)))))))
+
+                     (= code "Enter")
+                     (do
+                       (.preventDefault event)
+                       (.stopPropagation event)
+                       (dispatch :image/set-anchor id anchor-point)
+                       (dispatch :camera/change-mode :select))
+
+                     (= code "Escape")
+                     (do
+                       (.preventDefault event)
+                       (.stopPropagation event)
+                       (dispatch :camera/change-mode :select)))))]
+           (js/window.addEventListener "keydown" handler true)
+           (fn [] (js/window.removeEventListener "keydown" handler true)))))
+     [anchor-editing? grid-type transform anchor-point id dispatch])
+    ($ :<>
+      ($ :g.scene-prop
+        {:style
+         {:transform
+          (-> (matrix/translate matrix/identity center)
+              (matrix/scale scale)
+              (matrix/rotate rotation)
+              (matrix/translate (vec/mul center -1)))}}
+        (:children props)
+        (if-not anchor-editing?
+          ($ :<>
+            (for [point (geom/rect-points bounds)]
+              ($ object-prop-scale
+                {:key point
+                 :point point
+                 :size (/ 8 scale zoom)
+                 :angle (vec/angle (vec/sub (transform point) center))}))
+            ($ object-prop-rotate
+              {:point (Vec2. (.-x center) (/ 26 scale zoom -1))
+               :size (/ 5 scale zoom)}))))
+      (if anchor-editing?
+        (let [world (transform anchor-point)
+              r (/ 12 zoom)
+              gap (/ 30 zoom)
+              bx (/ 26 zoom)
+              by (- (/ 26 zoom))
+              isz (/ 14 zoom)]
+          ($ :g {:style {:transform (str "translate(" (.-x world) "px, " (.-y world) "px)")}}
+            ($ object-anchor-marker
+              {:point vec/zero :size (/ 10 zoom) :grid-type grid-type})
+            ($ :g.scene-object-anchor-confirm
+              {:on-pointer-down
+               stop-propagation
+               :on-click
+               (fn []
+                 (dispatch :image/set-anchor id anchor-point)
+                 (dispatch :camera/change-mode :select))}
+              ($ :title "Save anchor")
+              ($ :circle {:cx bx :cy by :r r})
+              ($ :g {:transform (str "translate(" (- bx (/ isz 2)) "," (- by (/ isz 2)) ")")}
+                ($ icon {:name "check" :size isz})))
+            ($ :g.scene-object-anchor-cancel
+              {:on-pointer-down stop-propagation
+               :on-click #(dispatch :camera/change-mode :select)}
+              ($ :title "Cancel")
+              ($ :circle {:cx (+ bx gap) :cy by :r r})
+              ($ :g {:transform (str "translate(" (- (+ bx gap) (/ isz 2)) "," (- by (/ isz 2)) ")")}
+                ($ icon {:name "x" :size isz})))))))))
 
 (defui ^:private object-prop [props]
   (let [{{id :db/id
@@ -388,6 +574,246 @@
         ($ :rect.scene-prop-bounds
           {:width width :height height})))))
 
+;; Board pieces render exactly like props (same scale/rotate handles,
+;; reusing object-prop-scale/object-prop-rotate as-is since they're
+;; already generic) and reuse the same .scene-prop* CSS classes -- the
+;; only real differences are reading :board/image instead of :prop/image,
+;; and hard-snapping rotation drags to the piece's own
+;; :object/rotation-mode instead of the soft 45-degree assist props use.
+;; Locking already means "no edit handles at all" for props (see
+;; object-prop's (not locked) check above, which fully replaces rendering
+;; with the plain non-editable branch) -- board pieces get that same
+;; behavior for free by mirroring the same structure, satisfying "locked
+;; board pieces only have their visibility left togglable" without any
+;; extra lock-strength logic of their own.
+(defui ^:private object-board-edit [props]
+  (let [{{id :db/id
+          object-scale :object/scale
+          object-rotation :object/rotation
+          rotation-mode :object/rotation-mode
+          {width :image/width
+           height :image/height
+           anchor :image/anchor} :board/image
+          [{zoom :camera/scale draw-mode :camera/draw-mode}] :camera/_selected} :entity
+         transform :transform
+         grid-type :grid-type} props
+        default-anchor (Vec2. (/ width 2) (/ height 2))
+        [scale set-scale] (uix/use-state object-scale)
+        [rotation set-rotation] (uix/use-state object-rotation)
+        [anchor-point set-anchor-point] (uix/use-state (or anchor default-anchor))
+        [anchor-origin set-anchor-origin] (uix/use-state (or anchor default-anchor))
+        dispatch (hooks/use-dispatch)
+        bounds (Segment. vec/zero (Vec2. width height))
+        center (seg/midpoint bounds)
+        anchor-editing? (= draw-mode :object-anchor)
+        get-scale
+        (fn [^js/Object event]
+          (let [data (.. event -active -data -current)
+                dx (.-x (.-delta event))
+                dy (.-y (.-delta event))]
+            (-> (vec/shift (transform (.-point data)) dx dy)
+                (vec/dist center)
+                (/ (vec/dist center)))))
+        get-rotation
+        (fn [^js/Object event]
+          (let [data (.. event -active -data -current)
+                dx (.-x (.-delta event))
+                dy (.-y (.-delta event))
+                dg (-> (vec/shift (transform (.-point data)) dx dy)
+                       (vec/sub center)
+                       (vec/angle)
+                       (+ 90))]
+            (if (number? rotation-mode) (util/round dg rotation-mode) dg)))
+        get-anchor-point
+        (fn [^js/Object event]
+          (let [dx (.-x (.-delta event))
+                dy (.-y (.-delta event))]
+            ((matrix/inverse transform) (vec/shift (transform anchor-origin) dx dy))))]
+    (uix/use-effect
+     (fn []
+       (set-scale object-scale)
+       (set-rotation object-rotation))
+     [object-scale object-rotation])
+    (use-dnd-monitor
+     #js {"onDragStart"
+          (fn [event]
+            (case (.. event -active -data -current -type)
+              "anchor" (set-anchor-origin anchor-point)
+              nil))
+          "onDragMove"
+          (fn [event]
+            (case (.. event -active -data -current -type)
+              "resize" (set-scale (get-scale event))
+              "rotate" (set-rotation (get-rotation event))
+              "anchor" (set-anchor-point (get-anchor-point event))
+              nil))
+          "onDragEnd"
+          (fn [event]
+            (case (.. event -active -data -current -type)
+              "resize" (dispatch :object/change-scale id (get-scale event))
+              "rotate" (dispatch :object/change-rotation id (get-rotation event))
+              "anchor" (set-anchor-point (get-anchor-point event))
+              nil))})
+    ;; Keyboard nudging while placing the grid anchor -- bound directly to
+    ;; window keydown (rather than hooks/use-shortcut) so it can read
+    ;; event.code straight off the native KeyboardEvent, which is what
+    ;; reliably distinguishes the physical numpad keys from the top-row
+    ;; digits regardless of NumLock state; hooks/use-shortcut's "@Code"
+    ;; alias matching (see @rwh/keystrokes) doesn't fire in this app's
+    ;; setup, so this bypasses that layer for just this one feature.
+    (uix/use-effect
+     (fn []
+       (if anchor-editing?
+         (let [handler
+               (fn [^js/Object event]
+                 (let [code (.-code event)]
+                   (cond
+                     (contains? anchor-nudge-codes code)
+                     (let [angle (anchor-nudge-angle grid-type code)]
+                       ;; Stop this event from reaching dnd-kit's own keyboard
+                       ;; handling entirely (captured ahead of it, below) --
+                       ;; otherwise the scene's "selected" group draggable
+                       ;; (which still mounts even though a solo-selected
+                       ;; board piece no longer renders through it -- see
+                       ;; solo-board? in the objects component) intercepts
+                       ;; these same arrow/numpad keys and translates the
+                       ;; whole piece by a grid cell, on top of this nudge.
+                       (.preventDefault event)
+                       (.stopPropagation event)
+                       (if (number? angle)
+                         (let [rad (* angle (/ js/Math.PI 180))
+                               dx (* anchor-nudge-step (js/Math.cos rad))
+                               dy (* anchor-nudge-step (js/Math.sin rad))]
+                           ;; angle is a grid-locked screen direction (same
+                           ;; convention the crosshair itself is drawn in),
+                           ;; but anchor-point lives in the piece's own
+                           ;; unrotated local space -- so the nudge has to
+                           ;; go out to world space, shift there, and come
+                           ;; back, exactly like get-anchor-point already
+                           ;; does for mouse-drag nudging above. Applying
+                           ;; (dx, dy) to the local point directly would
+                           ;; make the nudge direction spin with the piece's
+                           ;; own :object/rotation instead of staying locked
+                           ;; to the grid.
+                           (set-anchor-point
+                            (fn [current]
+                              ((matrix/inverse transform)
+                               (vec/shift (transform current) dx dy)))))))
+
+                     ;; Same actions as the on-canvas confirm/cancel buttons
+                     ;; (see below) -- Enter/Escape are dnd-kit's own default
+                     ;; drag-activation/cancel keys too (see KeyboardSensor's
+                     ;; defaultKeyboardCodes), so these are swallowed here
+                     ;; the same way the nudge keys are, not just handled.
+                     (= code "Enter")
+                     (do
+                       (.preventDefault event)
+                       (.stopPropagation event)
+                       (dispatch :image/set-anchor id anchor-point)
+                       (dispatch :camera/change-mode :select))
+
+                     (= code "Escape")
+                     (do
+                       (.preventDefault event)
+                       (.stopPropagation event)
+                       (dispatch :camera/change-mode :select)))))]
+           ;; Registered on the capture phase, ahead of dnd-kit's own
+           ;; bubble-phase document listener, so stopPropagation above
+           ;; actually keeps it from ever seeing these keys.
+           (js/window.addEventListener "keydown" handler true)
+           (fn [] (js/window.removeEventListener "keydown" handler true)))))
+     [anchor-editing? grid-type transform anchor-point id dispatch])
+    ($ :<>
+      ($ :g.scene-prop
+        {:style
+         {:transform
+          (-> (matrix/translate matrix/identity center)
+              (matrix/scale scale)
+              (matrix/rotate rotation)
+              (matrix/translate (vec/mul center -1)))}}
+        (:children props)
+        (if-not anchor-editing?
+          ($ :<>
+            (for [point (geom/rect-points bounds)]
+              ($ object-prop-scale
+                {:key point
+                 :point point
+                 :size (/ 8 scale zoom)
+                 :angle (vec/angle (vec/sub (transform point) center))}))
+            ($ object-prop-rotate
+              {:point (Vec2. (.-x center) (/ 26 scale zoom -1))
+               :size (/ 5 scale zoom)}))))
+      ;; Rendered as a sibling to (not a descendant of) the piece's own
+      ;; scale/rotate wrapper above, positioned by translate-only at the
+      ;; anchor's world point -- so the crosshair and confirm/cancel
+      ;; controls stay locked to the grid's own orientation (no rotation)
+      ;; regardless of the piece's current :object/rotation, which is the
+      ;; whole point of using them to line the anchor up against the grid.
+      (if anchor-editing?
+        (let [world (transform anchor-point)
+              r (/ 12 zoom)
+              gap (/ 30 zoom)
+              bx (/ 26 zoom)
+              by (- (/ 26 zoom))
+              isz (/ 14 zoom)]
+          ($ :g {:style {:transform (str "translate(" (.-x world) "px, " (.-y world) "px)")}}
+            ($ object-anchor-marker
+              {:point vec/zero :size (/ 10 zoom) :grid-type grid-type})
+            ($ :g.scene-object-anchor-confirm
+              {:on-pointer-down
+               stop-propagation
+               :on-click
+               (fn []
+                 (dispatch :image/set-anchor id anchor-point)
+                 (dispatch :camera/change-mode :select))}
+              ($ :title "Save anchor")
+              ($ :circle {:cx bx :cy by :r r})
+              ($ :g {:transform (str "translate(" (- bx (/ isz 2)) "," (- by (/ isz 2)) ")")}
+                ($ icon {:name "check" :size isz})))
+            ($ :g.scene-object-anchor-cancel
+              {:on-pointer-down stop-propagation
+               :on-click #(dispatch :camera/change-mode :select)}
+              ($ :title "Cancel")
+              ($ :circle {:cx (+ bx gap) :cy by :r r})
+              ($ :g {:transform (str "translate(" (- (+ bx gap) (/ isz 2)) "," (- by (/ isz 2)) ")")}
+                ($ icon {:name "x" :size isz})))))))))
+
+(defui ^:private object-board [props]
+  (let [{{id :db/id
+          hidden :object/hidden
+          locked :object/locked
+          {hash :image/hash
+           width :image/width
+           height :image/height} :board/image
+          [{selected :camera/selected
+            [{user :root/_user}] :user/_camera
+            zoom :camera/scale
+            {grid-type :scene/grid-type} :camera/scene}] :camera/_selected} :entity} props
+        url-image (hooks/use-image hash)
+        mod-scale (uix/use-memo (fn [] (modifiers/scale-fn zoom grid-type)) [zoom grid-type])
+        transform (geom/object-transform (:entity props))
+        selected (into #{} (map :db/id) selected)]
+    (if (and (some? user) (not locked) (= #{id} selected))
+      ($ dnd-context
+        #js {"modifiers" #js [mod-scale modifiers/trunc]}
+        ($ object-board-edit
+          (assoc props :transform transform)
+          ($ :image.scene-prop-image
+            {:data-hidden hidden
+             :width width
+             :height height
+             :href url-image})
+          ($ :rect.scene-prop-bounds
+            {:width width :height height})))
+      ($ :g.scene-prop {:style {:transform transform}}
+        ($ :image.scene-prop-image
+          {:data-hidden hidden
+           :width width
+           :height height
+           :href url-image})
+        ($ :rect.scene-prop-bounds
+          {:width width :height height})))))
+
 (def ^:private asset-object-types
   "Object types whose own artwork must render undistorted on an isometric
    scene -- tokens, notes, and props are all user-facing assets (images,
@@ -402,6 +828,13 @@
                   :token/token ($ object-token props)
                   :note/note ($ object-note props)
                   :prop/prop ($ object-prop props)
+                  ;; Board pieces are the ground/map plane itself -- like
+                  ;; shapes (the default branch below), they're meant to
+                  ;; deform along with the projected grid on an isometric
+                  ;; scene, not stay crisp/undistorted like a token's face
+                  ;; or a UI icon, so :board/piece is deliberately absent
+                  ;; from asset-object-types below.
+                  :board/piece ($ object-board props)
                   ($ object-shape props))]
     (if (and (geom/iso? grid-type) (contains? asset-object-types type))
       ;; Counter-transform the asset's own content with the isometric
@@ -509,6 +942,7 @@
            [:object/type :default :token/token]
            [:object/point :default vec/zero]
            [:object/hidden :default false]
+           [:object/layer-shift :default nil]
            [:token/label :default ""]
            [:token/flags :default #{}]
            [:token/size :default 5]
@@ -532,12 +966,35 @@
            [:object/rotation :default 0]
            [:object/hidden :default false]
            [:object/locked :default false]
+           [:object/layer-shift :default nil]
            {:prop/image
             [:image/hash
              [:image/width :default 0]
-             [:image/height :default 0]]}
+             [:image/height :default 0]
+             :image/anchor]}
            {:camera/_selected
             [[:camera/scale :default 1]
+             [:camera/draw-mode :default :select]
+             :camera/selected
+             {:camera/scene [[:scene/grid-type :default :square]]}
+             {:user/_camera [:root/_user]}]}]}
+         {:scene/board
+          [:db/id
+           [:object/type :default :board/piece]
+           [:object/point :default vec/zero]
+           [:object/scale :default 1]
+           [:object/rotation :default 0]
+           [:object/rotation-mode :default :free]
+           [:object/hidden :default false]
+           [:object/locked :default false]
+           {:board/image
+            [:image/hash
+             [:image/width :default 0]
+             [:image/height :default 0]
+             :image/anchor]}
+           {:camera/_selected
+            [[:camera/scale :default 1]
+             [:camera/draw-mode :default :select]
              :camera/selected
              {:camera/scene [[:scene/grid-type :default :square]]}
              {:user/_camera [:root/_user]}]}]}
@@ -559,6 +1016,13 @@
     [{:session/conns
       [:db/ident :user/uuid :user/color :user/dragging]}]}])
 
+(def ^:private locked-for-players-types
+  "Object types that non-host players can never drag, regardless of their
+   own :object/locked value -- notes and props are session-transient
+   decoration only the host arranges, and board pieces are the map/board
+   itself, set up in advance by the host."
+  #{:note/note :prop/prop :board/piece})
+
 (defui objects []
   (let [dispatch (hooks/use-dispatch)
         [_ set-ready] (uix/use-state false)
@@ -575,6 +1039,7 @@
             shapes :scene/shapes
             tokens :scene/tokens
             props :scene/props
+            board :scene/board
             notes :scene/notes}
            :camera/scene}
           :user/camera} :root/user
@@ -588,16 +1053,90 @@
         (comp (filter (comp selected :db/id))
               (map geom/object-bounding-rect)
               (mapcat seq))
-        entities
-        (into []
-              (filter
-               (fn [entity]
-                 (or host (not (:object/hidden entity)))))
-              (concat
-               (sort compare-objects props)
-               (sort compare-objects shapes)
-               (sort compare-objects notes)
-               (sort compare-tokens (sequence (tokens-xf host) tokens))))]
+        forward? #(= (:object/layer-shift %) :forward)
+        back? #(= (:object/layer-shift %) :back)
+        sorted-tokens (sort compare-tokens (sequence (tokens-xf host) tokens))
+        board-entities (sort compare-objects board)
+        ;; Props/shapes/notes/tokens keep today's relative order, except a
+        ;; prop can be individually shifted :forward (above the token
+        ;; band) and a token can be individually shifted :back (below the
+        ;; prop band) -- see :object/toggle-layer-shift. Both bands
+        ;; always render above board-entities regardless (see
+        ;; scene.cljs's scene-elements, which portals board-entities and
+        ;; this "rest" band to two separately-orderable positions relative
+        ;; to the grid, board always first/bottom).
+        rest-entities
+        (concat
+         (filter back? sorted-tokens)
+         (sort compare-objects (remove forward? props))
+         (sort compare-objects shapes)
+         (sort compare-objects notes)
+         (remove back? sorted-tokens)
+         (filter forward? props))
+        visible? (fn [entity] (or host (not (:object/hidden entity))))
+        board-entities (into [] (filter visible?) board-entities)
+        rest-entities (into [] (filter visible?) rest-entities)
+        entities (into [] cat [board-entities rest-entities])
+        ;; A solo-selected board piece stays rendered in its own board band
+        ;; (respecting :scene/grid-order-board) instead of being promoted
+        ;; to the shared :selected layer like every other selected object
+        ;; -- otherwise the moment a piece is selected for alignment
+        ;; (dragging, scaling, rotating against the grid -- the primary
+        ;; reason grid-order-board exists) it would unconditionally jump
+        ;; above the grid regardless of that setting, defeating the whole
+        ;; point. Multi-selections that happen to include a board piece
+        ;; still promote everything to :selected as before -- a much
+        ;; rarer case than solo-aligning one piece.
+        solo-board?
+        (fn [entity]
+          (and (= (:object/type entity) :board/piece)
+               (= selected #{(:db/id entity)})))
+        render-entity
+        (fn [entity]
+          (let [{id :db/id point :object/point} entity
+                lock (or (:object/locked entity)
+                         (contains? dragging id)
+                         (and (not host) (contains? locked-for-players-types (:object/type entity))))
+                node (uix/create-ref)
+                user (dragging id)
+                rect (geom/object-bounding-rect entity)
+                seen (geom/rect-intersects-rect rect screen)]
+            ($ CSSTransition {:key id :nodeRef node :timeout 256}
+              ($ :g.scene-object-transition {:ref node}
+                (if (or (not (selected id)) (solo-board? entity))
+                  ($ drag-remote-fn {:user (:user/uuid user) :point point}
+                    (fn [remote]
+                      ($ drag-local-fn {:id id :disabled lock}
+                        (fn [^js/Object drag]
+                          (let [drag-fn (and (.-listeners drag) (.-onPointerDown (.-listeners drag)))
+                                drag-x (and (.-transform drag) (.-x (.-transform drag)))
+                                drag-y (and (.-transform drag) (.-y (.-transform drag)))
+                                local (Vec2. (or drag-x 0) (or drag-y 0))
+                                delta (or remote local)]
+                            ($ :g.scene-object
+                              {:ref (.-setNodeRef drag)
+                               :transform (vec/add point delta)
+                               :tab-index (if (and (not lock) seen) 0 -1)
+                               :on-pointer-down drag-fn
+                               :on-double-click
+                               (fn []
+                                 (if (and host lock)
+                                   (dispatch :objects/select (:db/id entity))))
+                               :data-drag-remote (some? user)
+                               :data-drag-local (.-isDragging drag)
+                               :data-locked (boolean lock)
+                               :data-color (:user/color user)
+                               :data-type (name (keyword (namespace (:object/type entity))))
+                               :data-id id}
+                              ($ object {:entity entity :grid-type grid-type})
+                              (if-let [portal (deref portal)]
+                                ($ object-hint
+                                  {:entity entity
+                                   :portal portal
+                                   :delta delta
+                                   :is-outline outline?
+                                   :is-aligned align?
+                                   :grid-type grid-type})))))))))))))]
 
     ;; automatically re-render once the portal ref is initialized.
     (uix/use-effect
@@ -607,54 +1146,12 @@
     ($ :g.scene-objects {}
       ($ :g.scene-objects-portal
         {:ref portal :tab-index -1})
-      ($ TransitionGroup {:component nil}
-        (for [entity entities
-              :let [{id :db/id point :object/point} entity
-                    lock (or (:object/locked entity)
-                             (contains? dragging id)
-                             (and (not host)
-                                  (or (= (:object/type entity) :note/note)
-                                      (= (:object/type entity) :prop/prop))))
-                    node (uix/create-ref)
-                    user (dragging id)
-                    rect (geom/object-bounding-rect entity)
-                    seen (geom/rect-intersects-rect rect screen)]]
-          ($ CSSTransition {:key id :nodeRef node :timeout 256}
-            ($ :g.scene-object-transition {:ref node}
-              (if (not (selected id))
-                ($ drag-remote-fn {:user (:user/uuid user) :point point}
-                  (fn [remote]
-                    ($ drag-local-fn {:id id :disabled lock}
-                      (fn [^js/Object drag]
-                        (let [drag-fn (and (.-listeners drag) (.-onPointerDown (.-listeners drag)))
-                              drag-x (and (.-transform drag) (.-x (.-transform drag)))
-                              drag-y (and (.-transform drag) (.-y (.-transform drag)))
-                              local (Vec2. (or drag-x 0) (or drag-y 0))
-                              delta (or remote local)]
-                          ($ :g.scene-object
-                            {:ref (.-setNodeRef drag)
-                             :transform (vec/add point delta)
-                             :tab-index (if (and (not lock) seen) 0 -1)
-                             :on-pointer-down drag-fn
-                             :on-double-click
-                             (fn []
-                               (if (and host lock)
-                                 (dispatch :objects/select (:db/id entity))))
-                             :data-drag-remote (some? user)
-                             :data-drag-local (.-isDragging drag)
-                             :data-locked (boolean lock)
-                             :data-color (:user/color user)
-                             :data-type (name (keyword (namespace (:object/type entity))))
-                             :data-id id}
-                            ($ object {:entity entity :grid-type grid-type})
-                            (if-let [portal (deref portal)]
-                              ($ object-hint
-                                {:entity entity
-                                 :portal portal
-                                 :delta delta
-                                 :is-outline outline?
-                                 :is-aligned align?
-                                 :grid-type grid-type})))))))))))))
+      ($ hooks/use-portal {:name :board-layer}
+        ($ TransitionGroup {:component nil}
+          (map render-entity board-entities)))
+      ($ hooks/use-portal {:name :props-layer}
+        ($ TransitionGroup {:component nil}
+          (map render-entity rest-entities)))
       ($ hooks/use-portal {:name :selected}
         (let [select (filter (comp selected :db/id) entities)
               bounds (transduce bound-xf geom/bounding-rect-rf entities)
@@ -663,8 +1160,7 @@
                          (and (not host)
                               (some
                                (fn [entity]
-                                 (or (= (:object/type entity) :note/note)
-                                     (= (:object/type entity) :prop/prop))) select)))]
+                                 (contains? locked-for-players-types (:object/type entity))) select)))]
           ($ drag-local-fn {:id "selected" :disabled locked}
             (fn [^js/Object drag]
               (let [drag-fn (and (.-listeners drag) (.-onPointerDown (.-listeners drag)))
@@ -689,7 +1185,7 @@
                                 user (dragging id)]]
                       ($ CSSTransition {:key id :nodeRef node :timeout 256}
                         ($ :g.scene-object-transition {:ref node}
-                          (if (selected id)
+                          (if (and (selected id) (not (solo-board? entity)))
                             ($ drag-remote-fn {:user (:user/uuid user) :point point}
                               (fn [remote]
                                 (let [delta (or remote local)]

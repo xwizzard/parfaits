@@ -446,6 +446,64 @@
                   (matrix/translate (vec/mul (seg/midpoint bound) -1)))]
     (bounding-rect (map xform (rect-points bound)))))
 
+;; Board pieces are defined exactly like props (point, scale, rotation,
+;; an image with a natural width/height) -- same rotated/scaled bounding
+;; box math, just reading :board/image instead of :prop/image.
+(defmethod object-bounding-rect :board/piece
+  [{point :object/point
+    scale :object/scale
+    rotation :object/rotation
+    {width :image/width
+     height :image/height} :board/image}]
+  (let [bound (Segment. point (vec/shift point width height))
+        xform (-> matrix/identity
+                  (matrix/translate (seg/midpoint bound))
+                  (matrix/scale scale)
+                  (matrix/rotate rotation)
+                  (matrix/translate (vec/mul (seg/midpoint bound) -1)))]
+    (bounding-rect (map xform (rect-points bound)))))
+
+(defn ^:private image-anchor-point
+  "The world-space position of the given image-bearing entity's grid
+   anchor -- the point within its own artwork that should snap to a grid
+   cell center, which for irregular/jigsaw-shaped tile art isn't
+   necessarily the image's bounding-box center. Falls back to the
+   bounding-box center when no :image/anchor has been calibrated (see
+   :image/set-anchor), so this is a pure generalization of the old
+   center-only behavior, not a change for uncalibrated images."
+  [{point :object/point scale :object/scale rotation :object/rotation} image]
+  (let [{width :image/width height :image/height anchor :image/anchor} image
+        bound (Segment. point (vec/shift point width height))
+        center (seg/midpoint bound)
+        local (vec/add point (or anchor (Vec2. (/ width 2) (/ height 2))))
+        xform (-> matrix/identity
+                  (matrix/translate center)
+                  (matrix/scale (or scale 1))
+                  (matrix/rotate (or rotation 0))
+                  (matrix/translate (vec/mul center -1)))]
+    (xform local)))
+
+(defmulti object-anchor-point
+  "The entity's true grid-alignment point -- what actually gets snapped to
+   the nearest cell center by snap-to-cell. Defaults to the entity's own
+   bounding-rect midpoint (today's behavior for every type). Props and
+   board pieces override this to account for a per-image :image/anchor
+   calibration, since the artwork's own hex/square grid doesn't
+   necessarily center on the image's bounding box."
+  :object/type)
+
+(defmethod object-anchor-point :default
+  [entity]
+  (seg/midpoint (object-bounding-rect entity)))
+
+(defmethod object-anchor-point :prop/prop
+  [entity]
+  (image-anchor-point entity (:prop/image entity)))
+
+(defmethod object-anchor-point :board/piece
+  [entity]
+  (image-anchor-point entity (:board/image entity)))
+
 (defmulti object-transform :object/type)
 
 (defmethod object-transform :default []
@@ -454,6 +512,16 @@
 (defmethod object-transform :prop/prop
   [{scale :object/scale rotation :object/rotation
     {width :image/width height :image/height} :prop/image}]
+  (let [bounds (Segment. vec/zero (Vec2. width height))
+        center (seg/midpoint bounds)]
+    (-> (matrix/translate matrix/identity center)
+        (matrix/scale (or scale 1))
+        (matrix/rotate (or rotation 0))
+        (matrix/translate (vec/mul center -1)))))
+
+(defmethod object-transform :board/piece
+  [{scale :object/scale rotation :object/rotation
+    {width :image/width height :image/height} :board/image}]
   (let [bounds (Segment. vec/zero (Vec2. width height))
         center (seg/midpoint bounds)]
     (-> (matrix/translate matrix/identity center)
@@ -492,3 +560,29 @@
     :shape/line half-size
     :shape/poly half-size
     grid-size))
+
+(defn snap-to-cell
+  "Snaps the given entity's center to the nearest grid-cell center for the
+   given base grid-type family, after being shifted by delta -- returns the
+   entity's own :object/point that produces that snapped center (round-trips
+   through object-bounding-rect/seg/midpoint, so this works for any object
+   type that has an object-bounding-rect method, not just tokens).
+
+   For tokens, :object/point already *is* the center (object-bounding-rect
+   :token/token is symmetric around it), so this degenerates to exactly the
+   existing token hex/square snap math -- this is a generalization, not a
+   behavior change, for tokens. For props and board pieces, whose
+   :object/point is the unrotated/unscaled top-left corner, this is what
+   makes 'snap to grid' mean 'snap this piece's true anchor point (its
+   calibrated grid center, or the bounding-box center by default -- see
+   object-anchor-point) to the nearest cell' instead of naively rounding
+   the corner."
+  [entity delta base-type]
+  (let [point (:object/point entity)
+        center (object-anchor-point entity)
+        moved (vec/add center delta)
+        snapped (case base-type
+                  :hex-pointy (vec/nearest-hex moved hex-radius)
+                  :hex-flat (vec/nearest-hex-flat moved hex-radius)
+                  (seg/midpoint (vec/rnd (vec/add (object-bounding-rect entity) delta) grid-size)))]
+    (vec/add point (vec/sub snapped center))))

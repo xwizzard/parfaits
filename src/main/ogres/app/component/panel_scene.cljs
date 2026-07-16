@@ -5,8 +5,13 @@
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
+            [ogres.app.segment :as seg]
             [ogres.app.util :refer [display-size]]
-            [uix.core :as uix :refer [defui $]]))
+            [ogres.app.vec :as vec :refer [Vec2]]
+            [uix.core :as uix :refer [defui $]]
+            [uix.dom :refer [create-portal]]
+            ["@dnd-kit/core" :as dnd]
+            ["@dnd-kit/modifiers" :as modifiers]))
 
 (def ^:private query
   [{:root/scene-images
@@ -31,11 +36,13 @@
          [:scene/show-object-outlines :default true]
          [:scene/lighting :default :revealed]
          [:scene/token-scale :default {}]
-         {:scene/image
-          [:image/hash
-           :image/name
-           {:image/thumbnail
-            [:image/hash]}]}
+         [:scene/grid-order-board :default :under]
+         [:scene/grid-order-props :default :under]
+         {:scene/board
+          [{:board/image
+            [:image/name
+             {:image/thumbnail
+              [:image/hash]}]}]}
          {:scene/game-type
           [[:game-type/enabled-elements :default #{}]]}]}]}]}])
 
@@ -45,15 +52,19 @@
    ["Hidden" :hidden "moon-fill"]])
 
 (def ^:private options-grid-type
-  [["Square" :square "square"]
+  ;; Iso variants get their own dedicated icons (a squished/rotated single
+  ;; cell matching geom.cljs's actual iso-square-forward/iso-hex-forward
+  ;; transforms) rather than reusing the flat, unprojected square/hexagon
+  ;; icons -- so the radio list itself hints at which options are skewed.
+  [["Square" :square "square-cell"]
    ["Hex (Pointy)" :hex-pointy "hexagon"]
    ["Hex (Flat)" :hex-flat "hexagon-flat"]
-   ["Iso Square" :iso-square "square"]
-   ["Iso Hex (Pointy)" :iso-hex-pointy "hexagon"]
-   ["Iso Hex (Flat)" :iso-hex-flat "hexagon-flat"]
-   ["Iso Square (Vertical)" :iso-square-vertical "square"]
-   ["Iso Hex Pointy (Vertical)" :iso-hex-pointy-vertical "hexagon"]
-   ["Iso Hex Flat (Vertical)" :iso-hex-flat-vertical "hexagon-flat"]])
+   ["Iso Square" :iso-square "square-iso"]
+   ["Iso Hex (Pointy)" :iso-hex-pointy "hexagon-iso"]
+   ["Iso Hex (Flat)" :iso-hex-flat "hexagon-flat-iso"]
+   ["Iso Square (Vertical)" :iso-square-vertical "square-iso-vertical"]
+   ["Iso Hex Pointy (Vertical)" :iso-hex-pointy-vertical "hexagon-iso-vertical"]
+   ["Iso Hex Flat (Vertical)" :iso-hex-flat-vertical "hexagon-flat-iso-vertical"]])
 
 (defn ^:private grid-type-options [enabled-elements]
   (filter (fn [[_ value]] (contains? enabled-elements (game-type/grid-tool-id value)))
@@ -64,10 +75,19 @@
       "Square"))
 
 (def ^:private options-grid-shape
-  [["Lines" :line "dash"]
-   ["Dots" :dot "circle"]
+  ;; "None" replaces the "Show grid" checkbox that used to sit on its own
+  ;; in the "Grid options" fieldset below -- folding that boolean into
+  ;; this radio group means grid visibility and grid style are one
+  ;; choice instead of two, so on-change wiring in the render loop below
+  ;; turns show-grid back on for every value but this one. See also
+  ;; [[options-grid-type]] for the same "dedicated small icon" treatment
+  ;; applied to "Octo" here (shares a name with the toolbar's full-bleed
+  ;; square-draw tool, which must stay full-bleed).
+  [["None" :none "no"]
+   ["Lines" :line "dash"]
+   ["Dots" :dot "dot"]
    ["Circles" :circle "circle"]
-   ["Octo" :octo "square"]
+   ["Octo" :octo "square-cell"]
    ["Hex" :hex "hexagon"]])
 
 (defn ^:private grid-shape-options [grid-type]
@@ -76,11 +96,15 @@
   ;; hex-family grids (Hex/Iso Hex, Pointy or Flat) -- neither shape has
   ;; an analogous reading on the other lattice, so the mismatched option
   ;; isn't offered at all rather than being selectable but silently
-  ;; ignored (or silently substituted for something else).
+  ;; ignored (or silently substituted for something else). "None" is
+  ;; always offered, on either lattice.
   (let [square? (= (geom/base-grid-type grid-type) :square)]
     (remove (fn [[_ value]] (or (and (= value :octo) (not square?))
                                  (and (= value :hex) square?)))
             options-grid-shape)))
+
+(def ^:private options-grid-order
+  [["Over" :over] ["Under" :under]])
 
 (def ^:private per-page 6)
 
@@ -91,7 +115,10 @@
 (defn ^:private render-scene-name [camera]
   (if-let [label (:camera/label camera)]
     label
-    (if-let [filename (-> camera :camera/scene :scene/image :image/name)]
+    ;; No custom label -- fall back to the name of the scene's first
+    ;; placed board piece (there's no longer one single background image
+    ;; to name the scene after).
+    (if-let [filename (-> camera :camera/scene :scene/board first :board/image :image/name)]
       (-> filename (replace filename-re "") (replace  #"\s{2,}" " "))
       "Untitled scene")))
 
@@ -161,6 +188,69 @@
             {:on-click (:on-close props)}
             "Exit"))))))
 
+;; Placing a board piece is drag-and-drop from a gallery thumbnail onto
+;; the canvas, the same mechanic Props' own gallery already uses
+;; (panel_props.cljs) -- a piece's default size/rotation and, once
+;; calibrated, its default scale are handled by :board/create itself; this
+;; is just the thumbnail-drag plumbing that calls it.
+(defui ^:private board-gallery-thumbnail [props]
+  (let [{data :data on-preview :on-preview} props
+        {hash :image/hash} data
+        thumb (:image/hash (:image/thumbnail data))
+        dispatch (hooks/use-dispatch)
+        opt (dnd/useDraggable #js {"id" hash "data" #js {"hash" hash}})]
+    ($ component/image {:hash thumb}
+      (fn [url]
+        ($ :fieldset.scene-gallery-thumbnail
+          {:data-type "image" :style {:background-image (str "url(" url ")")}}
+          ($ :button.scene-gallery-thumbnail-drag
+            {:ref (.-setNodeRef opt)
+             :aria-label (str "Place " (:image/name data))
+             :on-pointer-down (.. opt -listeners -onPointerDown)
+             :on-key-down (.. opt -listeners -onKeyDown)})
+          ($ :button.button.button-neutral
+            {:type "button"
+             :name "info"
+             :aria-label "Preview"
+             :on-click
+             (fn [event]
+               (.stopPropagation event)
+               (on-preview (:db/id data)))}
+            ($ icon {:name "zoom-in" :size 18}))
+          ($ :button.button.button-danger
+            {:type "button"
+             :name "remove"
+             :aria-label "Remove"
+             :on-click
+             (fn [event]
+               (.stopPropagation event)
+               (dispatch :scene-images/remove hash thumb))}
+            ($ icon {:name "trash3-fill" :size 18}))
+          (if (> (:image/size data) filesize-limit)
+            ($ :button.button.button-warning
+              {:type "button"
+               :name "warn"
+               :aria-label "Exceeds filesize limit"
+               :data-tooltip "Exceeds filesize limit"
+               :on-click
+               (fn [event]
+                 (.stopPropagation event)
+                 (on-preview (:db/id data)))}
+              ($ icon {:name "exclamation-triangle-fill" :size 18}))))))))
+
+(defui ^:private ^:memo board-gallery-overlay []
+  (let [[active set-active] (uix/use-state nil)
+        url (hooks/use-image active)]
+    (dnd/useDndMonitor
+     #js {"onDragStart" (fn [event] (set-active (.. event -active -data -current -hash)))
+          "onDragEnd"   (fn [_]     (set-active nil))})
+    (create-portal
+     ($ dnd/DragOverlay
+       {:modifiers #js [modifiers/snapCenterToCursor]
+        :drop-animation nil}
+       ($ :img.scene-gallery-overlay-content {:src url}))
+     js/document.body)))
+
 (defui ^:memo panel []
   (let [[preview set-preview] (uix/use-state nil)
         dispatch (hooks/use-dispatch)
@@ -206,87 +296,57 @@
                  (dispatch :camera/remove-label))))}))
       ($ :fieldset.fieldset
         ($ :legend "Background image")
-        ($ component/paginated
-          {:data (:root/scene-images data) :page-size 6}
-          (fn [{:keys [data pages page on-change]}]
-            (let [data (->> (repeat per-page :placeholder) (into data) (take per-page) (map-indexed vector))]
-              ($ :<>
-                ($ :.scene-gallery
-                  (for [[idx data] data
-                        :let [hash (:image/hash data)
-                              curr (:image/hash (:scene/image scene))]]
-                    (if-let [thumbnail (:image/hash (:image/thumbnail data))]
-                      ($ component/image {:key idx :hash thumbnail}
-                        (fn [url]
-                          ($ :fieldset.scene-gallery-thumbnail
-                            {:data-type "image" :style {:background-image (str "url(" url ")")}}
-                            ($ :label {:aria-label (:image/name data)}
-                              ($ :input
-                                {:type "radio"
-                                 :name "background-image"
-                                 :value hash
-                                 :checked (= hash curr)
-                                 :on-change
-                                 (fn [event]
-                                   (let [value (.. event -target -value)]
-                                     (dispatch :scene/change-image value)))}))
-                            ($ :button.button.button-neutral
-                              {:type "button"
-                               :name "info"
-                               :aria-label "Preview"
-                               :on-click
-                               (fn [event]
-                                 (.stopPropagation event)
-                                 (set-preview (:db/id data)))}
-                              ($ icon {:name "zoom-in" :size 18}))
-                            ($ :button.button.button-danger
-                              {:type "button"
-                               :name "remove"
-                               :aria-label "Remove"
-                               :on-click
-                               (fn [event]
-                                 (.stopPropagation event)
-                                 (dispatch :scene-images/remove hash thumbnail))}
-                              ($ icon {:name "trash3-fill" :size 18}))
-                            (if (> (:image/size data) filesize-limit)
-                              ($ :button.button.button-warning
-                                {:type "button"
-                                 :name "warn"
-                                 :aria-label "Exceeds filesize limit"
-                                 :data-tooltip "Exceeds filesize limit"
-                                 :on-click
-                                 (fn [event]
-                                   (.stopPropagation event)
-                                   (set-preview (:db/id data)))}
-                                ($ icon {:name "exclamation-triangle-fill" :size 18}))))))
-                      ($ :.scene-gallery-thumbnail {:key idx :data-type "placeholder"}))))
-                ($ :fieldset.scene-gallery-form
-                  ($ :button.button.button-neutral
-                    {:type "button" :on-click #(.click (deref input))}
-                    ($ :input
-                      {:ref input
-                       :type "file"
-                       :hidden true
-                       :accept "image/*"
-                       :multiple true
-                       :on-change
-                       (fn [event]
-                         (upload (.. event -target -files))
-                         (set! (.. event -target -value) ""))})
-                    ($ icon {:name "camera-fill" :size 16}) "Upload images")
-                  (if (> pages 1)
-                    ($ component/pagination
-                      {:name "scenes-gallery"
-                       :label "Scene image pages"
-                       :pages pages
-                       :value page
-                       :on-change on-change})))))))
+        ($ :.form-notice
+          "Drag a thumbnail onto the scene to place it as a board piece --
+           the game board, play mat, or map. Board pieces are set up in
+           advance and are meant to stay put during play; select a placed
+           piece on the canvas for its own menu of rotate, scale, hide,
+           lock, and grid-calibration options.")
+        ($ dnd/DndContext
+          #js {"onDragEnd"
+               (fn [event]
+                 (let [bound (seg/DOMRect-> (.getBoundingClientRect (.. event -activatorEvent -target)))
+                       delta (Vec2. (.-x (.-delta event)) (.-y (.-delta event)))
+                       hash (.. event -active -data -current -hash)]
+                   (dispatch :board/create (vec/add (.-a bound) delta) hash)))}
+          ($ component/paginated
+            {:data (:root/scene-images data) :page-size 6}
+            (fn [{:keys [data pages page on-change]}]
+              (let [data (->> (repeat per-page :placeholder) (into data) (take per-page) (map-indexed vector))]
+                ($ :<>
+                  ($ :.scene-gallery
+                    (for [[idx data] data]
+                      (if (:image/hash (:image/thumbnail data))
+                        ($ board-gallery-thumbnail {:key idx :data data :on-preview set-preview})
+                        ($ :.scene-gallery-thumbnail {:key idx :data-type "placeholder"}))))
+                  ($ :fieldset.scene-gallery-form
+                    ($ :button.button.button-neutral
+                      {:type "button" :on-click #(.click (deref input))}
+                      ($ :input
+                        {:ref input
+                         :type "file"
+                         :hidden true
+                         :accept "image/*"
+                         :multiple true
+                         :on-change
+                         (fn [event]
+                           (upload (.. event -target -files))
+                           (set! (.. event -target -value) ""))})
+                      ($ icon {:name "camera-fill" :size 16}) "Upload images")
+                    (if (> pages 1)
+                      ($ component/pagination
+                        {:name "scenes-gallery"
+                         :label "Scene image pages"
+                         :pages pages
+                         :value page
+                         :on-change on-change})))))))
+          ($ board-gallery-overlay))
         (if (some? preview)
           ($ scene-editor
             {:id preview
              :on-change set-preview
              :on-close (fn [] (set-preview nil))})))
-        (let [available (grid-type-options enabled-elements)]
+      (let [available (grid-type-options enabled-elements)]
           ;; A radio list with zero or one option is nothing to choose --
           ;; hide it entirely rather than show a foregone conclusion. The
           ;; active game-type determines which grid layouts even apply.
@@ -347,24 +407,32 @@
         ($ :legend "Grid style")
         ($ :.input-group
           (for [[label value icon-name] (grid-shape-options grid-type)
-                :let [on-change #(dispatch :scene/change-grid-shape value)]]
+                :let [checked (if (:scene/show-grid scene)
+                                (= (:scene/grid-shape scene) value)
+                                (= value :none))
+                      on-change
+                      (fn []
+                        (if (= value :none)
+                          (dispatch :scene/toggle-show-grid false)
+                          (do (dispatch :scene/change-grid-shape value)
+                              (dispatch :scene/toggle-show-grid true))))]]
             ($ :<> {:key value}
               ($ :label.radio
                 ($ :input
                   {:type "radio"
                    :name "grid-shape"
                    :value value
-                   :checked (= (:scene/grid-shape scene) value)
+                   :checked checked
                    :on-change on-change})
                 ($ icon {:name icon-name :size 16})
                 label))))
         ($ :details
           ($ :summary "More Information")
-          "Lines draw the full grid. Dots mark only the position each
-           token or shape will snap to. Circles, Octo (square grids only),
-           and Hex (hex grids only) mark that same position at nearly the
-           size of the grid cell, useful for previewing how tokens will
-           fit before placing any."))
+          "None hides the grid entirely. Lines draw the full grid. Dots
+           mark only the position each token or shape will snap to.
+           Circles, Octo (square grids only), and Hex (hex grids only)
+           mark that same position at nearly the size of the grid cell,
+           useful for previewing how tokens will fit before placing any."))
       (if-not no-grid?
         ($ :fieldset.fieldset
           ($ :legend "Tile size ( px )")
@@ -392,13 +460,6 @@
             ($ :label.checkbox
               ($ :input
                 {:type "checkbox"
-                 :checked (:scene/show-grid scene)
-                 :on-change #(dispatch :scene/toggle-show-grid (.. % -target -checked))})
-              ($ icon {:name "check" :size 20})
-              "Show grid")
-            ($ :label.checkbox
-              ($ :input
-                {:type "checkbox"
                  :checked (:scene/show-object-outlines scene)
                  :on-change #(dispatch :scene/toggle-object-outlines (.. % -target -checked))})
               ($ icon {:name "check" :size 20})
@@ -417,6 +478,44 @@
                  :on-change #(dispatch :scene/toggle-dark-mode (.. % -target -checked))})
               ($ icon {:name "check" :size 20})
               "Use dark grid"))))
+      (if-not no-grid?
+        ($ :fieldset.fieldset.fieldset--radio
+          ($ :legend "Grid vs. board")
+          ($ :.input-group
+            (for [[label value] options-grid-order
+                  :let [on-change #(dispatch :scene/change-grid-order-board value)]]
+              ($ :label.radio {:key value}
+                ($ :input
+                  {:type "radio"
+                   :name "grid-order-board"
+                   :checked (= (:scene/grid-order-board scene) value)
+                   :on-change on-change})
+                label)))
+          ($ :details
+            ($ :summary "More Information")
+            "Whether the grid lines render over or under the placed board
+             (map/background) pieces. The board is always the bottommost
+             layer regardless of this setting -- it only changes whether
+             the grid is visible on top of it.")))
+      (if-not no-grid?
+        ($ :fieldset.fieldset.fieldset--radio
+          ($ :legend "Grid vs. props")
+          ($ :.input-group
+            (for [[label value] options-grid-order
+                  :let [on-change #(dispatch :scene/change-grid-order-props value)]]
+              ($ :label.radio {:key value}
+                ($ :input
+                  {:type "radio"
+                   :name "grid-order-props"
+                   :checked (= (:scene/grid-order-props scene) value)
+                   :on-change on-change})
+                label)))
+          ($ :details
+            ($ :summary "More Information")
+            "Whether the grid lines render over or under props and tokens.
+             Props and tokens always render above the board regardless of
+             this setting -- it only changes whether the grid is visible on
+             top of them.")))
       (if light-enabled?
         ($ :fieldset.fieldset.fieldset--radio
           ($ :legend "Lighting")

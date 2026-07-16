@@ -441,3 +441,49 @@
 .scene-prop-anchor:is(circle) {
   fill: var(--scene-stroke);
 }
+
+.scene-object-anchor-hit {
+  fill: transparent;
+}
+
+.scene-object-anchor-line {
+  stroke: var(--color-prime-500);
+  stroke-width: 2px;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+.scene-object-anchor-dot {
+  fill: var(--color-prime-500);
+  stroke: white;
+  stroke-width: 1px;
+  pointer-events: none;
+}
+
+.scene-object-anchor-confirm,
+.scene-object-anchor-cancel {
+  cursor: pointer;
+
+  circle {
+    fill: var(--color-blues-900);
+    stroke: white;
+    stroke-width: 1px;
+  }
+
+  svg {
+    color: white;
+    pointer-events: none;
+  }
+
+  &:hover circle {
+    fill: var(--color-blues-700);
+  }
+}
+
+.scene-object-anchor-confirm:hover circle {
+  stroke: var(--color-prime-500);
+}
+
+.scene-object-anchor-cancel:hover circle {
+  stroke: var(--color-danger-500);
+}

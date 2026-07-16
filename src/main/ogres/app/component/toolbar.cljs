@@ -42,7 +42,6 @@
   [:session/_host
    :user/clipboard
    [:user/host :default true]
-   [:user/mode :default :setup]
    {:user/camera
     [:camera/selected
      [:camera/draw-mode :default :select]
@@ -51,29 +50,11 @@
       [{:scene/game-type
         [[:game-type/enabled-elements :default #{}]]}]}]}])
 
-(def ^:private mode-options
-  [["Game Builder" :builder "sliders"]
-   ["Setup" :setup "easel"]
-   ["Play" :play "play-fill"]])
-
-(defui ^:private mode-switch [{:keys [mode dispatch]}]
-  ($ :.toolbar-mode
-    (for [[label value icon-name] mode-options]
-      ($ :button
-        {:key value
-         :type "button"
-         :aria-pressed (= mode value)
-         :aria-label label
-         :data-tooltip label
-         :on-click #(dispatch :user/change-mode value)}
-        ($ icon {:name icon-name})))))
-
 (defui toolbar []
   (let [[focused set-focused] (uix/use-state nil)
         dispatch  (hooks/use-dispatch)
         result    (hooks/use-query query)
         {host      :user/host
-         interface-mode :user/mode
          {scale    :camera/scale
           mode     :camera/draw-mode
           selected :camera/selected
@@ -148,6 +129,4 @@
             ($ action {:name "mask-hide"}
               ($ icon {:name "eye-slash-fill"}))))
         ($ action {:name "scene-grid" :aria-pressed (= mode :grid)}
-          ($ icon {:name "compass"})))
-      (if host
-        ($ mode-switch {:mode interface-mode :dispatch dispatch})))))
+          ($ icon {:name "compass"}))))))

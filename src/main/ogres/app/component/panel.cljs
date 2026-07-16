@@ -41,13 +41,24 @@
       :disconnected ($ :button.button {:disabled true} status-icon "Disconnected")
       ($ :button.button {:disabled true} status-icon "Status not known"))))
 
+(def ^:private mode-options
+  [[:builder "file-text" "Game Builder"]
+   [:setup "easel" "Setup"]
+   [:play "play-fill" "Play"]])
+
+(defn ^:private next-mode
+  "The mode that follows the given mode in the Builder -> Setup -> Play
+   cycle used by the mode tab's single click-to-advance button."
+  [mode]
+  (case mode :builder :setup :setup :play :play :builder :setup))
+
 (def ^:private data
-  {:data       {:icon "wrench-adjustable-circle" :label "Manage local data"}
+  {:data       {:icon "floppy" :label "Manage local data" :size 26}
    :initiative {:icon "hourglass-split" :label "Initiative"}
    :lobby      {:icon "people-fill" :label "Online options"}
-   :scene      {:icon "easel" :label "Scene options"}
-   :tokens     {:icon "person-circle" :label "Token images"}
-   :props      {:icon "images" :label "Prop images"}
+   :scene      {:icon "images" :label "Scene options"}
+   :tokens     {:icon "pawn" :label "Token images"}
+   :props      {:icon "rock" :label "Prop images" :size 26}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -62,21 +73,20 @@
 (defn ^:private visible-tabs
   "The ordered list of visible panel tab keys for the given host status,
    interface mode, and the active scene's game-type enabled-elements set.
-   Builder mode shows only the game-type editor, decoupled from any scene.
-   Play mode drops the setup-only tabs. The Initiative tab additionally
-   requires the active game-type to have :system/initiative-roll enabled,
-   in either mode -- if a game type doesn't use that system at all, the
-   tab shouldn't appear while setting up the scene either."
+   Builder mode shows only the game-type editor and local data management,
+   decoupled from any scene. Setup mode is scene-editing only. Play mode
+   is the only mode with Initiative and Lobby, since those are both
+   live-session concerns. The Initiative tab additionally requires the
+   active game-type to have :system/initiative-roll enabled."
   [host mode enabled-elements]
   (cond
     (not host) [:tokens :initiative :lobby]
-    (= mode :builder) [:game-type-builder]
-    :else
-    (cond-> (if (= mode :play)
-              [:tokens :initiative :lobby]
-              [:tokens :scene :props :initiative :lobby :data])
+    (= mode :builder) [:game-type-builder :data]
+    (= mode :play)
+    (cond-> [:tokens :initiative :lobby]
       (not (contains? enabled-elements :system/initiative-roll))
-      (->> (remove #{:initiative}) vec))))
+      (->> (remove #{:initiative}) vec))
+    :else [:scene :props :tokens]))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)
@@ -98,6 +108,19 @@
         {:role "tablist"
          :aria-controls "form-panel"
          :aria-orientation "vertical"}
+        (if host
+          (let [[_ icon-name label] (some #(when (= (first %) mode) %) mode-options)]
+            ($ :li.panel-tabs-mode
+              {:role "tab"}
+              ($ :button
+                {:type "button"
+                 :aria-label (str "Interface mode: " label ". Click to switch mode.")
+                 :data-tooltip label
+                 :on-click #(dispatch :user/change-mode (next-mode mode))}
+                (if (= mode :builder)
+                  ($ :span {:style {:display "inline-flex" :transform "translateY(3px) scale(1.15)"}}
+                    ($ icon {:name icon-name :size 22}))
+                  ($ icon {:name icon-name :size 22}))))))
         (for [[key data] (map (juxt identity data) tabs)
               :let [selected (= selected key)]]
           ($ :li.panel-tabs-tab
@@ -109,7 +132,7 @@
                  :value key
                  :checked (and expanded selected)
                  :on-change #(dispatch :user/select-panel key)})
-              ($ icon {:name (:icon data) :size 22}))))
+              ($ icon {:name (:icon data) :size (:size data 22)}))))
         ($ :li.panel-tabs-control
           {:role "tab" :on-click #(dispatch :user/toggle-panel)}
           ($ :button {:type "button" :aria-label "Collapse or expand"}
