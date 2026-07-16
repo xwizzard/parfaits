@@ -75,15 +75,17 @@
    interface mode, and the active scene's game-type enabled-elements set.
    Builder mode shows only the game-type editor and local data management,
    decoupled from any scene. Setup mode is scene-editing only. Play mode
-   is the only mode with Initiative and Lobby, since those are both
-   live-session concerns. The Initiative tab additionally requires the
-   active game-type to have :system/initiative-roll enabled."
+   drops Scene (no more layout changes once play has started) but keeps
+   Props (still placeable/adjustable mid-session) and is the only mode
+   with Initiative and Lobby, since those are both live-session concerns.
+   The Initiative tab additionally requires the active game-type to have
+   :system/initiative-roll enabled."
   [host mode enabled-elements]
   (cond
     (not host) [:tokens :initiative :lobby]
     (= mode :builder) [:game-type-builder :data]
     (= mode :play)
-    (cond-> [:tokens :initiative :lobby]
+    (cond-> [:tokens :props :initiative :lobby]
       (not (contains? enabled-elements :system/initiative-roll))
       (->> (remove #{:initiative}) vec))
     :else [:scene :props :tokens]))
