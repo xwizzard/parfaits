@@ -39,23 +39,26 @@
 (def ^:private draw-modes
   #{:grid :ruler :circle :rect :cone :line :poly :mask :note})
 
-(def ^:private condition->icon
-  {:blinded       "eye-slash-fill"
-   :charmed       "arrow-through-heart-fill"
-   :defeaned      "ear-fill"
-   :exhausted     "moon-stars-fill"
-   :frightened    "black-cat"
-   :grappled      "fist"
-   :incapacitated "lock-fill"
-   :initiative    "hourglass-split"
-   :invisible     "incognito"
-   :paralyzed     "cobra"
-   :petrified     "gem"
-   :poisoned      "poison-bottle"
-   :prone         "tripwire"
-   :restrained    "cobweb"
-   :stunned       "stars"
-   :unconscious   "activity"})
+;; The turn-order indicator is a core flag (driven by :scene/_initiative,
+;; see token-flags below), not a game-specific status -- it always has an
+;; icon available regardless of which :token-badge elements a game-type
+;; enables. Everything else comes from whichever enabled elements declare
+;; a :token-badge vocabulary (see badge-icons below); this file never
+;; names a specific game or condition/status-effect vocabulary directly.
+(def ^:private core-badge-icons
+  {:initiative "hourglass-split"})
+
+(defn ^:private badge-icons
+  "A flat {value icon} map assembled from every enabled element's
+   :token-badge vocabulary, plus the always-available core turn-order
+   icon. Different game-types can (and do) supply entirely different
+   vocabularies here -- see ogres.app.game-type.games.dnd5e/gloomhaven."
+  [enabled-elements]
+  (into core-badge-icons
+        (comp (filter (comp :token-badge val))
+              (mapcat (comp :vocabulary :token-badge val))
+              (map (juxt :value :icon)))
+        (select-keys game-type/elements enabled-elements)))
 
 (defn ^:private stop-propagation [event]
   (.stopPropagation event))
@@ -407,13 +410,13 @@
 (defn ^:private token-flags-attr [data]
   (join " " (map name (token-flags data))))
 
-(defn ^:private token-conditions [data]
-  (let [xform (comp (map key) (filter (complement #{:initiative})))
-        order (into [:initiative] xform condition->icon)
+(defn ^:private token-conditions [data icons]
+  (let [xform (comp (filter (complement #{:initiative})))
+        order (into [:initiative] xform (keys icons))
         exclu #{:player :dead}]
     (take 4 (filter (difference (token-flags data) exclu) order))))
 
-(defui ^:private token [{:keys [node data base-scale] :or {base-scale 1}}]
+(defui ^:private token [{:keys [node data base-scale icons] :or {base-scale 1 icons core-badge-icons}}]
   (let [radius token-radius
         ;; `base-scale` is the scene's per-grid-type "Token scale" setting
         ;; (panel_scene.cljs) -- it multiplies uniformly on top of this
@@ -434,14 +437,14 @@
       ($ :g {:style {:transform (str "scale(" scale ")")}}
         ($ :circle.scene-token-shape {:r radius :fill (str "url(#" fill ")")})
         ($ :circle.scene-token-base {:r (+ radius 5)})
-        (for [[deg flag] (mapv vector [-120 120 -65 65] (token-conditions data))
+        (for [[deg flag] (mapv vector [-120 120 -65 65] (token-conditions data icons))
               :let [rn (* (/ js/Math.PI 180) deg)
                     cx (* (js/Math.sin rn) radius)
                     cy (* (js/Math.cos rn) radius)]]
           ($ :g.scene-token-flags {:key flag :data-flag flag :transform (str "translate(" cx ", " cy ")")}
             ($ :circle {:r 12})
             ($ :g {:transform (str "translate(" -8 ", " -8 ")")}
-              ($ icon {:name (condition->icon flag) :size 16}))))
+              ($ icon {:name (icons flag) :size 16}))))
         (if-let [label (token-label data)]
           ($ :text.scene-token-label {:y half-size} label)))
       (let [radius (+ (* scale half-size) 2)]
@@ -453,6 +456,8 @@
     [{:camera/scene
       [[:scene/grid-type :default :square]
        [:scene/token-scale :default {}]
+       {:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}
        {:scene/tokens
         [:db/id
          [:initiative/suffix :default nil]
@@ -473,7 +478,8 @@
         ;; The base-scale multiplier is tuned per grid-type (see
         ;; panel_scene.cljs's "Token scale" fieldset), so it comes from
         ;; whichever grid-type the scene is currently on.
-        base-scale (/ (get (:scene/token-scale scene) (:scene/grid-type scene) 100) 100)]
+        base-scale (/ (get (:scene/token-scale scene) (:scene/grid-type scene) 100) 100)
+        icons (badge-icons (:game-type/enabled-elements (:scene/game-type scene) #{}))]
     ($ :defs
       ($ :filter {:id "token-status-dead" :filterRes 1 :color-interpolation-filters "sRGB"}
         ($ :feColorMatrix {:in "SourceGraphic" :type "saturate" :values 0 :result "Next"})
@@ -512,7 +518,7 @@
       ($ TransitionGroup {:component nil}
         (for [{id :db/id :as data} tokens :let [node (uix/create-ref)]]
           ($ Transition {:key id :nodeRef node :timeout 240}
-            ($ token {:node node :data data :base-scale base-scale})))))))
+            ($ token {:node node :data data :base-scale base-scale :icons icons})))))))
 
 (def ^:private player-cursors-query
   [{:root/user [{:user/camera [:camera/scene]}]}

@@ -65,21 +65,29 @@
 (defn ^:private constrain [n min max]
   (clojure.core/max (clojure.core/min n max) min))
 
-(defn ^:private initiative-order [a b]
-  (let [f (juxt :initiative/roll :db/id)]
+(defn ^:private initiative-order
+  "Descending sort by turn-order rank, :db/id as a total-order tiebreak.
+   A token with no rank yet (nil) sorts after every ranked token (cljs
+   `compare` treats nil as less than any number) but still has a stable
+   position relative to other unranked tokens via the id tiebreak -- so a
+   scene where nobody has been assigned an order at all just sorts by
+   :db/id, deterministically. Game-agnostic: this is the base turn-order
+   comparator every game-type shares, regardless of *how* a rank got set
+   (manually via :initiative/move, or by a game module's own mechanism,
+   e.g. D&D's d20 roll -- see ogres.app.game-type.games.dnd5e).
+
+   This is also what makes the floor case work with zero setup: two
+   participants who never get a rank at all (e.g. a two-player game like
+   chess, with strictly alternating fixed turns) still sort the same
+   stable way every time, round after round, since neither :db/id nor
+   the absence of a rank ever changes between rounds -- :initiative/next
+   just keeps cycling the same fixed order. Nothing about ranking,
+   rolling, or manual reordering is required to get a working, repeating
+   turn order; those are all optional refinements layered on top of this
+   baseline."
+  [a b]
+  (let [f (juxt :initiative/rank :db/id)]
     (compare (f b) (f a))))
-
-(defn ^:private random-rolls
-  "Returns a lazy infinite sequence of random integers in the domain
-   of [start, end]. Each group of integers in the domain are guaranteed
-   to be unique among each other."
-  [start end]
-  (sequence (mapcat shuffle) (repeat (range start (inc end)))))
-
-(defn ^:private roll-token? [token]
-  (let [{:keys [initiative/roll token/flags]} token]
-    (and (not (contains? flags :player))
-         (not (number? roll)))))
 
 (defmulti event-tx-fn (fn [_ event] event))
 
@@ -992,7 +1000,7 @@
       (into [] cat
             (for [{id :db/id} change]
               [[:db/retract id :initiative/suffix]
-               [:db/retract id :initiative/roll]
+               [:db/retract id :initiative/rank]
                [:db/retract id :initiative/health]
                [:db/retract scene :scene/initiative id]
                [:db/retract scene :initiative/played id]])))))
@@ -1032,26 +1040,70 @@
      (if (= (:db/id (:initiative/turn scene)) id)
        [:db/retract (:db/id scene) :initiative/turn])]))
 
-(defmethod event-tx-fn :initiative/change-roll
-  [_ _ id roll]
-  (let [parsed (.parseFloat js/window roll)]
+(defmethod
+  ^{:doc "Sets or clears one token's :initiative/rank -- the base,
+          game-agnostic turn-order value. Blank/nil clears it back to
+          unranked; anything else is parsed as a number. Doesn't care
+          whether the caller is a manual number entry, the
+          :initiative/move nudge below, or a game module's own mechanism
+          (e.g. D&D's d20 roll writes here too, see
+          ogres.app.game-type.games.dnd5e) -- this event has no opinion
+          about how the value was chosen."}
+  event-tx-fn :initiative/change-rank
+  [_ _ id rank]
+  (let [parsed (.parseFloat js/window rank)]
     (cond
-      (or (nil? roll) (= roll ""))
-      [[:db/retract id :initiative/roll]]
+      (or (nil? rank) (= rank ""))
+      [[:db/retract id :initiative/rank]]
 
       (.isNaN js/Number parsed)
       []
 
       :else
-      [{:db/id id :initiative/roll parsed}])))
+      [{:db/id id :initiative/rank parsed}])))
 
-(defmethod event-tx-fn :initiative/roll-all
-  [data]
+(defmethod
+  ^{:doc "Batch-writes an explicit :initiative/rank for each entry in the
+          given `id->rank` map, in a single transaction -- one re-render,
+          one undo entry, instead of N separate :initiative/change-rank
+          dispatches. Contains no opinion about how those values were
+          chosen; a game module decides the values (e.g. D&D's d20 roll
+          for every un-ranked NPC at once, see
+          ogres.app.game-type.games.dnd5e's :initiative-actions
+          contribution) and this just writes them."}
+  event-tx-fn :initiative/assign-ranks
+  [_ _ id->rank]
+  (for [[id rank] id->rank]
+    {:db/id id :initiative/rank rank}))
+
+(defmethod
+  ^{:doc "Shifts the given token one position :earlier or :later in the
+          current turn order (a no-op if it's already at that end), then
+          renumbers *every* participant's :initiative/rank by their final
+          list position -- always producing a clean contiguous descending
+          block, regardless of whether ranks were previously nil,
+          manually set, or set by a game module's own mechanism. This is
+          the base, manual way to assign turn order: available for every
+          game-type, not gated behind any element. Note: on a scene where
+          nobody has a rank yet, the first move assigns one to *every*
+          participant at once (since the whole list gets renumbered) --
+          expected, not a bug, but it means a token nudged into place
+          this way will read as already-ranked to any module's bulk-
+          assignment eligibility check (e.g. widgets/unranked-npc?)."}
+  event-tx-fn :initiative/move
+  [data _ id direction]
   (let [user (ds/entity data [:db/ident :user])
-        {{{tokens :scene/initiative} :camera/scene} :user/camera} user
-        idxs (sequence (comp (filter roll-token?) (map :db/id)) tokens)]
-    (for [[id roll] (zipmap idxs (random-rolls 1 20))]
-      {:db/id id :initiative/roll roll})))
+        scene (:camera/scene (:user/camera user))
+        ordered (vec (sort initiative-order (:scene/initiative scene)))
+        index (first (keep-indexed (fn [i token] (if (= (:db/id token) id) i)) ordered))]
+    (if (nil? index)
+      []
+      (let [target (case direction :earlier (dec index) :later (inc index))]
+        (if (or (neg? target) (>= target (count ordered)))
+          []
+          (let [reordered (assoc ordered index (ordered target) target (ordered index))
+                n (count reordered)]
+            (map-indexed (fn [i token] {:db/id (:db/id token) :initiative/rank (- n i)}) reordered)))))))
 
 (defmethod event-tx-fn :initiative/change-health
   [data _ id f value]
@@ -1070,7 +1122,7 @@
             [:db/retract (:db/id scene) :initiative/played]
             [:db/retract (:db/id scene) :initiative/rounds]]
            (for [{id :db/id} (:scene/initiative scene)]
-             [[:db/retract id :initiative/roll]
+             [[:db/retract id :initiative/rank]
               [:db/retract id :initiative/health]
               [:db/retract id :initiative/suffix]]))))
 

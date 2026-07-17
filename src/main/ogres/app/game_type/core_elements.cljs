@@ -1,4 +1,4 @@
-(ns ogres.app.game-type.elements.core
+(ns ogres.app.game-type.core-elements
   "The base set of toggle-able game-type elements: per-unit UI elements,
    canvas-level gameplay tools, and gameplay-specific systems. This is the
    framework's built-in vocabulary -- a future namespace (e.g. one
@@ -6,20 +6,43 @@
    by being added to the merge in `ogres.app.game-type`, without touching
    this map, the toggle mechanism, or any existing element's wiring.
 
+   Named `core-elements` rather than nesting an `elements` segment under
+   this namespace's own path (e.g. `ogres.app.game-type.elements.core`) --
+   `ogres.app.game-type` itself defines a top-level var named `elements`,
+   and under the Closure/Node-style namespace-as-nested-object model this
+   test build (and any non-ESM target) compiles to, a var and a child
+   namespace segment sharing the same name collide: assigning the var
+   clobbers the object the child namespace's exports live on. ESM builds
+   don't show this (each namespace gets its own module bindings), so it's
+   silent in the app build and only surfaces here -- flattening the name
+   avoids the collision outright rather than relying on module-system
+   specifics.
+
    Each key is a namespaced keyword; the namespace segment (`:unit`,
    `:tool`, `:system`) doubles as the element's category, so no separate
    category field is needed. Each value is `{:label \"...\" :icon \"...\"}`
    where `:icon` is a *default* sprite name (see `ogres.app.component/icon`)
    -- a game-type may override it per-element via `:game-type/icon-overrides`.
-   `:reserved? true` marks an element with no wired UI yet.")
+   `:reserved? true` marks an element with no wired UI yet (none of these
+   are currently reserved -- see `ogres.app.game-type/elements` for how the
+   seeded 'Default' game-type only enables a small subset of these by
+   default, leaving the rest -- including all of these -- for specific
+   game-type templates like D&D 5e/Gloomhaven to opt into).")
 
 (def elements
   {:unit/size        {:label "Size"}
    :unit/light       {:label "Light" :icon "sun-fill"}
    :unit/aura        {:label "Aura" :icon "compass"}
-   :unit/conditions  {:label "Conditions" :icon "arrow-through-heart-fill"}
    :unit/dead        {:label "Dead flag" :icon "skull"}
-   :unit/initiative  {:label "Initiative flag" :icon "hourglass-split"}
+   ;; "Turn flag", not "Initiative flag" -- this marks whether a token
+   ;; participates in the base turn tracker at all (see
+   ;; ogres.app.game-type/default-enabled-elements and
+   ;; component/panel_initiative.cljs), which is a generic round/turn
+   ;; concept. "Initiative" is TTRPG-specific phrasing for how a game
+   ;; determines turn order (e.g. D&D's d20 roll -- see
+   ;; ogres.app.game-type.games.dnd5e/:dnd5e/initiative-roll) and is
+   ;; reserved for that kind of module-owned label, not this core flag.
+   :unit/initiative  {:label "Turn flag" :icon "hourglass-split"}
    :unit/player      {:label "Player flag" :icon "person-circle"}
 
    :tool/measurement {:label "Measurement" :icon "rulers"}
@@ -38,7 +61,4 @@
    :tool/grid-iso-hex-flat             {:label "Iso Hex (Flat)" :icon "hexagon-flat"}
    :tool/grid-iso-square-vertical      {:label "Iso Square (Vertical)" :icon "square"}
    :tool/grid-iso-hex-pointy-vertical  {:label "Iso Hex Pointy (Vertical)" :icon "hexagon"}
-   :tool/grid-iso-hex-flat-vertical    {:label "Iso Hex Flat (Vertical)" :icon "hexagon-flat"}
-
-   :system/initiative-roll {:label "Initiative (d20 roll)" :icon "dice-5-fill"}
-   :system/hp-tracker      {:label "HP Tracker" :reserved? true}})
+   :tool/grid-iso-hex-flat-vertical    {:label "Iso Hex Flat (Vertical)" :icon "hexagon-flat"}})

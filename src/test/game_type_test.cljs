@@ -1,6 +1,11 @@
 (ns game-type-test
   (:require [cljs.test :refer-macros [deftest is]]
-            [ogres.app.game-type :as game-type]))
+            [clojure.set :as set]
+            [ogres.app.game-type :as game-type]
+            [ogres.app.game-type.core-elements :as core]
+            [ogres.app.game-type.games.dnd5e :as dnd5e]
+            [ogres.app.game-type.games.gloomhaven :as gloomhaven]
+            [ogres.app.game-type.widgets :as widgets]))
 
 (deftest test-grid-tool-id-round-trip
   (doseq [value [:square :hex-pointy :hex-flat
@@ -40,7 +45,26 @@
       "Drops any id not present in the registry -- imported files are
        untrusted input.")
   (is (= (game-type/sanitize-enabled-elements nil) #{})
-      "Handles nil (e.g. a malformed/empty import) gracefully."))
+      "Handles nil (e.g. a malformed/empty import) gracefully.")
+  (let [result (game-type/sanitize-enabled-elements
+                #{:unit/light :dnd5e/hp-tracker :gloomhaven/hp-tracker})]
+    (is (contains? result :unit/light)
+        "Elements with no :exclusive-group are untouched.")
+    (is (= (count (filter #{:dnd5e/hp-tracker :gloomhaven/hp-tracker} result)) 1)
+        "An imported file listing both mutually-exclusive HP trackers gets
+         resolved down to just one, the same invariant toggling
+         maintains interactively.")))
+
+(deftest test-exclusive-group
+  (is (= (game-type/exclusive-group :dnd5e/hp-tracker) :hp-tracker))
+  (is (= (game-type/exclusive-group :gloomhaven/hp-tracker) :hp-tracker)
+      "D&D 5e's and Gloomhaven's HP trackers share an :exclusive-group --
+       cosmetically the same widget, but genuinely separate registrations
+       that should never both be enabled on one game-type.")
+  (is (nil? (game-type/exclusive-group :unit/light))
+      "Elements with no declared :exclusive-group return nil.")
+  (is (nil? (game-type/exclusive-group :not/real))
+      "Unrecognized ids return nil rather than throwing."))
 
 (deftest test-sanitize-icon-overrides
   (is (= (game-type/sanitize-icon-overrides
@@ -54,3 +78,67 @@
        value is a well-shaped :icon/link (a string sprite-name or url);
        drops unrecognized keys and malformed values.")
   (is (= (game-type/sanitize-icon-overrides nil) {})))
+
+(deftest test-registry-merge-has-no-id-collisions
+  (let [core-ids (set (keys core/elements))
+        dnd5e-ids (set (keys dnd5e/elements))
+        gloomhaven-ids (set (keys gloomhaven/elements))]
+    (is (empty? (set/intersection core-ids dnd5e-ids))
+        "core and dnd5e contribute disjoint element ids.")
+    (is (empty? (set/intersection core-ids gloomhaven-ids))
+        "core and gloomhaven contribute disjoint element ids.")
+    (is (empty? (set/intersection dnd5e-ids gloomhaven-ids))
+        "dnd5e and gloomhaven contribute disjoint element ids -- two game
+         modules can be compiled in together without ever colliding.")
+    (is (= (count game-type/elements)
+           (+ (count core-ids) (count dnd5e-ids) (count gloomhaven-ids)))
+        "The merged registry has exactly as many entries as its three
+         sources combined -- nothing silently overwritten.")))
+
+(deftest test-initiative-panel-lookup-path
+  (let [element (:dnd5e/hp-tracker game-type/elements)]
+    (is (fn? (get-in element [:initiative-panel :render]))
+        "An element declaring :initiative-panel supplies a render fn that
+         panel_initiative.cljs can call generically, by presence alone.")))
+
+(deftest test-unranked-npc?
+  (is (false? (widgets/unranked-npc? {:token/flags #{:player} :initiative/rank nil}))
+      "A player token is never eligible, regardless of rank.")
+  (is (false? (widgets/unranked-npc? {:token/flags #{} :initiative/rank 14}))
+      "An NPC that already has a rank isn't eligible.")
+  (is (true? (widgets/unranked-npc? {:token/flags #{} :initiative/rank nil}))
+      "An NPC with no rank yet is exactly the eligible case."))
+
+(deftest test-initiative-actions-lookup-path
+  (let [element (:dnd5e/initiative-roll game-type/elements)]
+    (is (fn? (get-in element [:initiative-panel :render]))
+        "The per-token roll trigger is an :initiative-panel contribution,
+         same as HP tracker -- discovered by panel_initiative.cljs's
+         `token` the same generic way.")
+    (is (fn? (get-in element [:initiative-actions :render]))
+        "The bulk 'Roll Initiative for NPCs' button is an
+         :initiative-actions contribution, discovered by
+         panel_initiative.cljs's `actions` footer generically.")
+    (is (not (contains? game-type/elements :system/initiative-roll))
+        "The old core-owned placeholder is gone -- the d20 mechanic now
+         lives entirely under this D&D-owned id.")))
+
+(deftest test-token-panel-lookup-path
+  (let [element (:dnd5e/conditions game-type/elements)]
+    (is (string? (get-in element [:token-panel :icon])))
+    (is (string? (get-in element [:token-panel :tooltip])))
+    (is (fn? (get-in element [:token-panel :render]))
+        "An element declaring :token-panel supplies its own toolbar
+         icon/tooltip and a render fn, discovered by
+         scene_context_menu.cljs iterating enabled elements generically.")))
+
+(deftest test-token-badge-lookup-path
+  (let [dnd5e-vocab (get-in (:dnd5e/conditions game-type/elements) [:token-badge :vocabulary])
+        gloomhaven-vocab (get-in (:gloomhaven/status-effects game-type/elements) [:token-badge :vocabulary])]
+    (is (every? (fn [{:keys [value icon]}] (and (keyword? value) (string? icon))) dnd5e-vocab)
+        "D&D 5e's :token-badge vocabulary is well-shaped {:value :icon} data.")
+    (is (every? (fn [{:keys [value icon]}] (and (keyword? value) (string? icon))) gloomhaven-vocab)
+        "Gloomhaven's :token-badge vocabulary is well-shaped {:value :icon} data.")
+    (is (not= (set (map :value dnd5e-vocab)) (set (map :value gloomhaven-vocab)))
+        "The two games genuinely have different status vocabularies under
+         the same cosmetically-similar :token-badge mechanism.")))

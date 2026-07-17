@@ -48,14 +48,21 @@
 
 (def ^:private seed-game-types
   "Idempotent tx-data (keyed by the unique :game-type/key) that seeds the
-   bundled 'Default' game-type -- every real (non-reserved) element in the
-   registry, enabled. Re-transacting this on every boot is a safe upsert,
-   not a duplicate, so a database saved before this feature existed still
-   gets a fully-populated template to fall back on."
+   bundled starter game-types -- 'Default' (the bare universal element set),
+   plus 'D&D 5e'/'Gloomhaven' as curated templates demonstrating the
+   pluggable game-module framework (see `ogres.app.game-type`). Re-
+   transacting this on every boot is a safe upsert, not a duplicate, so a
+   database saved before a given template existed still gets it added."
   [{:db/id [:db/ident :root]
     :root/game-types [{:game-type/key :default
                         :game-type/name "Default"
-                        :game-type/enabled-elements game-type/default-enabled-elements}]}])
+                        :game-type/enabled-elements game-type/default-enabled-elements}
+                       {:game-type/key :dnd5e
+                        :game-type/name "D&D 5e"
+                        :game-type/enabled-elements game-type/dnd5e-enabled-elements}
+                       {:game-type/key :gloomhaven
+                        :game-type/name "Gloomhaven"
+                        :game-type/enabled-elements game-type/gloomhaven-enabled-elements}]}])
 
 (defn initial-data [host]
   (ds/db-with
@@ -80,7 +87,15 @@
     [:db/add -6 :game-type/key :default]
     [:db/add -6 :game-type/name "Default"]
     [:db/add -6 :game-type/enabled-elements game-type/default-enabled-elements]
-    [:db/add -2 :scene/game-type -6]]))
+    [:db/add -2 :scene/game-type -6]
+    [:db/add -1 :root/game-types -7]
+    [:db/add -7 :game-type/key :dnd5e]
+    [:db/add -7 :game-type/name "D&D 5e"]
+    [:db/add -7 :game-type/enabled-elements game-type/dnd5e-enabled-elements]
+    [:db/add -1 :root/game-types -8]
+    [:db/add -8 :game-type/key :gloomhaven]
+    [:db/add -8 :game-type/name "Gloomhaven"]
+    [:db/add -8 :game-type/enabled-elements game-type/gloomhaven-enabled-elements]]))
 
 (def context (uix/create-context))
 

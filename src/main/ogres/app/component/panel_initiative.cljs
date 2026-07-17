@@ -1,6 +1,7 @@
 (ns ogres.app.component.panel-initiative
   (:require [clojure.string :refer [join capitalize blank?]]
             [ogres.app.component :refer [icon image]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.hooks :as hooks]
             [uix.core :as uix :refer [defui $]]))
 
@@ -12,12 +13,14 @@
        :initiative/rounds
        :initiative/turn
        :initiative/played
+       {:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}
        {:scene/initiative
         [:db/id
          :object/hidden
          :token/label
          :token/flags
-         :initiative/roll
+         :initiative/rank
          :initiative/suffix
          :initiative/health
          :camera/_selected
@@ -31,25 +34,40 @@
   [{:user/camera
     [{:camera/scene
       [{:scene/initiative
-        [:db/id :initiative/roll :token/flags]}
+        [:db/id :initiative/rank :token/flags]}
        [:initiative/rounds :default 0]
-       :initiative/played]}]}])
-
-(def ^:private npc-xf
-  (comp (filter (comp (complement :player) :token/flags))
-        (filter (comp nil? :initiative/roll))))
+       :initiative/played
+       {:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}]}]}])
 
 (defn ^:private initiative-order
+  "Descending sort by turn-order rank, :db/id as a total-order tiebreak --
+   see the identical comparator in ogres.app.events for the full rationale
+   (kept as a separate copy here rather than shared, matching how the two
+   files were already independent before this rename)."
   [a b]
-  (let [f (juxt :initiative/roll :db/id)]
+  (let [f (juxt :initiative/rank :db/id)]
     (compare (f b) (f a))))
 
-(defui ^:private form-dice
-  [{:keys [value on-change]}]
+(defui ^:private rank-widget
+  "The base turn-order control every game-type gets, regardless of
+   whether any module contributes its own way of assigning order (e.g.
+   D&D's dice-roll trigger, added alongside this via the generic
+   :initiative-panel loop in `token` below). Click the rank to type an
+   exact number, or use the up/down buttons to nudge this token earlier
+   or later in the order -- both write the same generic
+   :initiative/rank value, so this alone is enough to run a full game
+   with manually-assigned, non-random turn order."
+  [{:keys [value on-change on-move]}]
   (let [[editing set-editing form] (hooks/use-modal)
         input (uix/use-ref)]
     ($ :.initiative-token-roll
       {:data-present (some? value)}
+      ($ :button.initiative-token-rank-move
+        {:type "button"
+         :aria-label "Move earlier in turn order"
+         :on-click (fn [event] (.stopPropagation event) (on-move :earlier))}
+        ($ icon {:name "arrow-up-short" :size 12}))
       ($ :button.initiative-token-roll-control
         {:on-click
          (fn [event]
@@ -59,11 +77,16 @@
             js/window
             #(if-let [node (deref input)]
                (.select node))))}
-        (or value \?))
+        (or value \-))
+      ($ :button.initiative-token-rank-move
+        {:type "button"
+         :aria-label "Move later in turn order"
+         :on-click (fn [event] (.stopPropagation event) (on-move :later))}
+        ($ icon {:name "arrow-down-short" :size 12}))
       (if editing
         ($ :form.initiative-token-form
           {:ref form
-           :data-type "roll"
+           :data-type "rank"
            :on-submit
            (fn [event]
              (.preventDefault event)
@@ -74,44 +97,10 @@
              :ref input
              :auto-focus true
              :default-value value
-             :placeholder "Initiative"
-             :aria-label "Initiative roll"})
+             :placeholder "Rank"
+             :aria-label "Turn order"})
           ($ :button {:type "submit"}
             ($ icon {:name "check"})))))))
-
-(defui ^:private form-hp
-  [{:keys [value on-change]}]
-  (let [[editing set-editing form] (hooks/use-modal)
-        input (uix/use-ref)]
-    ($ :.initiative-token-health
-      {:data-present (some? value)}
-      ($ :.initiative-token-health-frame
-        ($ icon {:name "heart-fill" :size 40}))
-      ($ :button.initiative-token-health-label
-        {:on-click (fn [event] (.stopPropagation event) (set-editing not))}
-        (or value "HP"))
-      (if editing
-        ($ :form.initiative-token-form
-          {:ref form
-           :data-type "health"
-           :on-submit
-           (fn []
-             (on-change (fn [_ v] v) (.-value @input))
-             (set-editing not))}
-          ($ :input.text.text-ghost
-            {:type "number"
-             :name "hitpoints"
-             :ref input
-             :auto-focus true
-             :placeholder "Hitpoints"
-             :aria-label "Hitpoints"})
-          (for [[key label f] [["-" "Subtract from" -] ["+" "Add to" +] ["=" "Set as" (fn [_ v] v)]]]
-            ($ :button
-              {:key key :type "button" :aria-label label
-               :on-click
-               (fn []
-                 (on-change f (.-value @input))
-                 (set-editing not))} key)))))))
 
 (defui ^:private token
   [{:keys [context entity]}]
@@ -119,8 +108,10 @@
         {host :user/host
          {{curr :initiative/turn
            rnds :initiative/rounds
-           went :initiative/played}
+           went :initiative/played
+           game-type-entity :scene/game-type}
           :camera/scene} :user/camera} context
+        enabled-elements (:game-type/enabled-elements game-type-entity #{})
         {id :db/id
          label :token/label
          flags :token/flags
@@ -142,11 +133,14 @@
              (dispatch :initiative/unmark id)
              (dispatch :initiative/mark id)))}
         ($ icon {:name "arrow-right-short"}))
-      ($ form-dice
-        {:value (:initiative/roll entity)
+      ($ rank-widget
+        {:value (:initiative/rank entity)
          :on-change
          (fn [value]
-           (dispatch :initiative/change-roll id value))})
+           (dispatch :initiative/change-rank id value))
+         :on-move
+         (fn [direction]
+           (dispatch :initiative/move id direction))})
       ($ :.initiative-token-frame
         {:on-click #(dispatch :objects/select id)
          :data-player (contains? flags :player)
@@ -177,19 +171,26 @@
                      (if (not= (.-pathname url) "/")
                        (.-pathname url))))
               ($ :.initiative-token-url url)))))
+      ;; Any enabled element that declares an :initiative-panel gets its
+      ;; own contribution rendered here (e.g. dnd5e/gloomhaven's HP
+      ;; tracker) -- this file never names a specific game or mechanic,
+      ;; it only looks for the presence of that key. Visibility is still
+      ;; gated by host/player-flag here, centrally, rather than in each
+      ;; game module, since that's a permission rule, not a game rule.
       (if (or host (contains? flags :player))
-        ($ form-hp
-          {:value (:initiative/health entity)
-           :on-change
-           (fn [f v]
-             (dispatch :initiative/change-health id f v))})))))
+        (for [[element-id element] (filter (comp :initiative-panel val)
+                                            (select-keys game-type/elements enabled-elements))]
+          ($ :<> {:key element-id}
+            ((get-in element [:initiative-panel :render]) {:entity entity :dispatch dispatch})))))))
 
 (defui ^:private token-placeholder []
   ($ :li.initiative-token {:data-type "placeholder"}
     ($ :.initiative-token-turn
       ($ icon {:name "arrow-right-short"}))
     ($ :.initiative-token-roll
-      ($ :.initiative-token-roll-control))
+      ($ :.initiative-token-rank-move)
+      ($ :.initiative-token-roll-control)
+      ($ :.initiative-token-rank-move))
     ($ :.initiative-token-frame
       ($ :.initiative-token-pattern))
     ($ :.initiative-token-info)
@@ -206,7 +207,7 @@
          :user/camera} result]
     ($ :.initiative
       ($ :header
-        ($ :h2 "Initiative")
+        ($ :h2 "Turn Order")
         (if (>= rounds 1)
           ($ :h3 "Round " rounds)))
       (cond (and (not (seq tokens)) (nil? rounds))
@@ -214,17 +215,17 @@
               (for [indx (range 6)]
                 (if (= indx 1)
                   ($ :.initiative-prompt {:key indx :style {:text-align "center"}}
-                    "Begin initiative by selecting one or more tokens and
-                     clicking the hourglass button.")
+                    "Begin the turn order by selecting one or more tokens
+                     and clicking the hourglass button.")
                   ($ token-placeholder {:key indx}))))
             (and (not (seq tokens)) (>= rounds 1))
             ($ :.prompt
               ($ :br)
-              "Initiative is still running but there are no tokens participating."
+              "The round is still running but there are no tokens participating."
               ($ :br)
               ($ :br)
               ($ :button.button.button-neutral
-                {:on-click #(dispatch :initiative/leave)} "Leave initiative"))
+                {:on-click #(dispatch :initiative/leave)} "Leave"))
             (seq tokens)
             ($ :ol.initiative-list
               (for [entity (sort initiative-order tokens)]
@@ -235,19 +236,24 @@
         result   (hooks/use-query query-actions)
         {{{rounds :initiative/rounds
            played :initiative/played
-           tokens :scene/initiative}
+           tokens :scene/initiative
+           game-type-entity :scene/game-type}
           :camera/scene}
          :user/camera} result
+        enabled-elements (:game-type/enabled-elements game-type-entity #{})
         on-quit (uix/use-callback #(dispatch :initiative/leave) [dispatch])
         on-next (uix/use-callback #(dispatch :initiative/next) [dispatch])]
     ($ :<>
       ($ :button.button.button-neutral
         {:disabled (empty? tokens) :on-click on-quit} "Leave")
-      ($ :button.button.button-neutral
-        {:disabled (not (seq (sequence npc-xf tokens)))
-         :on-click #(dispatch :initiative/roll-all)
-         :style {:text-transform "none"}}
-        ($ icon {:name "dice-5-fill" :size 16}) "ROLL NPCs")
+      ;; Any enabled element that declares :initiative-actions gets its
+      ;; own footer/bulk-level contribution rendered here (e.g. D&D's
+      ;; "Roll Initiative for NPCs") -- this file never names a specific
+      ;; game or mechanic, it only looks for the presence of that key.
+      (for [[element-id element] (filter (comp :initiative-actions val)
+                                          (select-keys game-type/elements enabled-elements))]
+        ($ :<> {:key element-id}
+          ((get-in element [:initiative-actions :render]) {:dispatch dispatch :tokens tokens})))
       (cond (not (seq tokens))
             ($ :button.button.button-neutral
               {:disabled true} "Next")

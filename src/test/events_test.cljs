@@ -136,14 +136,29 @@
   (let [conn (ds/conn-from-db (initial-data true))
         game-types (:root/game-types (root conn))
         default (first (filter (comp #{:default} :game-type/key) game-types))
+        dnd5e (first (filter (comp #{:dnd5e} :game-type/key) game-types))
+        gloomhaven (first (filter (comp #{:gloomhaven} :game-type/key) game-types))
         scene (:camera/scene (:user/camera (user conn)))]
-    (is (= (count game-types) 1)
-        "Exactly the bundled 'Default' game-type is seeded on a fresh db.")
+    (is (= (count game-types) 3)
+        "The bundled 'Default', 'D&D 5e', and 'Gloomhaven' game-types are
+         all seeded on a fresh db.")
     (is (= (:game-type/name default) "Default"))
-    (is (contains? (:game-type/enabled-elements default) :unit/light)
-        "The seeded default enables every real (non-reserved) element.")
-    (is (not (contains? (:game-type/enabled-elements default) :system/hp-tracker))
-        "The reserved hp-tracker element is not enabled by default.")
+    (is (= (:game-type/name dnd5e) "D&D 5e"))
+    (is (= (:game-type/name gloomhaven) "Gloomhaven"))
+    (is (contains? (:game-type/enabled-elements default) :unit/dead)
+        "The seeded default enables the bare universal element set.")
+    (is (not-any? #(contains? (:game-type/enabled-elements default) %)
+                  [:tool/measurement :tool/mask :tool/shapes
+                   :unit/size :unit/light :unit/aura])
+        "The seeded default does not enable any of the opt-in shared
+         primitives -- those are per-template opt-ins now, not universal.")
+    (is (not-any? #(= (namespace %) "dnd5e")
+                  (:game-type/enabled-elements default))
+        "The seeded default has nothing game-specific enabled.")
+    (is (some #(= (namespace %) "dnd5e") (:game-type/enabled-elements dnd5e))
+        "The seeded D&D 5e template enables its own module's elements.")
+    (is (some #(= (namespace %) "gloomhaven") (:game-type/enabled-elements gloomhaven))
+        "The seeded Gloomhaven template enables its own module's elements.")
     (is (= (:db/id (:scene/game-type scene)) (:db/id default))
         "A freshly created scene already references the seeded default.")))
 
@@ -172,9 +187,9 @@
           custom (entity @conn custom-id)]
       (is (= (set (:game-type/enabled-elements custom)) (set default-elements))
           "A newly created game-type clones its source's enabled elements.")
-      (is (= (count (:root/game-types (root conn))) 2)
+      (is (= (count (:root/game-types (root conn))) 4)
           "The new game-type is linked into :root/game-types alongside the
-           bundled default."))))
+           three bundled templates (Default, D&D 5e, Gloomhaven)."))))
 
 (deftest test-game-type-toggle-element
   (let [conn (ds/conn-from-db (initial-data true))
@@ -185,6 +200,28 @@
     (dispatch conn :game-type/toggle-element game-type-id :unit/light true)
     (is (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :unit/light)
         "Toggling an element back on restores it.")))
+
+(deftest test-game-type-toggle-element-exclusive-group
+  (let [conn (ds/conn-from-db (initial-data true))
+        game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))]
+    (dispatch conn :game-type/toggle-element game-type-id :dnd5e/hp-tracker true)
+    (is (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :dnd5e/hp-tracker))
+
+    (dispatch conn :game-type/toggle-element game-type-id :gloomhaven/hp-tracker true)
+    (let [enabled (:game-type/enabled-elements (entity @conn game-type-id))]
+      (is (contains? enabled :gloomhaven/hp-tracker)
+          "Enabling Gloomhaven's HP tracker succeeds.")
+      (is (not (contains? enabled :dnd5e/hp-tracker))
+          "...and automatically disables D&D 5e's, since they share an
+           :exclusive-group and a game-type should never have two
+           competing HP trackers enabled at once."))
+
+    (dispatch conn :game-type/toggle-element game-type-id :gloomhaven/hp-tracker false)
+    (is (not (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :gloomhaven/hp-tracker))
+        "Disabling an exclusive-group member never re-enables anything else --
+         only enabling has the auto-disable side effect.")
+    (is (not (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :dnd5e/hp-tracker))
+        "D&D 5e's tracker, already off from the earlier conflict, stays off.")))
 
 (deftest test-game-type-toggle-grid-element-switches-scene
   (let [conn (ds/conn-from-db (initial-data true))
@@ -304,12 +341,12 @@
 (deftest test-game-type-set-icon-override
   (let [conn (ds/conn-from-db (initial-data true))
         game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))]
-    (dispatch conn :game-type/set-icon-override game-type-id :unit/conditions {:icon/url "https://example.com/icon.svg"})
-    (is (= (get (:game-type/icon-overrides (entity @conn game-type-id)) :unit/conditions)
+    (dispatch conn :game-type/set-icon-override game-type-id :unit/dead {:icon/url "https://example.com/icon.svg"})
+    (is (= (get (:game-type/icon-overrides (entity @conn game-type-id)) :unit/dead)
            {:icon/url "https://example.com/icon.svg"})
         "Setting an icon override stores the link under the element id.")
-    (dispatch conn :game-type/set-icon-override game-type-id :unit/conditions nil)
-    (is (not (contains? (:game-type/icon-overrides (entity @conn game-type-id)) :unit/conditions))
+    (dispatch conn :game-type/set-icon-override game-type-id :unit/dead nil)
+    (is (not (contains? (:game-type/icon-overrides (entity @conn game-type-id)) :unit/dead))
         "Passing nil clears the override, falling back to the registry default.")))
 
 (deftest test-game-type-rename
@@ -336,7 +373,14 @@
 
 (deftest test-game-type-remove-refuses-to-remove-the-last-one
   (let [conn (ds/conn-from-db (initial-data true))
-        default-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))]
+        default-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        others (remove #{default-id} (map :db/id (:root/game-types (root conn))))]
+    ;; Three templates are seeded by default (Default, D&D 5e, Gloomhaven)
+    ;; -- remove the other two first so this is actually testing the "last
+    ;; one" invariant, not just the first of several removals succeeding.
+    (doseq [id others] (dispatch conn :game-type/remove id))
+    (is (= (count (:root/game-types (root conn))) 1)
+        "Only the Default game-type remains after removing the others.")
     (dispatch conn :game-type/remove default-id)
     (is (= (count (:root/game-types (root conn))) 1)
         "Removing the only remaining game-type is a no-op.")
@@ -361,6 +405,101 @@
            sanitization before this event ever sees them (simulated here
            by passing already-sanitized data, matching what the Builder
            panel's import handler does)."))))
+
+(deftest test-initiative-change-rank
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (let [id (:db/id (first (:scene/tokens (:camera/scene (:user/camera (user conn))))))]
+      (dispatch conn :initiative/change-rank id 14)
+      (is (= (:initiative/rank (entity @conn id)) 14)
+          "Sets an explicit turn-order rank -- the base, game-agnostic
+           value every assignment mechanism (manual entry, :initiative/
+           move, or a game module's own roll) ultimately writes.")
+      (dispatch conn :initiative/change-rank id nil)
+      (is (nil? (:initiative/rank (entity @conn id)))
+          "nil clears the rank back to unranked."))))
+
+(deftest test-initiative-assign-ranks
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :token/create (Vec2. 10 10) nil)
+    (let [[id1 id2] (map :db/id (:scene/tokens (:camera/scene (:user/camera (user conn)))))]
+      (dispatch conn :initiative/assign-ranks {id1 5 id2 12})
+      (is (= (:initiative/rank (entity @conn id1)) 5))
+      (is (= (:initiative/rank (entity @conn id2)) 12)
+          "Batch-writes every entry in one transaction -- this is what a
+           bulk action (e.g. D&D's 'Roll Initiative for NPCs') dispatches
+           instead of N separate :initiative/change-rank calls."))))
+
+(deftest test-initiative-move
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :token/create (Vec2. 10 10) nil)
+    (dispatch conn :token/create (Vec2. 20 20) nil)
+    (let [idxs (map :db/id (:scene/tokens (:camera/scene (:user/camera (user conn)))))]
+      (dispatch conn :initiative/toggle idxs true))
+    (let [scene (:camera/scene (:user/camera (user conn)))
+          ;; Nobody has a rank yet -- initiative-order's nil fallback sorts
+          ;; by :db/id descending, so this mirrors that starting order
+          ;; directly.
+          [top mid bottom] (map :db/id (sort-by :db/id > (:scene/initiative scene)))]
+      (is (every? nil? (map :initiative/rank (:scene/initiative scene)))
+          "Sanity check: this is the all-nil floor case.")
+
+      ;; Move the bottom token to the very front, two slots up.
+      (dispatch conn :initiative/move bottom :earlier)
+      (dispatch conn :initiative/move bottom :earlier)
+      (let [scene (:camera/scene (:user/camera (user conn)))
+            reordered (map :db/id (sort-by (comp - :initiative/rank) (:scene/initiative scene)))]
+        (is (= reordered [bottom top mid])
+            "Two :earlier moves walk the token all the way to the front.")
+        (is (= (set (map :initiative/rank (:scene/initiative scene))) #{1 2 3})
+            "The whole list gets a clean contiguous descending rank by
+             final position on every move, not just the two tokens that
+             swapped -- the first move already ranks everyone at once."))
+
+      ;; A third :earlier move is a no-op -- already at the front.
+      (dispatch conn :initiative/move bottom :earlier)
+      (is (= (:initiative/rank (entity @conn bottom)) 3)
+          "Moving past the boundary doesn't change anything.")
+
+      ;; Confirm the reorder actually drives turn advancement, not just
+      ;; the panel's display order.
+      (dispatch conn :initiative/next) ;; starts round 1
+      (dispatch conn :initiative/next) ;; marks the first turn
+      (is (= (:db/id (:initiative/turn (:camera/scene (:user/camera (user conn))))) bottom)
+          "After manually moving it to the front, :initiative/next
+           advances to that token first."))))
+
+(deftest test-initiative-two-player-fixed-alternating-order
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :token/create (Vec2. 10 10) nil)
+    (let [idxs (map :db/id (:scene/tokens (:camera/scene (:user/camera (user conn)))))]
+      (dispatch conn :initiative/toggle idxs true))
+    (let [scene (:camera/scene (:user/camera (user conn)))
+          [p1 p2] (map :db/id (sort-by :db/id > (:scene/initiative scene)))
+          current-turn #(:db/id (:initiative/turn (:camera/scene (:user/camera (user conn)))))]
+      ;; The floor case: two participants, nobody ever rolls or manually
+      ;; assigns a rank -- e.g. a two-player game like chess with strictly
+      ;; alternating fixed turns. This has to just work from the stable
+      ;; :db/id tiebreak alone, with zero setup.
+      (dispatch conn :initiative/next) ;; round 1 starts
+      (dispatch conn :initiative/next) ;; p1's turn
+      (is (= (current-turn) p1))
+      (dispatch conn :initiative/next) ;; p2's turn
+      (is (= (current-turn) p2))
+      (dispatch conn :initiative/next) ;; everyone's played -- round 2 starts
+      (is (= (:initiative/rounds (:camera/scene (:user/camera (user conn)))) 2))
+      (dispatch conn :initiative/next) ;; p1's turn again
+      (is (= (current-turn) p1)
+          "With no ranks ever set, round 2 repeats the exact same order as
+           round 1 -- p1, p2, p1, p2, forever -- requiring zero rolling or
+           manual reordering. This is the floor the turn system has to
+           support: the simplest possible game (two players, strictly
+           alternating, e.g. chess) just works.")
+      (dispatch conn :initiative/next) ;; p2's turn again
+      (is (= (current-turn) p2)))))
 
 (deftest test-camera-translate-non-iso
   (let [conn (ds/conn-from-db (initial-data true))]

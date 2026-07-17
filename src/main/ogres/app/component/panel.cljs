@@ -54,7 +54,7 @@
 
 (def ^:private data
   {:data       {:icon "floppy" :label "Manage local data" :size 26}
-   :initiative {:icon "hourglass-split" :label "Initiative"}
+   :initiative {:icon "hourglass-split" :label "Turn Order"}
    :lobby      {:icon "people-fill" :label "Online options"}
    :scene      {:icon "images" :label "Scene options"}
    :tokens     {:icon "pawn" :label "Token images"}
@@ -77,16 +77,20 @@
    decoupled from any scene. Setup mode is scene-editing only. Play mode
    drops Scene (no more layout changes once play has started) but keeps
    Props (still placeable/adjustable mid-session) and is the only mode
-   with Initiative and Lobby, since those are both live-session concerns.
-   The Initiative tab additionally requires the active game-type to have
-   :system/initiative-roll enabled."
+   with the Turn Order tab and Lobby, since those are both live-session
+   concerns. The Turn Order tab additionally requires the active
+   game-type to have :unit/initiative enabled -- the base per-token
+   'participates in the turn tracker' flag every game-type starts with
+   (see ogres.app.game-type/default-enabled-elements), making turn
+   tracking baseline rather than something only specific game modules
+   (e.g. D&D 5e's d20 roll) unlock."
   [host mode enabled-elements]
   (cond
     (not host) [:tokens :initiative :lobby]
     (= mode :builder) [:game-type-builder :data]
     (= mode :play)
     (cond-> [:tokens :props :initiative :lobby]
-      (not (contains? enabled-elements :system/initiative-roll))
+      (not (contains? enabled-elements :unit/initiative))
       (->> (remove #{:initiative}) vec))
     :else [:scene :props :tokens]))
 

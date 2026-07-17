@@ -1,7 +1,7 @@
 (ns ogres.app.component.scene-context-menu
-  (:require [clojure.string :refer [capitalize]]
-            [ogres.app.component :refer [icon]]
+  (:require [ogres.app.component :refer [icon]]
             [ogres.app.component.scene-pattern :refer [pattern]]
+            [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.util :as util]
@@ -15,23 +15,6 @@
         (<= x 15) "Huge"
         (>  x 15) "Gargantuan"
         :else     "Unknown"))
-
-(def ^:private token-conditions
-  [{:value :blinded       :icon "eye-slash-fill"}
-   {:value :charmed       :icon "arrow-through-heart-fill"}
-   {:value :defeaned      :icon "ear-fill"}
-   {:value :exhausted     :icon "moon-stars-fill"}
-   {:value :frightened    :icon "black-cat"}
-   {:value :grappled      :icon "fist"}
-   {:value :incapacitated :icon "lock-fill"}
-   {:value :invisible     :icon "incognito"}
-   {:value :paralyzed     :icon "cobra"}
-   {:value :petrified     :icon "gem"}
-   {:value :poisoned      :icon "poison-bottle"}
-   {:value :prone         :icon "tripwire"}
-   {:value :restrained    :icon "cobweb"}
-   {:value :stunned       :icon "stars"}
-   {:value :unconscious   :icon "activity"}])
 
 (def ^:private enabled-elements-query
   [{:user/camera
@@ -146,14 +129,6 @@
         ($ :.context-menu-toolbar
           (render-aside props))))))
 
-(defui ^:private checkbox
-  [{:keys [checked children]}]
-  (let [input (uix/use-ref)
-        indtr (= checked :indeterminate)]
-    (uix/use-effect
-     (fn [] (set! (.-indeterminate @input) indtr)) [indtr])
-    (children input)))
-
 (defui ^:private token-form-label
   [{:keys [values on-change on-close]
     :or   {values    (constantly (list))
@@ -242,45 +217,29 @@
                :aria-label "Increase aura size by 5 feet"}
               "+")))))))
 
-(defui ^:private token-form-conditions
-  [props]
-  (let [fqs (frequencies (reduce into [] ((:values props) :token/flags [])))
-        ids ((:values props) :db/id)]
-    (for [{value :value icon-name :icon} token-conditions
-          :let [focus (= value (:value (first token-conditions)))
-                state (cond (= (get fqs value 0) 0) false
-                            (= (get fqs value 0) (count ids)) true
-                            :else :indeterminate)]]
-      ($ checkbox {:key value :checked state}
-        (fn [input]
-          ($ :label {:aria-label (name value) :data-tooltip (capitalize (name value))}
-            ($ :input
-              {:ref input
-               :type "checkbox"
-               :name (str "token-condition-" (name value))
-               :checked (if (= state :indeterminate) false state)
-               :auto-focus focus
-               :on-change
-               (fn [event]
-                 (let [checked (.. event -target -checked)]
-                   ((:on-change props) :token/change-flag value checked)))})
-            ($ icon {:name icon-name})))))))
-
 (defui ^:private context-menu-token [props]
   (let [dispatch (hooks/use-dispatch)
         data     (:data props)
         idxs     (into [] (map :db/id) data)
         enabled  (use-enabled-elements)
-        details? (some enabled #{:unit/size :unit/light :unit/aura})]
+        details? (some enabled #{:unit/size :unit/light :unit/aura})
+        ;; Any enabled element that declares a :token-panel gets its own
+        ;; toolbar tab + form body here -- this file never names a specific
+        ;; game or mechanic, it only looks for the presence of that key.
+        panel-elements (filter (comp :token-panel val)
+                                (select-keys game-type/elements enabled))]
     ($ context-menu-fn
       {:render-toolbar
        (fn [{:keys [selected on-change]}]
          ($ :<>
            (for [[form icon-name tooltip]
-                 (cond-> [[:label "fonts" "Label"]]
-                   details? (conj [:details "sliders" "Options"])
-                   (contains? enabled :unit/conditions)
-                   (conj [:conditions "arrow-through-heart-fill" "Conditions"]))]
+                 (into (cond-> [[:label "fonts" "Label"]]
+                         details? (conj [:details "sliders" "Options"]))
+                       (map (fn [[id element]]
+                              [id
+                               (get-in element [:token-panel :icon])
+                               (get-in element [:token-panel :tooltip])]))
+                       panel-elements)]
              ($ :button
                {:key form
                 :type "button"
@@ -293,7 +252,7 @@
                ($ :button
                  {:type "button"
                   :data-selected on
-                  :data-tooltip "Initiative"
+                  :data-tooltip "Turn Order"
                   :on-click #(dispatch :initiative/toggle idxs (not on))}
                  ($ icon {:name "hourglass-split"}))))
            (if (contains? enabled :unit/player)
@@ -349,9 +308,10 @@
                                   ([f] (vs f #{}))
                                   ([f init] (into init (map f) data)))}]
           (case selected
-            :label      ($ token-form-label props)
-            :details    ($ token-form-details props)
-            :conditions ($ token-form-conditions props)))))))
+            :label   ($ token-form-label props)
+            :details ($ token-form-details props)
+            (if-let [element (get game-type/elements selected)]
+              ((get-in element [:token-panel :render]) props))))))))
 
 (defui ^:private shape-form-style
   [{:keys [on-change values]}]
