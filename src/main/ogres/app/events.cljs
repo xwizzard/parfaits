@@ -404,12 +404,49 @@
    [:db/add [:db/ident :root] :root/game-types -1]
    [:db.fn/call event-tx-fn :user/edit-game-type -1]])
 
+(defn ^:private enable-one
+  "Adds `element-id` to `enabled` -- if it declares an :exclusive-group
+   (see `ogres.app.game-type/exclusive-group`), every other currently-
+   enabled member of that group is evicted in the same step, so the
+   result never has two competing members of one group. The shared core
+   of both :game-type/toggle-element and :game-type/toggle-category
+   below; disabling has no equivalent conflict to resolve, so it's just
+   a plain `disj` at each call site."
+  [enabled element-id]
+  (let [group (game-type/exclusive-group element-id)]
+    (cond-> (conj enabled element-id)
+      group (as-> s (into #{}
+                           (remove #(and (not= % element-id)
+                                         (= (game-type/exclusive-group %) group)))
+                           s)))))
+
+(defn ^:private grid-switch-tx
+  "If `next-enabled` leaves any scene on `entity` using a grid layout
+   that's no longer enabled, switches that scene to another available
+   one. Shared tail of :game-type/toggle-element and
+   :game-type/toggle-category -- see the former's docstring for why
+   'no-grid mode' is deliberately not handled here by forcing
+   :scene/show-grid/:scene/grid-align."
+  [entity next-enabled]
+  (when (pos? (game-type/grid-count next-enabled))
+    (for [scene (:scene/_game-type entity)
+          :when (not (contains? next-enabled (game-type/grid-tool-id (:scene/grid-type scene :square))))]
+      {:db/id (:db/id scene) :scene/grid-type (game-type/pick-grid-type next-enabled)})))
+
 (defmethod
   ^{:doc "Enables or disables one element (by its namespaced registry id,
           e.g. :unit/light or :tool/grid-hex-pointy) on the given
           game-type. If this leaves any scene using it on a grid layout
           that's no longer enabled, that scene is switched to another
           available layout.
+
+          If the element being enabled declares an :exclusive-group (see
+          `ogres.app.game-type/exclusive-group`), every other currently-
+          enabled element sharing that group is disabled in the same
+          transaction -- e.g. enabling D&D 5e's HP tracker automatically
+          disables Gloomhaven's, since a single game-type should never
+          end up with two competing 'the' HP trackers. Disabling an
+          element never has this side effect, only enabling one does.
 
           'No-grid mode' (a game-type with zero grid layouts enabled)
           isn't handled here by forcing :scene/show-grid or :scene/grid-
@@ -426,12 +463,45 @@
   [data _ game-type-id element-id enabled?]
   (let [entity (ds/entity data game-type-id)
         current (set (:game-type/enabled-elements entity))
-        next-enabled ((if enabled? conj disj) current element-id)]
+        next-enabled (if enabled?
+                       (enable-one current element-id)
+                       (disj current element-id))]
     (into [{:db/id game-type-id :game-type/enabled-elements next-enabled}]
-          (when (pos? (game-type/grid-count next-enabled))
-            (for [scene (:scene/_game-type entity)
-                  :when (not (contains? next-enabled (game-type/grid-tool-id (:scene/grid-type scene :square))))]
-              {:db/id (:db/id scene) :scene/grid-type (game-type/pick-grid-type next-enabled)})))))
+          (grid-switch-tx entity next-enabled))))
+
+(defmethod
+  ^{:doc "Enables or disables every one of `element-ids` on the given
+          game-type at once, in a single transaction -- the 'select all'
+          toggle for an entire Builder category (see
+          panel_game_type_builder.cljs's `category-summary`, e.g. 'all
+          D&D 5e features' or 'all Gloomhaven features'). Applies the
+          same per-id :exclusive-group conflict resolution
+          :game-type/toggle-element does, and the same grid-layout
+          scene-switch tail -- this is exactly N individual toggles
+          batched into one transaction, not a different rule.
+
+          The optional 5-arg form additionally force-disables every id
+          in `disable-ids`, in the same transaction, but only when
+          `enabled?` is true -- for a module whose real-world game is
+          tied to one specific map/grid type (Gloomhaven's board is
+          always point-top hexagons, see
+          `ogres.app.game-type/category-grid-elements`), so checking
+          'all Gloomhaven features' both turns on hex-pointy and turns
+          off whatever other grid layouts happened to be enabled,
+          instead of just adding hex-pointy alongside them. Disabling a
+          category never force-disables anything beyond `element-ids`
+          itself -- there's nothing to exclude when turning things off."}
+  event-tx-fn :game-type/toggle-category
+  ([data event game-type-id element-ids enabled?]
+   [[:db.fn/call event-tx-fn event game-type-id element-ids enabled? #{}]])
+  ([data _ game-type-id element-ids enabled? disable-ids]
+   (let [entity (ds/entity data game-type-id)
+         current (set (:game-type/enabled-elements entity))
+         next-enabled (if enabled?
+                        (apply disj (reduce enable-one current element-ids) disable-ids)
+                        (apply disj current element-ids))]
+     (into [{:db/id game-type-id :game-type/enabled-elements next-enabled}]
+           (grid-switch-tx entity next-enabled)))))
 
 (defmethod
   ^{:doc "Sets or clears a flavor-asset icon override for one element on

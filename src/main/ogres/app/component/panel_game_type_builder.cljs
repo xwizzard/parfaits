@@ -22,24 +22,25 @@
    {:root/user
     [{:user/game-type-editing [:db/id]}]}])
 
-(def ^:private category-labels
-  {"unit" "Per-unit elements"
-   "grid" "Map tools"})
+(def ^:private generic-flat-namespaces
+  "The framework's own built-in elements (`ogres.app.game-type.core-
+   elements`) are universal across every game and get grouped under one
+   top-level 'Generic' category (see `editor`), sibling to each compiled-
+   in game module's own section. These particular namespaces are listed
+   directly under Generic with no further nesting -- only grid layouts
+   (see `generic-nested-subcategory-*` below) get their own subsection,
+   since there are enough of them to be worth collapsing separately."
+  ["system" "tool" "unit"])
 
-(def ^:private category-order
-  ["grid" "unit"])
+(def ^:private generic-nested-subcategory-labels
+  {"grid" "Map tools"})
 
-(def ^:private gameplay-subcategory-labels
-  {"system" "Systems"
-   "tool" "Tools"})
-
-(def ^:private gameplay-subcategory-order
-  ["system" "tool"])
+(def ^:private generic-nested-subcategory-order
+  ["grid"])
 
 (def ^:private grid-element-ids
-  "The :tool/grid-* elements broken out of Gameplay tools into their own
-   top-level 'Map tools' category -- one entry per concrete :scene/grid-type
-   value."
+  "The :tool/grid-* elements broken out of the Generic category's 'Map
+   tools' subsection -- one entry per concrete :scene/grid-type value."
   (into #{} (filter #(re-find #"^grid-" (name %))) (keys game-type/elements)))
 
 (defn ^:private element-label [id]
@@ -50,13 +51,22 @@
   (let [{editing-id :db/id
          enabled :game-type/enabled-elements
          overrides :game-type/icon-overrides} game-type
-        {:keys [reserved?]} (get game-type/elements id)
+        {:keys [reserved? exclusive-group]} (get game-type/elements id)
         checked (contains? enabled id)
+        ;; If this element loses an :exclusive-group tug-of-war (see
+        ;; ogres.app.game-type/exclusive-group), name the element that's
+        ;; currently holding that group so the tooltip explains why
+        ;; checking this box will visibly uncheck another one.
+        conflict (if (and exclusive-group (not checked))
+                   (first (filter #(and (not= % id)
+                                         (= (:exclusive-group (get game-type/elements %)) exclusive-group))
+                                   enabled)))
         override (get overrides id)
         icon-name (or (:icon/sprite-name override) (:icon (get game-type/elements id)))]
     ($ :li.game-type-builder-element
       {:data-reserved reserved?}
       ($ :label.checkbox
+        {:title (if conflict (str "Enabling this will disable " (element-label conflict)))}
         ($ :input
           {:type "checkbox"
            :disabled reserved?
@@ -83,11 +93,81 @@
     (for [element-id ids]
       ($ element-row {:key element-id :id element-id :game-type game-type :dispatch dispatch}))))
 
+(defui ^:private category-summary
+  "A <summary> for a category/subcategory <details>, replacing the
+   browser's default disclosure triangle with a directory-tree-style
+   plus/minus marker (see panel_game_type_builder.css for the open/closed
+   swap and the indentation that steps nested categories to the right).
+
+   Also carries the category-level 'select all' checkbox -- checked when
+   every id in `ids` is enabled, unchecked when none are, indeterminate
+   for a partial mix (the same tri-state convention
+   ogres.app.game-type.widgets/status-checklist uses for a multi-token
+   selection, reimplemented locally here since this is a core file, not
+   a leaf a game module could reach). Toggling it dispatches
+   :game-type/toggle-category for the whole set in one transaction --
+   this is what makes 'enable/disable all D&D 5e features' or 'all
+   Gloomhaven features' a single click instead of one per element.
+
+   `disable-ids`, when given, are force-disabled in that same
+   transaction on enable only (see :game-type/toggle-category) -- used
+   for a module tied to one specific map/grid type (see
+   `ogres.app.game-type/category-grid-elements`), so enabling its
+   category also clears every other grid layout instead of just adding
+   its preferred one alongside them."
+  [{:keys [label ids disable-ids game-type dispatch] :or {disable-ids #{}}}]
+  (let [{editing-id :db/id enabled :game-type/enabled-elements} game-type
+        checked-count (count (filter enabled ids))
+        state (cond (zero? checked-count) false
+                    (= checked-count (count ids)) true
+                    :else :indeterminate)
+        input (uix/use-ref)]
+    (uix/use-effect
+     (fn [] (if-let [node @input] (set! (.-indeterminate node) (= state :indeterminate))))
+     [state])
+    ($ :summary.game-type-builder-category-summary
+      ($ :span.game-type-builder-category-marker-closed ($ icon {:name "plus" :size 12}))
+      ($ :span.game-type-builder-category-marker-open ($ icon {:name "dash" :size 12}))
+      ($ :label.checkbox.game-type-builder-category-checkbox
+        ;; Stop the click here so it doesn't also toggle the parent
+        ;; <details> open/closed -- a native <summary> click's default
+        ;; action (the disclosure toggle) fires for any click inside it,
+        ;; including this checkbox, unless propagation is cut off before
+        ;; it reaches <details>'s own handling.
+        {:on-click (fn [event] (.stopPropagation event))}
+        ($ :input
+          {:type "checkbox"
+           :ref input
+           :checked (true? state)
+           :on-change
+           (fn [event]
+             (let [checked (.. event -target -checked)]
+               (if checked
+                 (dispatch :game-type/toggle-category editing-id (set ids) true (set disable-ids))
+                 (dispatch :game-type/toggle-category editing-id (set ids) false))))})
+        ($ icon {:name "check" :size 16}))
+      label)))
+
+(def ^:private known-categories
+  "Namespace segments claimed by the Generic category above (flat or
+   nested) -- anything else present in the registry is a compiled-in game
+   module's own elements (e.g. \"dnd5e\"/\"gloomhaven\") and gets
+   rendered as its own top-level section after Generic."
+  (into (set generic-flat-namespaces) generic-nested-subcategory-order))
+
 (defui ^:private editor [{:keys [game-type dispatch]}]
   (let [id (:db/id game-type)
         all-ids (sort (keys game-type/elements))
         by-category (-> (group-by namespace (remove grid-element-ids all-ids))
-                         (assoc "grid" (filter grid-element-ids all-ids)))]
+                         (assoc "grid" (filter grid-element-ids all-ids)))
+        ;; Every namespace not claimed by the Generic category above --
+        ;; one section per game module, titled via `game-type/game-label`.
+        ;; A new game module needs zero edits here.
+        game-categories (sort (remove known-categories (keys by-category)))
+        generic-flat-ids (into [] (mapcat by-category) generic-flat-namespaces)
+        ;; Generic's own "select all" checkbox spans everything under it,
+        ;; flat items and the nested Map tools subcategory alike.
+        generic-ids (into generic-flat-ids (get by-category "grid"))]
     ($ :<>
       ($ :fieldset.fieldset
         ($ :legend "Name")
@@ -97,18 +177,46 @@
            :value (or (:game-type/name game-type) "")
            :on-change #(dispatch :game-type/rename id (.. % -target -value))}))
       ($ :details.game-type-builder-category
-        ($ :summary "Gameplay")
-        (for [subcategory gameplay-subcategory-order
+        ($ category-summary
+          {:label "Generic" :ids generic-ids :game-type game-type :dispatch dispatch})
+        ;; Subcategories (currently just Map tools) render before the
+        ;; flat item list, so nested groups always sort to the top of
+        ;; their parent -- matching a directory tree, where folders list
+        ;; above loose files.
+        (for [subcategory generic-nested-subcategory-order
               :let [ids (get by-category subcategory)]
               :when (seq ids)]
           ($ :details.game-type-builder-category {:key subcategory}
-            ($ :summary (get gameplay-subcategory-labels subcategory))
-            ($ element-list {:ids ids :game-type game-type :dispatch dispatch}))))
-      (for [category category-order
-            :let [ids (get by-category category)]
+            ($ category-summary
+              {:label (get generic-nested-subcategory-labels subcategory)
+               :ids ids :game-type game-type :dispatch dispatch})
+            ($ element-list {:ids ids :game-type game-type :dispatch dispatch})))
+        ($ element-list {:ids generic-flat-ids :game-type game-type :dispatch dispatch}))
+      (for [category game-categories
+            :let [ids (get by-category category)
+                  ;; A module tied to one specific map/grid type (see
+                  ;; game-type/category-grid-elements, e.g. Gloomhaven's
+                  ;; always-hex-pointy board) gets its preferred grid
+                  ;; element folded into this checkbox's own scope, and
+                  ;; every *other* grid element queued to force off when
+                  ;; enabling -- a module not listed there is unaffected,
+                  ;; a plain category toggle with no grid side effects.
+                  grid-preference (get game-type/category-grid-elements category)
+                  category-ids (if grid-preference (into (set ids) grid-preference) ids)
+                  ;; A module can also exclude non-grid ids it has no
+                  ;; mechanic for at all (see
+                  ;; game-type/category-excluded-elements, e.g.
+                  ;; Gloomhaven having no light-radius mechanic).
+                  disable-ids (into (set (if grid-preference (remove grid-preference grid-element-ids) []))
+                                     (get game-type/category-excluded-elements category))]
             :when (seq ids)]
         ($ :details.game-type-builder-category {:key category}
-          ($ :summary (get category-labels category category))
+          ($ category-summary
+            {:label (game-type/game-label category)
+             :ids category-ids
+             :disable-ids disable-ids
+             :game-type game-type
+             :dispatch dispatch})
           ($ element-list {:ids ids :game-type game-type :dispatch dispatch}))))))
 
 (defn ^:private export-game-type! [game-type]

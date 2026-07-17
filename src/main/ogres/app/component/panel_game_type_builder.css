@@ -23,3 +23,59 @@
     color: var(--color-danger-500);
   }
 }
+
+/* A subcategory nested inside another (currently just "Map tools" inside
+   "Generic") steps to the right of its parent, directory-tree style --
+   this compounds naturally with depth since each level only offsets
+   itself relative to its own parent. */
+.game-type-builder-category .game-type-builder-category {
+  margin-left: 14px;
+}
+
+/* Replaces the browser's default disclosure triangle with a plus/minus
+   marker (see category-summary in panel_game_type_builder.cljs) so
+   category vs. subcategory nesting reads like a directory tree rather
+   than a flat, ambiguous list of same-looking rows. */
+.game-type-builder-category-summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  list-style: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  .game-type-builder-category-marker-closed,
+  .game-type-builder-category-marker-open {
+    align-items: center;
+    color: var(--color-black-500);
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
+  .game-type-builder-category-marker-open {
+    display: none;
+  }
+}
+
+details[open] > .game-type-builder-category-summary {
+  .game-type-builder-category-marker-closed {
+    display: none;
+  }
+
+  .game-type-builder-category-marker-open {
+    display: inline-flex;
+  }
+}
+
+/* The shared .checkbox rule (form.css) defaults to width:100% for its
+   usual context -- a full-width row in a <ul>. Inside the summary's
+   flex row alongside the marker and label text, it needs to stay
+   compact instead of stretching to fill the whole row. */
+.game-type-builder-category-checkbox {
+  flex: 0 0 auto;
+  padding: 0;
+  width: auto;
+}

@@ -223,6 +223,78 @@
     (is (not (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :dnd5e/hp-tracker))
         "D&D 5e's tracker, already off from the earlier conflict, stays off.")))
 
+(deftest test-game-type-toggle-category
+  (let [conn (ds/conn-from-db (initial-data true))
+        game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        dnd5e-ids (into #{} (filter #(= (namespace %) "dnd5e")) (keys game-type/elements))]
+    (dispatch conn :game-type/toggle-category game-type-id dnd5e-ids true)
+    (is (every? (:game-type/enabled-elements (entity @conn game-type-id)) dnd5e-ids)
+        "Enabling a whole category turns on every one of its elements in
+         a single call -- the 'select all D&D 5e features' toggle.")
+
+    (dispatch conn :game-type/toggle-category game-type-id dnd5e-ids false)
+    (is (not-any? (:game-type/enabled-elements (entity @conn game-type-id)) dnd5e-ids)
+        "Disabling a whole category turns off every one of its elements.")))
+
+(deftest test-game-type-toggle-category-exclusive-group
+  (let [conn (ds/conn-from-db (initial-data true))
+        game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        dnd5e-ids (into #{} (filter #(= (namespace %) "dnd5e")) (keys game-type/elements))]
+    (dispatch conn :game-type/toggle-element game-type-id :gloomhaven/hp-tracker true)
+    (dispatch conn :game-type/toggle-category game-type-id dnd5e-ids true)
+    (let [enabled (:game-type/enabled-elements (entity @conn game-type-id))]
+      (is (contains? enabled :dnd5e/hp-tracker)
+          "Enabling the whole D&D 5e category includes its HP tracker.")
+      (is (not (contains? enabled :gloomhaven/hp-tracker))
+          "...which evicts Gloomhaven's HP tracker -- the same
+           :exclusive-group conflict resolution :game-type/toggle-element
+           already applies, just per-id within the batch."))))
+
+(deftest test-game-type-toggle-category-grid-switches-scene
+  (let [conn (ds/conn-from-db (initial-data true))
+        game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))]
+    (is (= (:scene/grid-type (:camera/scene (:user/camera (user conn))) :square) :square)
+        "The scene starts on the default (unset -> :square) grid-type.")
+    (dispatch conn :game-type/toggle-category game-type-id #{:tool/grid-square} false)
+    (is (not= (:scene/grid-type (:camera/scene (:user/camera (user conn)))) :square)
+        "Disabling a category containing the scene's current grid-type
+         switches it to another available option, same as the
+         single-element event's grid-switch tail.")))
+
+(deftest test-game-type-toggle-category-with-disable-ids
+  (let [conn (ds/conn-from-db (initial-data true))
+        game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        gloomhaven-ids (into #{} (filter #(= (namespace %) "gloomhaven")) (keys game-type/elements))
+        other-grids (disj (set game-type/grid-order) :tool/grid-hex-pointy)]
+    ;; Default seeds every grid layout enabled -- simulates the Builder's
+    ;; "Gloomhaven" category checkbox, which folds :tool/grid-hex-pointy
+    ;; into its own scope and queues every other grid as disable-ids.
+    (dispatch conn :game-type/toggle-category game-type-id
+              (conj gloomhaven-ids :tool/grid-hex-pointy) true other-grids)
+    (let [enabled (:game-type/enabled-elements (entity @conn game-type-id))]
+      (is (every? enabled gloomhaven-ids)
+          "Enabling the category still turns on every one of its own elements.")
+      (is (contains? enabled :tool/grid-hex-pointy)
+          "...and the module's preferred grid layout.")
+      (is (not-any? enabled other-grids)
+          "...while force-disabling every other grid layout in the same
+           transaction, instead of just adding hex-pointy alongside
+           whatever grids happened to already be enabled.")
+      (is (= (:scene/grid-type (:camera/scene (:user/camera (user conn)))) :hex-pointy)
+          "With every other grid layout disabled, the scene (previously
+           on :square, which is no longer enabled) switches to the one
+           remaining available option -- the same grid-switch tail
+           :game-type/toggle-category already has."))
+
+    ;; Disabling the category leaves the grid layouts alone -- there's
+    ;; nothing to exclude when turning things off.
+    (dispatch conn :game-type/toggle-category game-type-id
+              (conj gloomhaven-ids :tool/grid-hex-pointy) false)
+    (is (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :tool/grid-hex-pointy)
+        "Disabling never force-disables anything beyond the given ids --
+         :tool/grid-hex-pointy (passed in the disable set on enable, not
+         here) stays exactly as it was left.")))
+
 (deftest test-game-type-toggle-grid-element-switches-scene
   (let [conn (ds/conn-from-db (initial-data true))
         game-type-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))]

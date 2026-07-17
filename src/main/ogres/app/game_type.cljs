@@ -27,6 +27,29 @@
 (defn game-label [namespace-str]
   (get game-labels namespace-str (capitalize namespace-str)))
 
+(def category-grid-elements
+  "For a module whose real-world game is tied to one specific map/grid
+   type (Gloomhaven's board is always point-top hexagons -- there's no
+   square or iso variant of it), the set of :tool/grid-* ids that
+   module's Builder category checkbox should exclusively enable when
+   checked -- see panel_game_type_builder.cljs's `editor`, which uses
+   this to force every *other* grid-layout element off in the same
+   action rather than just adding the preferred one alongside whatever
+   was already on (via :game-type/toggle-category's disable-ids arg).
+   A module not listed here has no such constraint; its category
+   checkbox is a plain toggle with no grid side effects. Keyed the same
+   way `game-labels` is -- the module's element-id namespace string."
+  {"gloomhaven" #{:tool/grid-hex-pointy}})
+
+(def category-excluded-elements
+  "For a module whose real-world game doesn't have a mechanic a shared
+   core primitive represents, the set of ids that module's Builder
+   category checkbox should force *off* when checked, on top of whatever
+   `category-grid-elements` already excludes. Same `editor`/disable-ids
+   mechanism, just not grid-specific. A module not listed here excludes
+   nothing beyond its grid preference (if any)."
+  {})
+
 (def default-enabled-elements
   "The bare-minimum universal element set the seeded 'Default' game-type
    starts with -- grid layouts plus basic token bookkeeping flags. Richer
