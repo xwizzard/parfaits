@@ -128,10 +128,16 @@
         .panel-tabs {
           border-radius: 3px 3px 0 0;
           flex-direction: row;
-          min-height: 36px;
+          /* Slightly larger than the 40x40px desktop tabs (see panel.css's
+             li.panel-tabs-tab/li.panel-tabs-mode) -- touch targets need
+             more room than a mouse cursor does. */
+          min-height: 50px;
 
+          /* Fixed width -- previously every li shared the row via
+             flex:1, so fewer tabs meant each one stretched wider instead
+             of staying a consistent size across modes. */
           li {
-            flex: 1;
+            flex: 0 0 50px;
             label {
               border-radius: 3px 3px 0 0;
               border-width: 1px 0 0 1px;
@@ -140,7 +146,7 @@
           }
 
           .panel-tabs-control {
-            flex: 3;
+            flex: 1;
             svg use {
               transform-origin: 50% 50%;
               transform: rotate(90deg);

@@ -51,9 +51,18 @@
   }
 }
 
-.panel-tabs-tab {
+/* `li.` here (not just `.panel-tabs-tab`) is load-bearing -- it raises
+   specificity above the `.panel-tabs li` rule above (also one class + one
+   type), which would otherwise win by both being equally specific and
+   coming first, leaving this flex:0 override never applied. */
+li.panel-tabs-tab {
   color: var(--color-paper-900);
-  max-height: 65px;
+  /* Fixed height, matching the 40px column width (a square tab) --
+     previously capped at 65px via max-height while still sharing flex:1
+     (from `& li, & label` above), so fewer visible tabs meant each one
+     grew taller (up to that cap) instead of staying a consistent size
+     across modes. */
+  flex: 0 0 40px;
 
   label {
     background-color: var(--color-blues-500);
@@ -87,9 +96,9 @@
   }
 }
 
-.panel-tabs-mode {
+li.panel-tabs-mode {
   color: var(--color-paper-900);
-  max-height: 65px;
+  flex: 0 0 40px;
 
   button {
     background-color: var(--color-prime-500);
