@@ -119,6 +119,7 @@
         {:on-click (fn [] (.click @input))}
         ($ icon {:name "camera-fill" :size 16})
         "Upload images")
+      ($ component/image-url-form {:type :props})
       ($ :button.button.button-danger
         {:on-click (fn [] (dispatch :props-images/remove-all))}
         ($ icon {:name "trash3-fill" :size 16})))))

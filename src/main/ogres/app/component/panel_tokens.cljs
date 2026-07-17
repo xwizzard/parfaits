@@ -521,6 +521,7 @@
              (upload (.. event -target -files))
              (set! (.. event -target -value) ""))})
         ($ icon {:name "camera-fill" :size 16}) "Upload images")
+      ($ component/image-url-form {:type :token})
       ($ :button.button.button-neutral
         {:type "button"
          :title "Crop"

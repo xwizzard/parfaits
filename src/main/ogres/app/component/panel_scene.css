@@ -97,8 +97,14 @@
     }
   }
 
-  .button {
-    flex: 1;
+  /* Matches the Tokens gallery footer's fixed-width, two-row-text
+     buttons (see panel.css's .form[data-form="tokens"] .form-footer) --
+     Upload/Link images share one fixed width narrower than their
+     unwrapped text needs, wrapping the label to two lines instead of
+     growing the button wider. */
+  & > button.button-neutral,
+  & > .image-url-form-wrapper {
+    flex: 0 0 84px;
   }
 }
 

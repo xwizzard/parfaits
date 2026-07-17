@@ -91,6 +91,52 @@
   }
 }
 
+.image-url-form-wrapper {
+  display: inline-flex;
+  position: relative;
+}
+
+.image-url-form-trigger {
+  justify-content: center;
+  width: 100%;
+}
+
+.image-url-form {
+  align-items: center;
+  background-color: var(--color-paper-500);
+  border-radius: 2px;
+  border: 1px solid var(--color-blues-100);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  /* Opens ABOVE and grows LEFT from the trigger's right edge, not below
+     or rightward -- these gallery "Add via URL" buttons sit near the
+     bottom-right of their side panel, so an anchor at the trigger's own
+     top-left would push a 260px-wide popover past the viewport's bottom
+     and right edges and make it unreachable. */
+  inset: auto 0 calc(100% + 4px) auto;
+  min-height: 30px;
+  padding: 3px;
+  position: absolute;
+  width: 260px;
+  z-index: 1;
+
+  &:has(input:focus-visible) {
+    outline: 3px solid var(--outline-color);
+    outline-offset: 1px;
+  }
+
+  input {
+    flex: 1;
+  }
+}
+
+.image-url-form-error {
+  color: var(--color-danger-500);
+  flex: 0 0 100%;
+  font-size: 11px;
+}
+
 .fullscreen-dialog,
 .fullscreen-dialog-body {
   align-items: stretch;

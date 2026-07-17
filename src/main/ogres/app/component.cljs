@@ -116,6 +116,53 @@
   (let [url (hooks/use-image hash)]
     (children url)))
 
+(defui image-url-form
+  "A small button + popover form for adding an image by pasting a URL,
+   alongside local file upload -- see hooks/use-image-url-adder for the
+   :token/:scene/:props type convention this mirrors. Host-only, matching
+   this app's other host-only gallery actions (e.g. 'Remove all').
+   ```
+   ($ image-url-form {:type :token})
+   ```"
+  [{:keys [type]}]
+  (let [{host :user/host} (hooks/use-query [:user/host])
+        [open? set-open form] (hooks/use-modal)
+        add (hooks/use-image-url-adder {:type type})
+        input (uix/use-ref)
+        [error set-error] (uix/use-state nil)]
+    ($ :.image-url-form-wrapper
+      ($ :button.button.button-neutral.image-url-form-trigger
+        {:type "button"
+         :disabled (not host)
+         :title "Link images"
+         :on-click
+         (fn [event]
+           (.stopPropagation event)
+           (set-error nil)
+           (set-open not))}
+        ($ icon {:name "globe-americas" :size 16})
+        "Link images")
+      (if open?
+        ($ :form.image-url-form
+          {:ref form
+           :on-submit
+           (fn [event]
+             (.preventDefault event)
+             (let [value (.-value (deref input))]
+               (-> (add value)
+                   (.then (fn [] (set-error nil) (set-open false)))
+                   (.catch (fn [err] (set-error (.-message err)))))))}
+          ($ :input.text.text-ghost
+            {:type "url"
+             :ref input
+             :auto-focus true
+             :placeholder "https://example.com/image.png"
+             :required true
+             :aria-label "Image URL"})
+          ($ :button {:type "submit"}
+            ($ icon {:name "check"}))
+          (if error ($ :.image-url-form-error error)))))))
+
 (defui fullscreen-dialog [props]
   (let [element (.querySelector js/document "#root")
         dialog  (uix/use-ref nil)]

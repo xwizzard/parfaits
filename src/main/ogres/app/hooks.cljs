@@ -61,6 +61,13 @@
   use-image-uploader
   provider.image/use-image-uploader)
 
+(def ^{:doc "Returns a function which accepts an image URL string and
+             returns a Promise which adds it as an image of the given
+             type once its dimensions and thumbnail have been resolved."
+       :arglists '([{:keys [type]}])}
+  use-image-url-adder
+  provider.image/use-image-url-adder)
+
 (def ^{:doc "Creates a new portal element of name `label` with contents
              rendered by `render-fn`. This portal can then be rendered
              into with `use-portal`."

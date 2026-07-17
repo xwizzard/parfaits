@@ -1,5 +1,7 @@
 (ns ogres.app.provider.image
-  (:require [datascript.core :as ds]
+  (:require [clojure.string :as string]
+            [datascript.core :as ds]
+            [ogres.app.const :as const]
             [ogres.app.provider.dispatch :refer [use-dispatch]]
             [ogres.app.provider.events :as events]
             [ogres.app.provider.idb :as idb]
@@ -7,6 +9,14 @@
             [uix.core :as uix :refer [defui $]]))
 
 (def ^:private hash-fn "SHA-1")
+
+(defn ^:private url?
+  "True if the given :image/hash value is a live URL reference (added via
+   use-image-url-adder) rather than a SHA-1 checksum key into IndexedDB --
+   SHA-1 hex digests never start with 'http', so this is an unambiguous
+   discriminator."
+  [s]
+  (or (string/starts-with? s "http://") (string/starts-with? s "https://")))
 
 (def ^:private context (uix/create-context))
 
@@ -246,5 +256,75 @@
   [hash]
   (let [[urls on-request] (uix/use-context context)]
     (uix/use-effect
-     (fn [] (when (some? hash) (on-request hash))) [on-request hash])
-    (get urls hash)))
+     (fn [] (when (and (some? hash) (not (url? hash))) (on-request hash))) [on-request hash])
+    (if (and (some? hash) (url? hash)) hash (get urls hash))))
+
+(defn ^:private measure-image-url
+  "Returns a Promise which resolves with {:width :height} once the image at
+   url has loaded, or rejects if it fails to load (a bad URL, a 404, or a
+   host that blocks hotlinking). No CORS is needed for this -- naturalWidth/
+   naturalHeight are readable on cross-origin images even without it; only
+   pixel data reads (e.g. via <canvas>) are blocked without CORS."
+  [url]
+  (js/Promise.
+   (fn [resolve reject]
+     (let [img (js/Image.)]
+       (set! (.-onload img) (fn [] (resolve {:width (.-naturalWidth img) :height (.-naturalHeight img)})))
+       (set! (.-onerror img) (fn [] (reject (js/Error. "Failed to load image from that URL."))))
+       (set! (.-src img) url)))))
+
+(defn ^:private url->name
+  "Derives a display name for a URL-added image from its last path
+   segment, falling back to the full URL if none is found."
+  [url]
+  (or (last (re-seq #"[^/]+" (first (string/split url #"[?#]"))))
+      url))
+
+(defn ^:private fetch-thumbnail
+  "Returns a Promise which resolves with a cropped, resized thumbnail of
+   the image at url, fetched from this app's own /thumbnail backend route
+   (see ogres.server.core/handle-thumbnail) and hashed the same way a local
+   upload's thumbnail is -- the resolved map has the same shape
+   extract-image produces locally ({:data :hash :width :height}), so it
+   flows through the existing create-state-record helper unchanged. Rejects
+   on any backend/network failure so the caller can fall back to an
+   uncropped self-referential thumbnail instead of failing the whole add."
+  [url]
+  (-> (js/fetch (str const/THUMBNAIL-URL "?url=" (js/encodeURIComponent url) "&w=256"))
+      (.then (fn [res] (if (.-ok res) (.blob res) (throw (js/Error. "thumbnail request failed")))))
+      (.then (fn [blob] (.then (create-hash blob) (fn [hash] {:data blob :hash hash :width 256 :height 256}))))))
+
+(defn use-image-url-adder
+  "React hook returning a function that accepts an image URL, measures its
+   dimensions, generates and caches a cropped thumbnail via this app's own
+   /thumbnail backend route (falling back to an uncropped self-reference if
+   that route is unreachable), and adds it as an image of the given type
+   (:token, :scene, or :props) using the URL itself as the full image's
+   :image/hash -- see ogres.app.provider.image/url?, which makes that hash
+   render directly from the URL instead of going through IndexedDB.
+
+   Host-only, matching local upload's host-authoritative write path --
+   unlike file upload there is no guest-forwarding branch for this, since
+   scene/props galleries are already effectively host-only and a guest can
+   still use local file upload for their own token."
+  [{:keys [type]}]
+  (let [dispatch (use-dispatch)
+        entity (state/use-query [:user/host])
+        write (idb/use-writer "images")]
+    (fn [url]
+      (if-not (:user/host entity)
+        (js/Promise.reject (js/Error. "Only the host can add images by URL."))
+        (.then (measure-image-url url)
+               (fn [{:keys [width height]}]
+                 (let [name (url->name url)
+                       image {:hash url :name name :size 0 :width width :height height}]
+                   (-> (fetch-thumbnail url)
+                       (.then (fn [thumb]
+                                (.then (write :put [#js {"checksum" (:hash thumb) "data" (:data thumb)}])
+                                       (constantly (create-state-record name thumb)))))
+                       (.catch (constantly image))
+                       (.then (fn [thumb-record]
+                                (case type
+                                  :token (dispatch :token-images/create-many [[image thumb-record]])
+                                  :scene (dispatch :scene-images/create-many [[image thumb-record]])
+                                  :props (dispatch :props-images/create-many [[image thumb-record]]))))))))))))

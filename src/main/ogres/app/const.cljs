@@ -3,6 +3,7 @@
 (goog-define VERSION "latest")
 (goog-define PATH "/release")
 (goog-define SOCKET-URL "ws://localhost:5000/ws")
+(goog-define THUMBNAIL-URL "http://localhost:5000/thumbnail")
 
 (def ^:const grid-size
   "The length, in pixels, of a single square in the scene grid. This

@@ -2,10 +2,16 @@
   (:gen-class)
   (:refer-clojure :exclude [send])
   (:import [clojure.lang IPersistentMap]
+           [java.awt RenderingHints]
+           [java.awt.image BufferedImage]
            [java.io ByteArrayOutputStream ByteArrayInputStream]
+           [java.net InetAddress URI]
+           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
            [java.nio ByteBuffer]
+           [java.time Duration]
+           [javax.imageio IIOImage ImageIO ImageWriteParam]
            [org.msgpack.core MessagePack])
-  (:require [clojure.string :refer [upper-case]]
+  (:require [clojure.string :refer [starts-with? upper-case]]
             [cognitect.transit :as transit]
             [datascript.core]
             [datascript.transit :refer [read-handlers write-handlers]]
@@ -104,6 +110,125 @@
     (let [serialized (encode message)]
       (doseq [session sessions :when (.isOpen session)]
         (.sendText (.getAsyncRemote session) serialized)))))
+
+;; -- Thumbnails --
+;; A small, self-hosted stand-in for a fraction of what weserv/images
+;; (https://github.com/weserv/images) offers as a public service: given a
+;; source image URL, fetch it server-side, center-crop it to a square, and
+;; resize it -- just enough to generate a real cropped thumbnail for a
+;; URL-added image (see provider/image.cljs's use-image-url-adder), without
+;; taking on a third-party network dependency. Deliberately narrow: no
+;; format negotiation, rotation, filters, or watermarking -- just
+;; ?url=&w=&fit=cover, reimplemented with the JDK's own java.net.http and
+;; javax.imageio (no new dependency).
+
+(def ^:private thumbnail-default-size 256)
+(def ^:private thumbnail-request-timeout (Duration/ofSeconds 5))
+
+(def ^:private http-client
+  (delay (-> (HttpClient/newBuilder) (.connectTimeout thumbnail-request-timeout) (.build))))
+
+(defn ^:private safe-uri
+  "Parses url-str as an http(s) URI whose host resolves to only public
+   addresses, or nil if it's malformed, uses an unsupported scheme, or
+   resolves to a loopback/link-local/site-local/multicast/wildcard address
+   -- a basic guard against this server being made to fetch its own
+   internal network on an attacker's behalf (SSRF). Known limitation: this
+   checks the resolved address at validation time, not at the moment of
+   the actual connection, so it doesn't close a DNS-rebinding race --
+   adequate for a self-hosted, hobby-scale deployment, not a hardened
+   multi-tenant one."
+  [url-str]
+  (try
+    (let [uri (URI. url-str)
+          scheme (some-> (.getScheme uri) (.toLowerCase))]
+      (when (and (some? url-str) (contains? #{"http" "https"} scheme) (some? (.getHost uri)))
+        (let [addresses (InetAddress/getAllByName (.getHost uri))]
+          (when (and (seq addresses)
+                     (not-any?
+                      (fn [^InetAddress addr]
+                        (or (.isLoopbackAddress addr)
+                            (.isLinkLocalAddress addr)
+                            (.isSiteLocalAddress addr)
+                            (.isMulticastAddress addr)
+                            (.isAnyLocalAddress addr)))
+                      addresses))
+            uri))))
+    (catch Exception _ nil)))
+
+(defn ^:private fetch-image-bytes
+  "Fetches the bytes at the given URI with a short timeout, returning them
+   only on a 200 response with an image/* content-type -- nil otherwise."
+  [^URI uri]
+  (try
+    (let [request  (-> (HttpRequest/newBuilder uri) (.timeout thumbnail-request-timeout) (.GET) (.build))
+          response (.send @http-client request (HttpResponse$BodyHandlers/ofByteArray))
+          type     (.orElse (.firstValue (.headers response) "content-type") "")]
+      (when (and (= (.statusCode response) 200) (starts-with? type "image/"))
+        (.body response)))
+    (catch Exception _ nil)))
+
+(defn ^:private crop-square
+  "Returns img cropped to a centered square using its larger dimension --
+   the same 'cover' convention provider/image.cljs's client-side
+   create-thumbnail already uses for local uploads, reimplemented here for
+   server-side URL thumbnails."
+  [^BufferedImage img]
+  (let [w (.getWidth img) h (.getHeight img) len (min w h)]
+    (.getSubimage img (quot (- w len) 2) (quot (- h len) 2) len len)))
+
+(defn ^:private resize-square
+  "Returns a new size x size RGB image (no alpha -- JPEG has none; this
+   only affects the generated thumbnail, never the full image, which the
+   browser renders directly from the original URL with alpha intact)
+   containing img scaled with bilinear interpolation."
+  [^BufferedImage img size]
+  (let [out (BufferedImage. size size BufferedImage/TYPE_INT_RGB)
+        g   (.createGraphics out)]
+    (.setRenderingHint g RenderingHints/KEY_INTERPOLATION RenderingHints/VALUE_INTERPOLATION_BILINEAR)
+    (.setRenderingHint g RenderingHints/KEY_RENDERING RenderingHints/VALUE_RENDER_QUALITY)
+    (.drawImage g img 0 0 size size nil)
+    (.dispose g)
+    out))
+
+(defn ^:private encode-jpeg
+  "Encodes img as a JPEG byte array at the given compression quality
+   (0.0-1.0), matching the local-upload pipeline's own JPEG quality (0.80)."
+  [^BufferedImage img quality]
+  (let [writer (.next (ImageIO/getImageWritersByFormatName "jpeg"))
+        param  (doto (.getDefaultWriteParam writer)
+                 (.setCompressionMode ImageWriteParam/MODE_EXPLICIT)
+                 (.setCompressionQuality quality))
+        stream (ByteArrayOutputStream.)
+        output (ImageIO/createImageOutputStream stream)]
+    (.setOutput writer output)
+    (.write writer nil (IIOImage. img nil nil) param)
+    (.dispose writer)
+    (.close output)
+    (.toByteArray stream)))
+
+(defn ^:private clamp-size [value]
+  (let [n (try (Integer/parseInt value) (catch Exception _ thumbnail-default-size))]
+    (max 16 (min thumbnail-default-size n))))
+
+(defn handle-thumbnail
+  "Serves a cropped, resized JPEG thumbnail of the image at ?url=, sized to
+   ?w= (defaults to and capped at 256 -- this only needs to serve this
+   app's own thumbnail size, not be a general-purpose resizer)."
+  [{{:keys [url w]} :params}]
+  (if-let [uri (and url (safe-uri url))]
+    (if-let [bytes (fetch-image-bytes uri)]
+      (if-let [decoded (try (ImageIO/read (ByteArrayInputStream. bytes)) (catch Exception _ nil))]
+        (let [size (clamp-size (or w (str thumbnail-default-size)))
+              jpeg (-> decoded crop-square (resize-square size) (encode-jpeg 0.80))]
+          {:status  200
+           :headers {"Content-Type" "image/jpeg"
+                     "Access-Control-Allow-Origin" "*"
+                     "Cache-Control" "public, max-age=86400"}
+           :body    jpeg})
+        {:status 422 :body "Unsupported or corrupt image."})
+      {:status 502 :body "Failed to fetch image from that URL."})
+    {:status 400 :body "Missing or disallowed url parameter."}))
 
 (defn handle-root [_]
   {:status 405})
@@ -209,8 +334,9 @@
    (-> (conn/default-connector-map port)
        (conn/with-default-interceptors)
        (conn/with-routes
-         #{["/"   :get [handle-root]]
-           ["/ws" :get [handle-ws upgrade-ws]]})
+         #{["/"          :get [handle-root]]
+           ["/ws"        :get [handle-ws upgrade-ws]]
+           ["/thumbnail" :get [handle-thumbnail]]})
        (jetty/create-connector nil))))
 
 (defn -main [port]

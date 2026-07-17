@@ -182,8 +182,22 @@
   flex-flow: row wrap;
   gap: 4px;
 
-  & > button:first-child {
-    flex: 1;
+  /* Upload/Link/Edit images share one fixed width, narrower than their
+     un-wrapped text needs -- their labels wrap to two lines instead of
+     growing the button wider, which is what leaves enough row width for
+     all four controls (these three plus Remove all) to fit on one line
+     even in the fixed 420px landscape panel (see layout.css). */
+  & > button.button-neutral,
+  & > .image-url-form-wrapper {
+    flex: 0 0 84px;
+  }
+
+  /* Any leftover row width -- which grows a lot in the portrait/mobile
+     layout, where the side panel spans the full window width instead of
+     a fixed 420px -- collects here instead of stretching Upload images,
+     pushing Remove all to the row's far edge. */
+  & > button.button-danger {
+    margin-inline-start: auto;
   }
 }
 
@@ -208,11 +222,20 @@
 
 .form[data-form="props"] .form-footer {
   display: flex;
+  flex-flow: row wrap;
   gap: 4px;
-  justify-content: space-between;
 
-  button:first-child {
-    flex: 1;
+  /* Matches the Tokens gallery footer's fixed-width, two-row-text
+     buttons -- Upload/Link images share one fixed width narrower than
+     their unwrapped text needs, wrapping the label to two lines instead
+     of growing the button wider. */
+  & > button.button-neutral,
+  & > .image-url-form-wrapper {
+    flex: 0 0 84px;
+  }
+
+  & > button.button-danger {
+    margin-inline-start: auto;
   }
 }
 

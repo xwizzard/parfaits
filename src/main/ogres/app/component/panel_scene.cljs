@@ -333,6 +333,7 @@
                            (upload (.. event -target -files))
                            (set! (.. event -target -value) ""))})
                       ($ icon {:name "camera-fill" :size 16}) "Upload images")
+                    ($ component/image-url-form {:type :scene})
                     (if (> pages 1)
                       ($ component/pagination
                         {:name "scenes-gallery"
