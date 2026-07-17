@@ -190,12 +190,22 @@
   ^{:doc "Changes the camera draw mode to the given value. The draw mode is
           used to decide what behavior clicking and dragging on the scene
           will have, such as drawing a shape or determining the distance
-          between two points."}
+          between two points.
+
+          Clicking a toolbar tool's own button again while it's already the
+          active mode toggles back to :select instead of re-applying the
+          same mode -- every toolbar action button already renders
+          :aria-pressed based on whether it's the active mode (see
+          toolbar.cljs), so this makes that pressed state a genuine toggle
+          instead of a one-way switch that only Escape (:shortcut/escape)
+          could undo."}
   event-tx-fn :camera/change-mode
   [data _ mode]
-  (let [user (ds/entity data [:db/ident :user])]
-    (if (or (:user/host user) (not (#{:mask :mask-toggle :mask-remove :grid :note :object-anchor} mode)))
-      [{:db/id (:db/id (:user/camera user)) :camera/draw-mode mode}]
+  (let [user (ds/entity data [:db/ident :user])
+        current (:camera/draw-mode (:user/camera user))
+        next (if (= current mode) :select mode)]
+    (if (or (:user/host user) (not (#{:mask :mask-toggle :mask-remove :grid :note :object-anchor} next)))
+      [{:db/id (:db/id (:user/camera user)) :camera/draw-mode next}]
       [])))
 
 (defmethod

@@ -1,7 +1,7 @@
 (ns ogres.app.component.scene-draw
   (:require [clojure.string :refer [join]]
             [ogres.app.component :refer [icon]]
-            [ogres.app.const :refer [grid-size half-size]]
+            [ogres.app.const :refer [grid-size half-size hex-radius]]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
             [ogres.app.matrix :as matrix]
@@ -19,25 +19,33 @@
   (cond (instance? Vec2 x) Vec2
         (instance? Segment x) Segment))
 
-(defmulti align-identity instance)
-(defmethod align-identity Vec2 [a] a)
-(defmethod align-identity Segment [s] s)
+;; Every align-fn below takes the point/segment being aligned plus the
+;; scene's current :scene/grid-type -- draw-segment passes this through
+;; uniformly to whichever align-fn a draw tool selected (see its own
+;; `align` calls), even though only align-cell-center actually uses it.
+;; A shared 2-arg dispatch fn (dispatching on the first arg only) keeps
+;; every align-fn callable the same way regardless of arity needs.
+(defn ^:private align-dispatch [x _] (instance x))
 
-(defmulti align-grid instance)
-(defmethod align-grid Vec2 [a]
+(defmulti align-identity align-dispatch)
+(defmethod align-identity Vec2 [a _] a)
+(defmethod align-identity Segment [s _] s)
+
+(defmulti align-grid align-dispatch)
+(defmethod align-grid Vec2 [a _]
   (vec/rnd a grid-size))
-(defmethod align-grid Segment [s]
-  (Segment. (align-grid (.-a s)) (align-grid (.-b s))))
+(defmethod align-grid Segment [s grid-type]
+  (Segment. (align-grid (.-a s) grid-type) (align-grid (.-b s) grid-type)))
 
-(defmulti align-grid-half instance)
-(defmethod align-grid-half Vec2 [a] (vec/rnd a half-size))
-(defmethod align-grid-half Segment [s]
-  (Segment. (align-grid-half (.-a s)) (align-grid-half (.-b s))))
+(defmulti align-grid-half align-dispatch)
+(defmethod align-grid-half Vec2 [a _] (vec/rnd a half-size))
+(defmethod align-grid-half Segment [s grid-type]
+  (Segment. (align-grid-half (.-a s) grid-type) (align-grid-half (.-b s) grid-type)))
 
-(defmulti align-line instance)
-(defmethod align-line Vec2 [a] (align-grid-half a))
-(defmethod align-line Segment [s]
-  (let [src (align-grid-half (.-a s))
+(defmulti align-line align-dispatch)
+(defmethod align-line Vec2 [a grid-type] (align-grid-half a grid-type))
+(defmethod align-line Segment [s grid-type]
+  (let [src (align-grid-half (.-a s) grid-type)
         dir (vec/sub (.-b s) src)
         len (vec/dist vec/zero dir)]
     (if (= len 0)
@@ -45,16 +53,38 @@
       (let [dst (-> (vec/div dir len) (vec/mul (util/round len grid-size)) (vec/add src))]
         (Segment. src dst)))))
 
-(defmulti align-cone instance)
-(defmethod align-cone Vec2 [a] (align-grid a))
-(defmethod align-cone Segment [s]
-  (let [src (align-grid (.-a s))
+(defmulti align-cone align-dispatch)
+(defmethod align-cone Vec2 [a grid-type] (align-grid a grid-type))
+(defmethod align-cone Segment [s grid-type]
+  (let [src (align-grid (.-a s) grid-type)
         dir (vec/sub (.-b s) src)
         len (vec/dist vec/zero dir)]
     (if (= len 0)
       (Segment. src src)
       (let [dst (-> (vec/div dir len) (vec/mul (util/round len grid-size)) (vec/add src))]
         (Segment. src dst)))))
+
+(defn ^:private nearest-cell-center
+  "The center of whichever grid cell (hex or square, dispatched the same
+   way ogres.app.geom/cell-distance and snap-to-cell already do) is
+   nearest the given point."
+  [point grid-type]
+  (case (geom/base-grid-type grid-type)
+    :hex-pointy (vec/nearest-hex point hex-radius)
+    :hex-flat (vec/nearest-hex-flat point hex-radius)
+    (vec/nearest-square point grid-size)))
+
+(defmulti align-cell-center
+  "Snaps to the nearest whole grid-cell CENTER (never a corner or
+   edge midpoint), hex- or square-aware -- used by the ruler so
+   measurement endpoints always land on a cell center, unlike
+   align-grid-half's plain half-cell rounding (still used by
+   align-line for shape drawing)."
+  align-dispatch)
+(defmethod align-cell-center Vec2 [a grid-type]
+  (nearest-cell-center a grid-type))
+(defmethod align-cell-center Segment [s grid-type]
+  (Segment. (align-cell-center (.-a s) grid-type) (align-cell-center (.-b s) grid-type)))
 
 (def ^:private points->poly
   (completing into (fn [xs] (join " " xs))))
@@ -180,10 +210,10 @@
       {:use-cursor (contains? props :align-fn)
        :on-release
        (fn [segment]
-         (on-release (align (camera segment))))}
+         (on-release (align (camera segment) grid-type)))}
       (fn [segment cursor]
         (cond (some? segment)
-              (let [segment (align (camera segment))]
+              (let [segment (align (camera segment) grid-type)]
                 ($ :<>
                   (if (and (fn? tile-path) grid-paths)
                     (let [path (tile-path segment)]
@@ -191,7 +221,7 @@
                         {:points (transduce (map (comp seq invert)) points->poly [] path)})))
                   (children segment (invert segment))))
               (and grid-align (some? cursor))
-              ($ anchor {:transform (invert (align (camera cursor)))}))))))
+              ($ anchor {:transform (invert (align (camera cursor) grid-type))}))))))
 
 (defui ^:private polygon
   [{:keys [on-create]}]
@@ -254,7 +284,7 @@
 (defui ^:private draw-ruler []
   (let [info (use-measurement-info)]
     ($ draw-segment
-      {:align-fn align-grid-half}
+      {:align-fn align-cell-center}
       (fn [camera canvas]
         (let [a (.-a canvas) b (.-b canvas)]
           ($ :<>
