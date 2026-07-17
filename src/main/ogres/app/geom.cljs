@@ -590,19 +590,29 @@
 (defn snap-to-cell
   "Snaps the given entity's center to the nearest grid-cell center for the
    given base grid-type family, after being shifted by delta -- returns the
-   entity's own :object/point that produces that snapped center (round-trips
-   through object-bounding-rect/seg/midpoint, so this works for any object
-   type that has an object-bounding-rect method, not just tokens).
+   entity's own :object/point that produces that snapped center. Works for
+   any object type that has an object-anchor-point method, not just tokens.
 
-   For tokens, :object/point already *is* the center (object-bounding-rect
-   :token/token is symmetric around it), so this degenerates to exactly the
-   existing token hex/square snap math -- this is a generalization, not a
-   behavior change, for tokens. For props and board pieces, whose
-   :object/point is the unrotated/unscaled top-left corner, this is what
-   makes 'snap to grid' mean 'snap this piece's true anchor point (its
-   calibrated grid center, or the bounding-box center by default -- see
-   object-anchor-point) to the nearest cell' instead of naively rounding
-   the corner."
+   For tokens, :object/point already *is* the center (object-anchor-point's
+   :default case is the bounding-box midpoint, and object-bounding-rect
+   :token/token is symmetric around :object/point), so this degenerates to
+   exactly the existing token hex/square snap math -- this is a
+   generalization, not a behavior change, for tokens. For props and board
+   pieces, whose :object/point is the unrotated/unscaled top-left corner,
+   this is what makes 'snap to grid' mean 'snap this piece's true anchor
+   point (its calibrated grid center, or the bounding-box center by
+   default -- see object-anchor-point) to the nearest cell.'
+
+   All three branches snap the same `moved` value (the anchor point plus
+   delta) directly -- `vec/nearest-hex`/`vec/nearest-hex-flat`/
+   `vec/nearest-square` all return the nearest CELL CENTER for their grid
+   family, not a corner. An earlier version of the square-grid branch
+   instead rounded the raw bounding-box corners and took their midpoint,
+   ignoring the calibrated anchor point entirely -- for a token this
+   happened to still land on a center only because a token's box is always
+   an odd number of cells wide, but for a prop/board-piece image with an
+   even-cell-count footprint (common for map tiles), it landed on a grid
+   CORNER instead, regardless of where the calibrated anchor actually was."
   [entity delta base-type]
   (let [point (:object/point entity)
         center (object-anchor-point entity)
@@ -610,5 +620,5 @@
         snapped (case base-type
                   :hex-pointy (vec/nearest-hex moved hex-radius)
                   :hex-flat (vec/nearest-hex-flat moved hex-radius)
-                  (seg/midpoint (vec/rnd (vec/add (object-bounding-rect entity) delta) grid-size)))]
+                  (vec/nearest-square moved grid-size))]
     (vec/add point (vec/sub snapped center))))

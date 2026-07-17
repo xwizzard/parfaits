@@ -82,6 +82,53 @@
     (is (= (geom/base-grid-type :square) :square))
     (is (= (geom/base-grid-type :hex-pointy) :hex-pointy))))
 
+(deftest test-snap-to-cell-anchor-point
+  (testing "a board piece's calibrated anchor snaps to a true cell CENTER on a
+            square grid, not a grid-line corner -- regression test for a bug
+            where the square branch ignored the calibrated anchor entirely
+            and rounded the raw (often even-cell-wide) image bounding box
+            instead, which only coincidentally lands on a center for
+            symmetric odd-cell-wide tokens"
+    (let [;; A 700x700px image (exactly 10 grid cells, an EVEN count) with
+          ;; its calibrated anchor at the image's own top-left corner
+          ;; (local (0,0), deliberately off the image's geometric center)
+          ;; -- this is exactly the shape that triggered the bug.
+          entity {:object/type :board/piece
+                  :object/point (Vec2. 0 0)
+                  :object/scale 1
+                  :object/rotation 0
+                  :board/image {:image/width 700 :image/height 700
+                                :image/anchor (Vec2. 0 0)}}
+          result (geom/snap-to-cell entity vec/zero :square)]
+      ;; The anchor (at local (0,0)) ends up at object/point + (0,0), so the
+      ;; snapped object/point IS the anchor's new world position.
+      (is (= result (Vec2. (/ grid-size 2) (/ grid-size 2)))
+          "Snaps to (35,35) -- a true cell center (an odd multiple of
+           half-grid-size) -- not (0,0) or any other grid-line corner.")
+      (is (not (zero? (clojure.core/mod (.-x result) grid-size)))
+          "Explicitly not a corner: corners are exact multiples of grid-size.")))
+  (testing "an off-center, non-zero anchor still snaps correctly"
+    (let [entity {:object/type :board/piece
+                  :object/point (Vec2. 0 0)
+                  :object/scale 1
+                  :object/rotation 0
+                  :board/image {:image/width 700 :image/height 700
+                                :image/anchor (Vec2. 100 150)}}
+          result (geom/snap-to-cell entity vec/zero :square)
+          new-anchor-world (vec/add result (Vec2. 100 150))]
+      (is (= new-anchor-world (vec/nearest-square (Vec2. 100 150) grid-size))
+          "The calibrated anchor point itself (not the image's geometric
+           center) is what lands on the nearest cell center.")))
+  (testing "hex grids were already correct -- unaffected by this fix"
+    (let [entity {:object/type :board/piece
+                  :object/point (Vec2. 0 0)
+                  :object/scale 1
+                  :object/rotation 0
+                  :board/image {:image/width 700 :image/height 700
+                                :image/anchor (Vec2. 0 0)}}
+          result (geom/snap-to-cell entity vec/zero :hex-pointy)]
+      (is (= result (vec/nearest-hex (Vec2. 0 0) hex-radius))))))
+
 (deftest test-cell-distance
   (testing "square grids count cells via grid-size-normalized Chebyshev distance"
     (is (= (geom/cell-distance (Segment. (Vec2. 0 0) (Vec2. grid-size 0)) :square) 1))

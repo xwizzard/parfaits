@@ -90,6 +90,23 @@
 
 (def zero (Vec2. 0 0))
 
+(defn nearest-square
+  "Given a point and the size of one grid square, returns the center of
+   the nearest square cell as a Vec2 -- the square-grid analogue of
+   `nearest-hex`. Rounding a point directly to the nearest multiple of
+   `size` (i.e. plain `rnd`) lands on a grid-line intersection -- a cell
+   CORNER, not a center. Shifting by half a cell before rounding, then
+   back by the same half-cell after, is what actually lands on the
+   CENTER of the nearest cell (this is the same shift-round-shift
+   formula the codebase already used inline for token placement before
+   this function existed to name it and make it reusable)."
+  [point size]
+  (let [half (/ size 2)
+        x (- (.-x point) half)
+        y (- (.-y point) half)]
+    (Vec2. (+ (* (js/Math.round (/ x size)) size) half)
+           (+ (* (js/Math.round (/ y size)) size) half))))
+
 (defn ^:private nearest-hex-index
   "Given a point and a hexagon radius, returns the [row col] offset
    coordinate of the nearest pointy-top hexagon in the odd-r lattice

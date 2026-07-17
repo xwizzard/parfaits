@@ -2,7 +2,7 @@
   (:require [datascript.core :as ds]
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
-            [ogres.app.const :refer [grid-size half-size hex-radius]]
+            [ogres.app.const :refer [grid-size hex-radius]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
@@ -962,11 +962,7 @@
       (and align? (= base-type :hex-flat))
       (conj [:db/add -1 :object/point (vec/nearest-hex-flat point hex-radius)])
       (and align? (not (#{:hex-pointy :hex-flat} base-type)))
-      (conj
-       [:db/add -1 :object/point
-        (-> (vec/shift point (- half-size))
-            (vec/rnd grid-size)
-            (vec/shift half-size))]))))
+      (conj [:db/add -1 :object/point (vec/nearest-square point grid-size)]))))
 
 (defmethod event-tx-fn :token/change-flag
   [data _ idxs flag add?]
