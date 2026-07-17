@@ -91,7 +91,11 @@
           ($ icon {:name "files"}))
         ($ action {:name "copy-paste" :aria-disabled (nil? (:user/clipboard result))}
           ($ icon {:name "clipboard2-plus"}))
-        (if (contains? enabled :tool/measurement)
+        ;; The ruler is available if either measurement primitive is
+        ;; enabled -- :tool/measurement (feet) and :tool/measurement-cells
+        ;; (grid cells) aren't exclusive, see game_type/core_elements.cljs.
+        (if (or (contains? enabled :tool/measurement)
+                (contains? enabled :tool/measurement-cells))
           ($ action {:name "scene-ruler" :aria-pressed (= mode :ruler)}
             ($ icon {:name "rulers"})))
         ($ action {:name "note" :aria-pressed (= mode :note)}

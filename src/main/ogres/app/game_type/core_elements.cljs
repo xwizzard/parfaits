@@ -46,6 +46,14 @@
    :unit/player      {:label "Player flag" :icon "person-circle"}
 
    :tool/measurement {:label "Measurement" :icon "rulers"}
+   ;; A second, independent measurement primitive -- counts whole grid
+   ;; cells (hex- or square-aware, see ogres.app.geom/cell-distance)
+   ;; instead of a real-world unit. Not exclusive with :tool/measurement:
+   ;; a game-type can enable either, or both at once, and the ruler
+   ;; (scene_draw.cljs's draw-ruler) shows whichever are on. Gloomhaven's
+   ;; board doesn't use feet at all, so its seeded template enables this
+   ;; one instead of :tool/measurement (see game_type.cljs).
+   :tool/measurement-cells {:label "Cell Measurement" :icon "square-cell"}
    :tool/mask        {:label "Masking" :icon "eye-slash-fill"}
    :tool/shapes      {:label "Shape drawing" :icon "triangle"}
 

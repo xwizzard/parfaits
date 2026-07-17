@@ -1,7 +1,9 @@
 (ns geom-test
   (:require [cljs.test :refer-macros [deftest is testing]]
+            [ogres.app.const :refer [grid-size hex-radius hex-width hex-row]]
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
+            [ogres.app.segment :refer [Segment]]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
 (defn ^:private close?
@@ -79,6 +81,31 @@
     (is (= (geom/base-grid-type :iso-hex-flat-vertical) :hex-flat))
     (is (= (geom/base-grid-type :square) :square))
     (is (= (geom/base-grid-type :hex-pointy) :hex-pointy))))
+
+(deftest test-cell-distance
+  (testing "square grids count cells via grid-size-normalized Chebyshev distance"
+    (is (= (geom/cell-distance (Segment. (Vec2. 0 0) (Vec2. grid-size 0)) :square) 1))
+    (is (= (geom/cell-distance (Segment. (Vec2. 0 0) (Vec2. grid-size grid-size)) :square) 1)
+        "a diagonal grid-size step costs the same as an orthogonal one, matching
+         px->ft's existing diagonal-costs-the-same convention")
+    (is (= (geom/cell-distance (Segment. (Vec2. 0 0) (Vec2. (* 3 grid-size) 0)) :square) 3)))
+  (testing "hex-pointy delegates to vec/hex-distance directly"
+    (is (= (geom/cell-distance (Segment. (Vec2. 0 0) (Vec2. hex-width 0)) :hex-pointy)
+           (vec/hex-distance (Vec2. 0 0) (Vec2. hex-width 0) hex-radius))))
+  (testing "hex-flat transposes x/y before delegating -- a same-row pointy-top
+            neighbor is a same-column flat-top neighbor"
+    (is (= (geom/cell-distance (Segment. (Vec2. 0 0) (Vec2. 0 hex-width)) :hex-flat) 1)))
+  (testing "iso variants produce identical results to their base grid-type for the
+            same (already-logical-space) segment -- cell-distance never needs to
+            know or care whether grid-type is an iso variant"
+    (let [square-seg (Segment. (Vec2. 0 0) (Vec2. (* 2 grid-size) grid-size))
+          hex-seg    (Segment. (Vec2. 0 0) (Vec2. hex-width hex-row))]
+      (is (= (geom/cell-distance square-seg :square)
+             (geom/cell-distance square-seg :iso-square)
+             (geom/cell-distance square-seg :iso-square-vertical)))
+      (is (= (geom/cell-distance hex-seg :hex-pointy)
+             (geom/cell-distance hex-seg :iso-hex-pointy)
+             (geom/cell-distance hex-seg :iso-hex-pointy-vertical))))))
 
 (deftest test-screen->scene-vec
   (let [v (Vec2. 140 70)]

@@ -65,6 +65,41 @@
     (if (< (abs (- ft rd)) 0.001) rd
         (.toFixed ft 1))))
 
+;; A small dedicated query, independent of draw-segment's shared `query`
+;; above (and its children-fn signature every other draw tool relies on)
+;; -- mirrors scene_context_menu.cljs's `use-enabled-elements` pattern.
+;; Only draw-ruler uses this; the other draw tools are untouched.
+(def ^:private measurement-query
+  [{:user/camera
+    [{:camera/scene
+      [[:scene/grid-type :default :square]
+       {:scene/game-type
+        [[:game-type/enabled-elements :default #{}]]}]}]}])
+
+(defn ^:private use-measurement-info []
+  (let [result (hooks/use-query measurement-query)
+        scene  (-> result :user/camera :camera/scene)]
+    {:grid-type (:scene/grid-type scene)
+     :enabled   (:game-type/enabled-elements (:scene/game-type scene) #{})}))
+
+(defn ^:private format-measurement
+  "Builds the ruler's distance label from whichever measurement
+   primitive(s) are enabled -- :tool/measurement (feet, the existing
+   behavior) and/or :tool/measurement-cells (grid-cell count, hex- or
+   square-aware, see ogres.app.geom/cell-distance). The two aren't
+   exclusive: if both are enabled, both show, joined by \" / \". If
+   neither is (only reachable today via the pre-existing gap where the
+   'r' keyboard shortcut doesn't check :tool/measurement -- see
+   toolbar.cljs), this is an empty string."
+  [segment {:keys [grid-type enabled]}]
+  (join " / "
+        (cond-> []
+          (contains? enabled :tool/measurement)
+          (conj (str (px->ft (vec/dist-cheb segment)) "ft."))
+          (contains? enabled :tool/measurement-cells)
+          (conj (let [n (geom/cell-distance segment grid-type)]
+                  (str n (if (= n 1) " cell" " cells")))))))
+
 (defui ^:private text [props]
   ($ :text.scene-text.scene-text-draw
     (dissoc props :children)
@@ -217,21 +252,22 @@
               {:d (join " " [\M (.-x a) (.-y a) \H (.-x b) \V (.-y b) \H (.-x a) \Z])})))))))
 
 (defui ^:private draw-ruler []
-  ($ draw-segment
-    {:align-fn align-grid-half}
-    (fn [camera canvas]
-      (let [a (.-a canvas) b (.-b canvas)]
-        ($ :<>
-          ($ :line.scene-draw-shape
-            {:x1 (.-x a)
-             :y1 (.-y a)
-             :x2 (.-x b)
-             :y2 (.-y b)})
-          ($ anchor {:transform a})
-          ($ anchor {:transform b})
-          (let [point (seg/extend canvas 32)]
-            ($ text {:x (.-x point) :y (.-y point)}
-              (str (px->ft (vec/dist-cheb camera)) "ft."))))))))
+  (let [info (use-measurement-info)]
+    ($ draw-segment
+      {:align-fn align-grid-half}
+      (fn [camera canvas]
+        (let [a (.-a canvas) b (.-b canvas)]
+          ($ :<>
+            ($ :line.scene-draw-shape
+              {:x1 (.-x a)
+               :y1 (.-y a)
+               :x2 (.-x b)
+               :y2 (.-y b)})
+            ($ anchor {:transform a})
+            ($ anchor {:transform b})
+            (let [point (seg/extend canvas 32)]
+              ($ text {:x (.-x point) :y (.-y point)}
+                (format-measurement camera info)))))))))
 
 (defui ^:private draw-circle []
   (let [dispatch (hooks/use-dispatch)]

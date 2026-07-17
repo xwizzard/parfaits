@@ -43,12 +43,13 @@
 
 (def category-excluded-elements
   "For a module whose real-world game doesn't have a mechanic a shared
-   core primitive represents, the set of ids that module's Builder
-   category checkbox should force *off* when checked, on top of whatever
-   `category-grid-elements` already excludes. Same `editor`/disable-ids
-   mechanism, just not grid-specific. A module not listed here excludes
-   nothing beyond its grid preference (if any)."
-  {})
+   core primitive represents -- Gloomhaven has no per-token light-radius
+   mechanic at all, unlike D&D's darkvision-driven one -- the set of
+   ids that module's Builder category checkbox should force *off* when
+   checked, on top of whatever `category-grid-elements` already excludes.
+   Same `editor`/disable-ids mechanism, just not grid-specific. A module
+   not listed here excludes nothing beyond its grid preference (if any)."
+  {"gloomhaven" #{:unit/light}})
 
 (def default-enabled-elements
   "The bare-minimum universal element set the seeded 'Default' game-type
@@ -78,20 +79,29 @@
 
 (def gloomhaven-enabled-elements
   "The seeded 'Gloomhaven' game-type's starting set. Deliberately narrower
-   than D&D's -- no masking or aura, which aren't part of that game.
-   Also doesn't enable any auto-roll turn-order mechanism (D&D's
-   :dnd5e/initiative-roll is D&D-only): Gloomhaven's own turn order comes
-   from drawn initiative cards, not a d20 roll, so this template just
-   leaves the base manually-assigned order as-is rather than pretending
-   the d20 mechanic fits. Building Gloomhaven's own card-draw element (or
-   Catan-style clockwise seating, or Root's nested sub-turn groups) is out
-   of scope for this pass, but each could plug into the exact same
+   than D&D's -- no masking or aura, which aren't part of that game, and
+   no per-token light radius either (unlike D&D's darkvision-driven one,
+   Gloomhaven has no light mechanic at all -- see
+   `category-excluded-elements` for how the Builder's category checkbox
+   enforces this same exclusion if a user manually re-enables it later).
+   Uses :tool/measurement-cells instead of :tool/measurement -- Gloomhaven's
+   board doesn't use feet at all, it measures range in grid cells (see
+   ogres.app.geom/cell-distance). The two measurement primitives aren't
+   exclusive, so a custom game-type built from this one could still turn
+   :tool/measurement back on alongside it. Also doesn't enable any
+   auto-roll turn-order mechanism (D&D's :dnd5e/initiative-roll is
+   D&D-only): Gloomhaven's own turn order comes from drawn initiative
+   cards, not a d20 roll, so this template just leaves the base
+   manually-assigned order as-is rather than pretending the d20 mechanic
+   fits. Building Gloomhaven's own card-draw element (or Catan-style
+   clockwise seating, or Root's nested sub-turn groups) is out of scope
+   for this pass, but each could plug into the exact same
    :initiative-panel/:initiative-actions mechanism D&D's module already
    proves out -- demonstrating that two real games legitimately want
    different subsets of the same shared primitives, decided here in
    data, with no core file caring which."
   (into default-enabled-elements
-        (concat [:tool/measurement :unit/size :unit/light]
+        (concat [:tool/measurement-cells :unit/size]
                 (keys gloomhaven/elements))))
 
 (defn grid-tool-id

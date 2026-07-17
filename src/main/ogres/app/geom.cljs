@@ -70,6 +70,32 @@
     (:iso-hex-flat :iso-hex-flat-vertical) :hex-flat
     grid-type))
 
+(defn cell-distance
+  "The number of grid cells between the two ends of `segment` -- the hex
+   analogue of `dist-cheb`/`px->ft`'s Chebyshev-pixel-distance convention,
+   but counting whole cells instead of a real-world unit. `segment` is
+   expected to already be in scene/logical coordinates (e.g.
+   scene_draw.cljs's `camera` value) -- the isometric projection, if any,
+   is already inverted out of a segment by the time it reaches here (see
+   `scene-scale-matrix`, composed into the basis matrix every drawing
+   tool builds its `camera` segment from, *before* any tool sees it), so
+   this function never needs to know or care whether `grid-type` is an
+   iso variant, only its base shape.
+
+   Square grids (and their iso variants) count cells via Chebyshev pixel
+   distance divided by `grid-size`, matching the diagonal-costs-the-same
+   convention `px->ft` already assumes. Hex grids (and their iso
+   variants) use `vec/hex-distance` -- flat-top hex grids transpose x/y
+   first, the same trick `vec/nearest-hex-flat` already uses to reuse the
+   pointy-top lattice math for a flat-top grid (hex distance is
+   rotation-invariant, so there's no need to transpose the result back)."
+  [segment grid-type]
+  (case (base-grid-type grid-type)
+    :hex-pointy (vec/hex-distance (.-a segment) (.-b segment) hex-radius)
+    :hex-flat   (let [flip (fn [p] (Vec2. (.-y p) (.-x p)))]
+                  (vec/hex-distance (flip (.-a segment)) (flip (.-b segment)) hex-radius))
+    (js/Math.round (/ (vec/dist-cheb segment) grid-size))))
+
 (defn iso-forward-matrix
   "The fixed isometric projection Matrix for the given grid-type, or nil if
    grid-type isn't an iso variant."

@@ -148,7 +148,7 @@
     (is (contains? (:game-type/enabled-elements default) :unit/dead)
         "The seeded default enables the bare universal element set.")
     (is (not-any? #(contains? (:game-type/enabled-elements default) %)
-                  [:tool/measurement :tool/mask :tool/shapes
+                  [:tool/measurement :tool/measurement-cells :tool/mask :tool/shapes
                    :unit/size :unit/light :unit/aura])
         "The seeded default does not enable any of the opt-in shared
          primitives -- those are per-template opt-ins now, not universal.")
@@ -159,6 +159,19 @@
         "The seeded D&D 5e template enables its own module's elements.")
     (is (some #(= (namespace %) "gloomhaven") (:game-type/enabled-elements gloomhaven))
         "The seeded Gloomhaven template enables its own module's elements.")
+    (is (not (contains? (:game-type/enabled-elements gloomhaven) :unit/light))
+        "Gloomhaven has no per-token light-radius mechanic -- unlike D&D's
+         darkvision-driven one -- so the seeded template doesn't enable
+         :unit/light, even though it does enable :unit/size.")
+    (is (and (contains? (:game-type/enabled-elements gloomhaven) :tool/measurement-cells)
+             (not (contains? (:game-type/enabled-elements gloomhaven) :tool/measurement)))
+        "Gloomhaven's board doesn't use feet -- the seeded template enables the
+         grid-cell measurement primitive instead of the real-world-unit one.")
+    (is (and (contains? (:game-type/enabled-elements dnd5e) :tool/measurement)
+             (not (contains? (:game-type/enabled-elements dnd5e) :tool/measurement-cells)))
+        "D&D 5e measures in feet, the other way around -- the two measurement
+         primitives aren't exclusive (a custom game-type could enable both), but
+         neither seeded template turns on the one it doesn't use.")
     (is (= (:db/id (:scene/game-type scene)) (:db/id default))
         "A freshly created scene already references the seeded default.")))
 

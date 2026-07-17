@@ -7,6 +7,13 @@
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]
             [ogres.app.game-type.widgets :as widgets]))
 
+(deftest test-measurement-cells-registry-entry
+  (is (= (get-in core/elements [:tool/measurement-cells :label]) "Cell Measurement"))
+  (is (string? (get-in core/elements [:tool/measurement-cells :icon])))
+  (is (nil? (game-type/exclusive-group :tool/measurement-cells))
+      ":tool/measurement and :tool/measurement-cells aren't mutually exclusive --
+       a game-type can enable either, or both at once."))
+
 (deftest test-grid-tool-id-round-trip
   (doseq [value [:square :hex-pointy :hex-flat
                  :iso-square :iso-hex-pointy :iso-hex-flat
@@ -65,6 +72,16 @@
       "Elements with no declared :exclusive-group return nil.")
   (is (nil? (game-type/exclusive-group :not/real))
       "Unrecognized ids return nil rather than throwing."))
+
+(deftest test-category-excluded-elements
+  (is (= (game-type/category-excluded-elements "gloomhaven") #{:unit/light})
+      "Gloomhaven has no per-token light-radius mechanic at all -- unlike
+       D&D's darkvision-driven one -- so its Builder category checkbox
+       (see panel_game_type_builder.cljs's `editor`) force-disables
+       :unit/light when checked, same mechanism as its grid preference.")
+  (is (nil? (game-type/category-excluded-elements "dnd5e"))
+      "A module not listed excludes nothing beyond its grid preference
+       (if any) -- D&D 5e's category checkbox has no extra exclusions."))
 
 (deftest test-sanitize-icon-overrides
   (is (= (game-type/sanitize-icon-overrides

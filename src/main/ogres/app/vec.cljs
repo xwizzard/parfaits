@@ -90,13 +90,17 @@
 
 (def zero (Vec2. 0 0))
 
-(defn nearest-hex
-  "Given a point and a hexagon radius (the distance from center to a
-   vertex), returns the center of the nearest pointy-top hexagon as a Vec2.
-   Hexagons tile in rows spaced `1.5 * radius` apart vertically; odd rows
-   are offset horizontally by half a hexagon's width. This matches the
-   layout of real Gloomhaven/Frosthaven board tiles, and is the hex
-   analogue of `rnd` for the square grid. Ported from the brute-force
+(defn ^:private nearest-hex-index
+  "Given a point and a hexagon radius, returns the [row col] offset
+   coordinate of the nearest pointy-top hexagon in the odd-r lattice
+   `nearest-hex` (below) snaps to -- odd rows offset horizontally by half
+   a hexagon's width, rows spaced `1.5 * radius` apart vertically.
+   Factored out as its own function (rather than post-processing
+   `nearest-hex`'s pixel-space output) because a hex center in pixel
+   space can't be reliably inverted back into exact [row col] indices due
+   to float rounding -- this candidate search is the one place that
+   actually knows the winning indices along the way. Both `nearest-hex`
+   and `hex-distance` build on it. Ported from the brute-force
    nearest-center search in worldhaven-asset-browser/public/builder.js."
   [point radius]
   (let [x (.-x point)
@@ -113,8 +117,48 @@
               :let [cx (+ (* c hex-w) x-off)
                     dx (- cx x)
                     dy (- cy y)]]
-          [(Vec2. cx cy) (+ (* dx dx) (* dy dy))])]
+          [[r c] (+ (* dx dx) (* dy dy))])]
     (first (apply min-key second candidates))))
+
+(defn nearest-hex
+  "Given a point and a hexagon radius (the distance from center to a
+   vertex), returns the center of the nearest pointy-top hexagon as a Vec2.
+   Hexagons tile in rows spaced `1.5 * radius` apart vertically; odd rows
+   are offset horizontally by half a hexagon's width. This matches the
+   layout of real Gloomhaven/Frosthaven board tiles, and is the hex
+   analogue of `rnd` for the square grid."
+  [point radius]
+  (let [[r c] (nearest-hex-index point radius)
+        hex-w (* (js/Math.sqrt 3) radius)
+        row-h (* 1.5 radius)
+        x-off (if (zero? (clojure.core/mod r 2)) 0 (/ hex-w 2))]
+    (Vec2. (+ (* c hex-w) x-off) (* r row-h))))
+
+(defn hex-distance
+  "The number of hex-grid steps between two points on a pointy-top hex
+   grid of the given radius -- i.e. how many cells apart they are, not a
+   continuous pixel distance. The hex analogue of `dist-cheb`. Snaps each
+   point to its nearest hex (the same odd-r lattice `nearest-hex-index`
+   snaps to), converts each [row col] offset coordinate to axial
+   (`q = col - (row - (mod row 2)) / 2`, `r = row` -- the standard
+   'odd-r' offset-to-axial conversion for a lattice whose odd rows are
+   shifted right), then axial to cube (`x = q, z = r, y = -x - z`), and
+   returns the cube distance `(|Δx| + |Δy| + |Δz|) / 2` -- the standard
+   hex-grid-distance formula. Always an integer (cube coordinates always
+   sum to zero, so their absolute differences always sum to an even
+   number). Like `nearest-hex`, this snaps to a lattice centered at world
+   origin, so it's not translation-invariant the way `dist-cheb` is --
+   consistent with the rest of this codebase's hex-snap assumptions (e.g.
+   token placement)."
+  [a b radius]
+  (letfn [(axial [[row col]] [(- col (/ (- row (clojure.core/mod row 2)) 2)) row])
+          (cube [[q r]] [q (- (- q) r) r])]
+    (let [[xa ya za] (cube (axial (nearest-hex-index a radius)))
+          [xb yb zb] (cube (axial (nearest-hex-index b radius)))]
+      (/ (+ (clojure.core/abs (- xa xb))
+            (clojure.core/abs (- ya yb))
+            (clojure.core/abs (- za zb)))
+         2))))
 
 (defn nearest-hex-flat
   "Given a point and a hexagon radius, returns the center of the nearest

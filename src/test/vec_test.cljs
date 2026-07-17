@@ -33,3 +33,24 @@
           flat  (vec/nearest-hex-flat point hex-radius)
           pointy-of-swapped (vec/nearest-hex (Vec2. (.-y point) (.-x point)) hex-radius)]
       (is (= flat (Vec2. (.-y pointy-of-swapped) (.-x pointy-of-swapped)))))))
+
+(deftest test-hex-distance
+  (testing "a point measured against itself is zero cells"
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. 0 0) hex-radius) 0)))
+  (testing "a jittered point in the same hex is still zero cells"
+    (let [near (vec/shift (Vec2. 0 0) 5 -3)]
+      (is (= (vec/hex-distance (Vec2. 0 0) near hex-radius) 0))))
+  (testing "one hex-width apart in the same row is one cell"
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. hex-width 0) hex-radius) 1)))
+  (testing "an adjacent odd-row-offset neighbor is one cell"
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. (/ hex-width 2) hex-row) hex-radius) 1))
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. (- (/ hex-width 2)) hex-row) hex-radius) 1)))
+  (testing "two rows straight down is two cells"
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. 0 (* 2 hex-row)) hex-radius) 2)))
+  (testing "a down-right-right hex is two cells"
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. (* 1.5 hex-width) hex-row) hex-radius) 2)))
+  (testing "a neighbor across a negative row is still one cell"
+    (is (= (vec/hex-distance (Vec2. 0 0) (Vec2. (/ hex-width 2) (- (* 1.5 hex-radius))) hex-radius) 1)))
+  (testing "distance is symmetric"
+    (let [a (Vec2. 10 20) b (Vec2. 300 -150)]
+      (is (= (vec/hex-distance a b hex-radius) (vec/hex-distance b a hex-radius))))))
