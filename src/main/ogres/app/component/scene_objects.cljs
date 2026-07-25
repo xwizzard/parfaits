@@ -75,10 +75,18 @@
 (defn ^:private object-authority?
   "Whether the local viewer has visibility authority over `entity` -- the
    host by default, or its assigned player's connected controller once
-   assigned (see ogres.app.player/authority?)."
+   assigned (see ogres.app.player/authority?). An entity flagged
+   :object/shared? true is an explicit opt-in escape hatch on top of
+   that -- ANY connected participant has authority over it regardless
+   of owner/controller (e.g. a physical playing card any player may
+   flip on their turn); absent/false, behavior is exactly as before
+   this flag existed. Mirrors events.cljs's authorized-to-hide?, which
+   this must always agree with -- who may flip the switch and who's
+   exempted from the hidden-filter are the same question."
   [viewer-uuid host? connected-uuids entity]
-  (player/authority? viewer-uuid host? connected-uuids
-                      (get-in entity [:object/owner :player/controller :user/uuid])))
+  (or (:object/shared? entity)
+      (player/authority? viewer-uuid host? connected-uuids
+                          (get-in entity [:object/owner :player/controller :user/uuid]))))
 
 (defn ^:private resolve-hidden
   "Resolves how a token/prop entity should render given whether the
@@ -968,6 +976,7 @@
            [:object/type :default :token/token]
            [:object/point :default vec/zero]
            [:object/hidden :default false]
+           [:object/shared? :default false]
            [:object/layer-shift :default nil]
            [:token/label :default ""]
            [:token/flags :default #{}]
@@ -993,8 +1002,10 @@
            [:object/scale :default 1]
            [:object/rotation :default 0]
            [:object/hidden :default false]
+           [:object/shared? :default false]
            [:object/locked :default false]
            [:object/layer-shift :default nil]
+           [:object/variables :default nil]
            {:prop/image
             [:image/hash
              [:image/width :default 0]
@@ -1051,10 +1062,19 @@
       [:db/ident :user/uuid :user/color :user/dragging]}]}])
 
 (def ^:private locked-for-players-types
-  "Object types that non-host players can never drag, regardless of their
-   own :object/locked value -- notes and props are session-transient
-   decoration only the host arranges, and board pieces are the map/board
-   itself, set up in advance by the host."
+  "Object types that non-host players can never select or drag, regardless
+   of their own :object/locked value -- notes and props are session-
+   transient decoration only the host arranges, and board pieces are the
+   map/board itself, set up in advance by the host. The one exception:
+   an entity a non-host viewer has authority over (see
+   object-authority? -- :object/shared? true, or being the exclusive
+   assigned controller) is NOT locked for them -- selecting is a
+   prerequisite for using the hide/reveal control at all, so an
+   authorized guest who can flip a card must also be able to pick it up
+   in the first place (e.g. a physical on-table card any player may
+   move and flip on their turn). Board pieces/notes never have
+   :object/owner/:object/shared? set by anything today, so this is a
+   no-op for them -- this only actually changes behavior for props."
   #{:note/note :prop/prop :board/piece})
 
 (defui objects []
@@ -1139,7 +1159,9 @@
           (let [{id :db/id point :object/point} entity
                 lock (or (:object/locked entity)
                          (contains? dragging id)
-                         (and (not host) (contains? locked-for-players-types (:object/type entity))))
+                         (and (not host)
+                              (contains? locked-for-players-types (:object/type entity))
+                              (not (object-authority? uuid host connected-uuids entity))))
                 node (uix/create-ref)
                 user (dragging id)
                 rect (geom/object-bounding-rect entity)
@@ -1203,7 +1225,9 @@
                          (and (not host)
                               (some
                                (fn [entity]
-                                 (contains? locked-for-players-types (:object/type entity))) select)))]
+                                 (and (contains? locked-for-players-types (:object/type entity))
+                                      (not (object-authority? uuid host connected-uuids entity))))
+                               select)))]
           ($ drag-local-fn {:id "selected" :disabled locked}
             (fn [^js/Object drag]
               (let [drag-fn (and (.-listeners drag) (.-onPointerDown (.-listeners drag)))

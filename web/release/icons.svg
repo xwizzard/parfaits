@@ -378,5 +378,11 @@
 <circle cx="16" cy="9" r="2.2"></circle>
 <circle cx="24" cy="8" r="2.2"></circle>
 </symbol>
+<symbol id="icon-card-front" viewBox="0 0 32 32">
+<rect x="4" y="2" width="24" height="28" rx="3"></rect>
+</symbol>
+<symbol id="icon-card-back" viewBox="0 0 32 32">
+<path fill-rule="evenodd" d="M4,2 L28,2 L28,30 L4,30 Z M8,6 L24,6 L24,26 L8,26 Z"></path>
+</symbol>
 </defs>
 </svg>

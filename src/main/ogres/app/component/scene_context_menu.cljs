@@ -232,7 +232,13 @@
    (:objects/assign-alt-image, see resolve-hidden in scene_objects.cljs).
    `object-type` (:token/token or :prop/prop) picks which image library
    the placeholder picker offers, matching the object's own image
-   namespace (:token/image-alt vs :prop/image-alt)."
+   namespace (:token/image-alt vs :prop/image-alt). Also sets the
+   :object/shared? 'public toggle' flag (:objects/assign-shared) --
+   letting ANY connected participant, not just the owner's controller,
+   flip the object's hidden state (see authorized-to-hide?,
+   events.cljs). This checkbox lives here (host-only, alongside Owner)
+   deliberately: a guest can never mark something shared themselves,
+   only flip an object the host has already marked shared."
   [{:keys [object-type values on-change]
     :or   {values (constantly (list)) on-change identity}}]
   (let [result (hooks/use-query owner-query [:db/ident :root])
@@ -243,7 +249,8 @@
         owner-ids (values (comp :db/id :object/owner))
         owner-id (if (= (count owner-ids) 1) (first owner-ids) nil)
         alt-hashes (values (comp :image/hash alt-key))
-        alt-hash (if (= (count alt-hashes) 1) (first alt-hashes) nil)]
+        alt-hash (if (= (count alt-hashes) 1) (first alt-hashes) nil)
+        shared? (= (values :object/shared?) #{true})]
     ($ :<>
       ($ :label "Owner")
       ($ :select
@@ -264,7 +271,14 @@
              (on-change :objects/assign-alt-image alt-key (if (seq v) v nil))))}
         ($ :option {:value ""} "None")
         (for [img images]
-          ($ :option {:key (:image/hash img) :value (:image/hash img)} (:image/name img)))))))
+          ($ :option {:key (:image/hash img) :value (:image/hash img)} (:image/name img))))
+      ($ :label "Shared")
+      ($ :input
+        {:type "checkbox"
+         :checked shared?
+         :on-change
+         (fn [event]
+           (on-change :objects/assign-shared (.. event -target -checked)))}))))
 
 (defui ^:private context-menu-token [props]
   (let [dispatch (hooks/use-dispatch)
@@ -339,10 +353,14 @@
               ;; falls back to host when unassigned/disconnected; ORing
               ;; host in here too would wrongly let the host bypass a
               ;; *connected* controller's exclusive authority, defeating
-              ;; the point of hiding something from the host.
-              (not (every? #(player/authority?
-                              (:viewer-uuid props) (:host props) (:connected-uuids props)
-                              (get-in % [:object/owner :player/controller :user/uuid]))
+              ;; the point of hiding something from the host. A
+              ;; :object/shared? entity is the one explicit exception --
+              ;; ANY connected participant (including the host) may
+              ;; always toggle it.
+              (not (every? #(or (:object/shared? %)
+                                 (player/authority?
+                                  (:viewer-uuid props) (:host props) (:connected-uuids props)
+                                  (get-in % [:object/owner :player/controller :user/uuid])))
                             data))
               :on-change
               (fn []
@@ -445,7 +463,12 @@
         entity   (first data)
         id       (:db/id entity)
         camera   (first (:camera/_selected entity))
-        anchor-editing? (= (:camera/draw-mode camera) :object-anchor)]
+        anchor-editing? (= (:camera/draw-mode camera) :object-anchor)
+        ;; "Draw" only makes sense when the whole selection is exactly
+        ;; one physical pile -- a single, non-nil, shared :pile/id (see
+        ;; ogres.app.props/pile) across every selected prop.
+        pile-ids (into #{} (map (comp :pile/id :object/variables)) data)
+        pile-id (if (and (= (count pile-ids) 1) (some? (first pile-ids))) (first pile-ids))]
     (if anchor-editing?
       ;; While actively dragging the grid-anchor marker (see
       ;; object-prop-edit in scene_objects.cljs), the confirm/cancel
@@ -498,18 +521,32 @@
                 :on-click
                 (fn []
                   (dispatch :camera/change-mode :object-anchor))}
-               ($ icon {:name "anchor"}))))
+               ($ icon {:name "anchor"}))
+             (if pile-id
+               ($ :button
+                 {:type "button"
+                  :data-tooltip "Draw"
+                  :on-click
+                  (fn []
+                    ;; target-point nil -- draws in place, un-piling the
+                    ;; top card without moving it; flipping it face-up is
+                    ;; a separate action via the hide/reveal control.
+                    (dispatch :props/draw-from-pile pile-id nil))}
+                 ($ icon {:name "arrow-up-short"})))))
          :render-aside
          (fn []
            ($ :<>
              ($ action-hide
                {:value (every? :object/hidden data)
                 :disabled
-                (not (or (:host props)
-                         (every? #(player/authority?
-                                   (:viewer-uuid props) (:host props) (:connected-uuids props)
-                                   (get-in % [:object/owner :player/controller :user/uuid]))
-                                  data)))
+                ;; Not just `(:host props)` -- see the identical comment
+                ;; in context-menu-token's action-hide; the same
+                ;; exclusive-controller/shared? logic applies to props.
+                (not (every? #(or (:object/shared? %)
+                                   (player/authority?
+                                    (:viewer-uuid props) (:host props) (:connected-uuids props)
+                                    (get-in % [:object/owner :player/controller :user/uuid])))
+                              data))
                 :on-change
                 (fn []
                   (dispatch :objects/toggle-hidden-selected))})

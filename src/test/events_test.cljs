@@ -5,6 +5,7 @@
             [ogres.app.events :refer [event-tx-fn]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
+            [ogres.app.props :as props]
             [ogres.app.provider.state :refer [initial-data]]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
@@ -968,3 +969,124 @@
       (is (:object/hidden (entity @conn id))
           "a controller ref pointing at someone no longer connected falls
            back to host-only, same as an unassigned object"))))
+
+;; --- Prop variables, copies, and physical piles ---
+(defn ^:private scene-props [conn]
+  (:scene/props (:camera/scene (:user/camera (user conn)))))
+
+(deftest test-objects-merge-variables
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (let [id (:db/id (scene-token conn))]
+      (dispatch conn :objects/merge-variables [id] {:a 1 :b 2})
+      (is (= (:object/variables (entity @conn id)) {:a 1 :b 2}))
+      (dispatch conn :objects/merge-variables [id] {:a nil})
+      (is (= (:object/variables (entity @conn id)) {:b 2})
+          "a nil-valued key in the merge removes just that key, not the
+           whole attribute")
+      (dispatch conn :objects/merge-variables [id] {:b nil})
+      (is (nil? (:object/variables (entity @conn id)))
+          "clearing the last key retracts the whole attribute rather
+           than leaving an empty map behind"))))
+
+(deftest test-objects-assign-shared
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (let [id (:db/id (scene-token conn))]
+      (dispatch conn :objects/assign-shared [id] true)
+      (is (:object/shared? (entity @conn id)))
+      (dispatch conn :objects/assign-shared [id] false)
+      (is (nil? (:object/shared? (entity @conn id)))
+          "clearing retracts the flag rather than storing false"))))
+
+(deftest test-props-create-many-stack-layout
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-many (Vec2. 5 5) "card-hash" 3)
+    (let [props (scene-props conn)]
+      (is (= (count props) 3))
+      (is (every? #(= (:object/point %) (Vec2. 5 5)) props)
+          "every copy lands on the exact same point -- a stack, the
+           default layout")
+      (is (= (set (map (comp :prop/copy-index :object/variables) props)) #{0 1 2})
+          "each copy gets a distinct, automatic identifier"))))
+
+(deftest test-props-create-many-grid-layout
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-many (Vec2. 0 0) "card-hash" 4
+              {:layout :grid :columns 2 :spacing 10})
+    (let [points (into #{} (map :object/point) (scene-props conn))]
+      (is (= points #{(Vec2. 0 0) (Vec2. 10 0) (Vec2. 0 10) (Vec2. 10 10)})
+          "row-major spread, 2 columns wide, 10 units apart"))))
+
+(deftest test-props-create-many-mint-time-options
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-many (Vec2. 0 0) "card-back" 1
+              {:hidden? true :shared? true :alt-hash "card-front"})
+    (let [prop (first (scene-props conn))]
+      (is (:object/hidden prop))
+      (is (:object/shared? prop))
+      (is (= (:image/hash (:prop/image-alt prop)) "card-front")))))
+
+(deftest test-props-create-pile
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-pile (Vec2. 0 0) "card-back" 4 "pile-1")
+    (let [vars (map :object/variables (scene-props conn))]
+      (is (= (into #{} (map :pile/id) vars) #{"pile-1"}))
+      (is (= (into #{} (map :pile/position) vars) #{0 1 2 3})))))
+
+(deftest test-props-draw-from-pile-moves-top-and-unpiles
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-pile (Vec2. 0 0) "card-back" 3 "pile-1")
+    (let [top-id (:db/id (props/top-of-pile (scene-props conn)))
+          target (Vec2. 40 40)]
+      (dispatch conn :props/draw-from-pile "pile-1" target)
+      (let [drawn (entity @conn top-id)]
+        (is (= (:object/point drawn) target))
+        (is (nil? (:pile/id (:object/variables drawn)))
+            "un-piled -- no longer a member of pile-1")
+        (is (= (:prop/copy-index (:object/variables drawn)) 2)
+            "other variables (the automatic copy-index) are preserved")
+        (is (= (count (props/pile (scene-props conn) "pile-1")) 2)
+            "the pile itself shrinks by one")))))
+
+(deftest test-props-draw-from-pile-in-place-when-no-target
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-pile (Vec2. 7 7) "card-back" 2 "pile-1")
+    (let [top-id (:db/id (props/top-of-pile (scene-props conn)))]
+      (dispatch conn :props/draw-from-pile "pile-1" nil)
+      (is (= (:object/point (entity @conn top-id)) (Vec2. 7 7))
+          "no target-point -- un-piles without moving it"))))
+
+(deftest test-props-draw-from-pile-noop-when-empty
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/draw-from-pile "no-such-pile" (Vec2. 1 1))
+    (is (empty? (scene-props conn))
+        "no matching pile-id is a no-op, not an error")))
+
+(deftest test-props-discard-to-pile-restacks-onto-existing-point
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :props/create-pile (Vec2. 3 3) "card-back" 2 "pile-1")
+    (dispatch conn :props/create-many (Vec2. 99 99) "card-back" 1) ; a loose, un-piled prop
+    (let [loose-id (:db/id (first (filter #(nil? (:pile/id (:object/variables %)))
+                                           (scene-props conn))))]
+      (dispatch conn :props/discard-to-pile loose-id "pile-1")
+      (let [discarded (entity @conn loose-id)]
+        (is (= (:object/point discarded) (Vec2. 3 3))
+            "relocated onto the pile's existing anchor point")
+        (is (= (:pile/id (:object/variables discarded)) "pile-1"))
+        (is (= (:pile/position (:object/variables discarded)) 2)
+            "lands on top -- one past the existing max position")))))
+
+(deftest test-objects-toggle-hidden-shared-guest-allowed
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (let [id (:db/id (scene-token conn))]
+      (add-conn! conn my-uuid)
+      (dispatch conn :objects/assign-shared [id] true)
+      (dispatch conn :objects/toggle-hidden id)
+      (is (:object/hidden (entity @conn id))
+          "an unrelated connected guest -- not the host, no owner/
+           controller assigned at all -- may still toggle it purely
+           because :object/shared? is true"))))

@@ -72,10 +72,56 @@
                         :game-type/name "Gloomhaven"
                         :game-type/enabled-elements game-type/gloomhaven-enabled-elements}]}])
 
+(def ^:private card-back-svg
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 280'><rect width='200' height='280' rx='14' fill='#2c3e50'/><rect x='10' y='10' width='180' height='260' rx='8' fill='none' stroke='#ecf0f1' stroke-width='4'/><path d='M20,20 L180,260 M180,20 L20,260' stroke='#ecf0f1' stroke-width='2' opacity='0.4'/></svg>")
+
+(def ^:private card-front-svg
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 280'><rect width='200' height='280' rx='14' fill='#f5f5f0'/><rect x='6' y='6' width='188' height='268' rx='10' fill='none' stroke='#333333' stroke-width='3'/></svg>")
+
+(def card-back-hash
+  "The bundled 'Card Back' demo prop image's :image/hash -- public (not
+   ^:private) so component/panel_props.cljs's 'Add Card Pile (Demo)'
+   button can reference the exact same hash seed-props-images seeded,
+   without duplicating the SVG or searching the gallery by name."
+  (str "data:image/svg+xml," (js/encodeURIComponent card-back-svg)))
+
+(def card-front-hash
+  "The bundled 'Card Front (Blank)' demo prop image's :image/hash --
+   public for the same reason as card-back-hash."
+  (str "data:image/svg+xml," (js/encodeURIComponent card-front-svg)))
+
+(def ^:private seed-props-images
+  "Idempotent tx-data (keyed by the unique :image/hash of each bundled
+   SVG) that seeds a generic, blank card-front/card-back prop-image
+   pair -- proves out the physical prop-copy/pile mechanism
+   (:props/create-pile, see events.cljs and panel_props.cljs's 'Add Card
+   Pile (Demo)' button) without requiring an upload. Each :image/hash is
+   itself a data: URI (see provider.image/url?, widened to recognize
+   this), so the image renders directly with no IndexedDB round-trip --
+   the same self-referential 'thumbnail equals the full image'
+   :image/thumbnail shape :token-images/create-many already uses when a
+   caller supplies no distinct thumbnail. Re-transacting this on every
+   boot is a safe upsert, matching seed-game-types."
+  [{:db/id [:db/ident :root]
+    :root/props-images
+    [{:image/hash card-back-hash
+      :image/name "Card Back"
+      :image/size 0
+      :image/width 200
+      :image/height 280
+      :image/thumbnail [:image/hash card-back-hash]}
+     {:image/hash card-front-hash
+      :image/name "Card Front (Blank)"
+      :image/size 0
+      :image/width 200
+      :image/height 280
+      :image/thumbnail [:image/hash card-front-hash]}]}])
+
 (defn initial-data [host]
   (ds/db-with
    (ds/empty-db schema)
-   [[:db/add -1 :db/ident :root]
+   (into
+    [[:db/add -1 :db/ident :root]
     [:db/add -1 :root/release VERSION]
     [:db/add -1 :root/scenes -2]
     [:db/add -1 :root/user -3]
@@ -103,7 +149,8 @@
     [:db/add -1 :root/game-types -8]
     [:db/add -8 :game-type/key :gloomhaven]
     [:db/add -8 :game-type/name "Gloomhaven"]
-    [:db/add -8 :game-type/enabled-elements game-type/gloomhaven-enabled-elements]]))
+    [:db/add -8 :game-type/enabled-elements game-type/gloomhaven-enabled-elements]]
+    seed-props-images)))
 
 (def context (uix/create-context))
 
@@ -160,7 +207,7 @@
        (let [tx-data
              (into [[:db/add [:db/ident :user] :user/ready true]
                     [:db/add [:db/ident :user] :user/host host]]
-                   seed-game-types)]
+                   cat [seed-game-types seed-props-images])]
          (.then (read VERSION)
                 (fn [record]
                   (if (nil? record)

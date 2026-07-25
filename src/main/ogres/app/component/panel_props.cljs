@@ -1,6 +1,7 @@
 (ns ogres.app.component.panel-props
   (:require [ogres.app.component :as component :refer [icon]]
             [ogres.app.hooks :as hooks]
+            [ogres.app.provider.state :as state]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec :refer [Vec2]]
             [uix.core :as uix :refer [defui $]]
@@ -100,10 +101,14 @@
       "select it. "
       ($ :strong "Removing images ") "will also remove them from all scenes.")))
 
+(def ^:private query-camera
+  [{:user/camera [[:camera/point :default vec/zero]]}])
+
 (defui ^:memo actions []
   (let [dispatch (hooks/use-dispatch)
         upload (hooks/use-image-uploader {:type :props})
-        input (uix/use-ref)]
+        input (uix/use-ref)
+        {{point :camera/point} :user/camera} (hooks/use-query query-camera)]
     ($ :<>
       ($ :input
         {:ref input
@@ -120,6 +125,18 @@
         ($ icon {:name "camera-fill" :size 16})
         "Upload images")
       ($ component/image-url-form {:type :props})
+      ($ :button.button.button-neutral
+        {:title "Stamps 4 face-down demo cards onto the scene as a
+                 physical pile -- proves out the prop-copy/pile
+                 mechanism (:props/create-pile). Any connected
+                 participant may flip one (see the Owner tab's 'Shared'
+                 checkbox), and a selected pile shows a 'Draw' action."
+         :on-click
+         (fn []
+           (dispatch :props/create-pile point state/card-back-hash 4 (random-uuid)
+                     {:alt-hash state/card-front-hash :hidden? true :shared? true}))}
+        ($ icon {:name "card-back" :size 16})
+        "Add Card Pile (Demo)")
       ($ :button.button.button-danger
         {:on-click (fn [] (dispatch :props-images/remove-all))}
         ($ icon {:name "trash3-fill" :size 16})))))

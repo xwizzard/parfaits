@@ -8,6 +8,7 @@
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
             [ogres.app.player :as player]
+            [ogres.app.props :as props]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
@@ -773,12 +774,18 @@
    :object/owner -> :player/controller, in which case only that
    controller may (see ogres.app.player/authority?, the same primitive
    the render-time visibility filters use, so who may flip the switch
-   and who's exempted from the hidden-filter always agree)."
+   and who's exempted from the hidden-filter always agree). An entity
+   flagged :object/shared? true is an explicit opt-in escape hatch on
+   top of that -- ANY connected participant may flip it (a 'public
+   toggle' shared table object, e.g. a physical playing card any player
+   may flip on their turn), regardless of owner/controller. Absent or
+   false, behavior is exactly as before this flag existed."
   [data entity]
-  (let [user (ds/entity data [:db/ident :user])
-        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])]
-    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+  (or (:object/shared? entity)
+      (let [user (ds/entity data [:db/ident :user])
+            connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+            controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])]
+        (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid))))
 
 (defmethod
   ^{:doc "Hide or reveal the given object. The host may always do this
@@ -841,6 +848,52 @@
     (if hash
       {:db/id id image-key [:image/hash hash]}
       [:db/retract id image-key])))
+
+(defmethod
+  ^{:doc "Sets (or clears) the given objects' (tokens or props, by id)
+          :object/shared? flag -- an explicit per-object opt-in that lets
+          ANY connected participant toggle its :object/hidden state, not
+          just the host or its assigned owner's controller (see
+          authorized-to-hide?). Defaults to unset/false, so this only
+          ever loosens permission for objects that explicitly opt in;
+          every other hidden object (e.g. a host's secret note) is
+          completely unaffected."}
+  event-tx-fn :objects/assign-shared
+  [_ _ idxs shared?]
+  (for [id idxs]
+    (if shared?
+      {:db/id id :object/shared? true}
+      [:db/retract id :object/shared?])))
+
+(defn ^:private merge-variables
+  "The next :object/variables map for `entity` after merging `kvs` into
+   it (creating the map if absent) -- a nil value in `kvs` removes that
+   key rather than storing nil, the same 'nil clears' idiom
+   :objects/assign-owner already uses for a whole attribute. Returns nil
+   (not an empty map) if the result has no keys left, so callers can
+   retract the attribute entirely instead of leaving an empty map
+   behind."
+  [entity kvs]
+  (not-empty
+   (reduce-kv (fn [m k v] (if (nil? v) (dissoc m k) (assoc m k v)))
+              (or (:object/variables entity) {})
+              kvs)))
+
+(defmethod
+  ^{:doc "Merges the given key-value pairs into each object's (tokens or
+          props, by id) generic :object/variables map -- a nil value in
+          kvs removes that key. Retracts :object/variables entirely if
+          the merge leaves it empty. This is the one generic, arbitrary
+          per-object data attachment point every other :props/* method
+          in this file (piles, copies) builds on top of, rather than
+          each inventing its own bespoke attribute."}
+  event-tx-fn :objects/merge-variables
+  [data _ idxs kvs]
+  (for [id idxs
+        :let [next (merge-variables (ds/entity data id) kvs)]]
+    (if next
+      {:db/id id :object/variables next}
+      [:db/retract id :object/variables])))
 
 (defmethod
   ^{:doc "Resets all transformations for the currently selected objects."}
@@ -2025,6 +2078,141 @@
        [:db/add camera-id :camera/selected -1]
        [:db/add scene-id :scene/props -1]]
       [])))
+
+(defmethod
+  ^{:doc "Creates `n` new, fully independent props in the current scene
+          from a single image `hash`, in one transaction -- the
+          scene-space counterpart of :clipboard/paste's per-copy minting
+          loop, not a repeat of :props/create's one-at-a-time,
+          screen-space/pointer-drop path (there's no pointer coordinate
+          to convert here -- `point` is already scene-space).
+
+          `opts`:
+          - :layout    :stack (default -- every copy lands on the exact
+                       same anchor-corrected point, a physical pile) or
+                       :grid (row-major spread, :columns wide, :spacing
+                       scene-units apart -- e.g. a Memory-style table
+                       layout).
+          - :columns/:spacing -- :grid layout geometry, default 8 /
+                       grid-size.
+          - :hidden?/:shared? -- baked into every copy's :object/hidden/
+                       :object/shared? at mint time.
+          - :alt-hash  -- every copy's :prop/image-alt, at mint time.
+          - :tag-fn    -- (idx) -> map merged into every copy's
+                       :object/variables on top of the automatic
+                       {:prop/copy-index idx} tag -- the seam
+                       :props/create-pile uses to inject :pile/id/
+                       :pile/position without this event knowing
+                       anything about piles.
+
+          Same scale/rotation calibration and grid-align/snap-to-cell
+          behavior as :props/create; :object/owner is never set (stays
+          host-only by default, same as any newly created object)."}
+  event-tx-fn :props/create-many
+  ([data event point hash n]
+   [[:db.fn/call event-tx-fn event point hash n {}]])
+  ([data _ point hash n
+    {:keys [layout columns spacing hidden? shared? alt-hash tag-fn]
+     :or   {layout :stack columns 8 spacing grid-size
+            hidden? false shared? false tag-fn (constantly nil)}}]
+   (let [{{camera-id :db/id
+           {scene-id :db/id grid-type :scene/grid-type align? :scene/grid-align
+            game-type-entity :scene/game-type} :camera/scene}
+          :user/camera} (ds/entity data [:db/ident :user])
+         {width :image/width height :image/height cell-px :image/cell-px
+          rotation :image/rotation anchor :image/anchor}
+         (ds/entity data [:image/hash hash])
+         scale (if cell-px (/ grid-size cell-px) 1)
+         rotation (or rotation 0)
+         align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
+         base-type (geom/base-grid-type grid-type)
+         point-at
+         (case layout
+           :grid (fn [idx] (let [[dx dy] (props/grid-offset idx columns spacing)]
+                              (vec/add point (Vec2. dx dy))))
+           (constantly point))]
+     (into
+      []
+      (mapcat
+       (fn [[id idx]]
+         (let [raw-point (point-at idx)
+               object-point
+               (if align?
+                 (geom/snap-to-cell
+                  {:object/type :prop/prop :object/point raw-point
+                   :object/scale scale :object/rotation rotation
+                   :prop/image {:image/width width :image/height height :image/anchor anchor}}
+                  vec/zero base-type)
+                 raw-point)]
+           (cond-> [[:db/add id :object/type :prop/prop]
+                    [:db/add id :object/point object-point]
+                    [:db/add id :object/scale scale]
+                    [:db/add id :object/rotation rotation]
+                    [:db/add id :prop/image [:image/hash hash]]
+                    [:db/add id :object/variables (merge {:prop/copy-index idx} (tag-fn idx))]
+                    [:db/add scene-id :scene/props id]
+                    [:db/add camera-id :camera/selected id]]
+             hidden? (conj [:db/add id :object/hidden true])
+             shared? (conj [:db/add id :object/shared? true])
+             alt-hash (conj [:db/add id :prop/image-alt [:image/hash alt-hash]]))))
+       (sequence (indexed) (range n)))))))
+
+(defn ^:private scene-props
+  "The :scene/props collection for the current camera's scene -- used by
+   the pile events below to look up pile membership, mirroring how the
+   abstract deck system's private `pile` helper filters :deck/cards."
+  [data]
+  (:scene/props (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))))
+
+(defmethod
+  ^{:doc "Creates `n` new props from `hash`, all stamped onto one
+          physical pile identified by `pile-id` (caller-supplied, e.g.
+          (random-uuid) generated right before dispatch) -- a thin
+          wrapper over :props/create-many with :layout :stack and a
+          :tag-fn that assigns each copy a :pile/position 0..n-1 within
+          the pile."}
+  event-tx-fn :props/create-pile
+  ([data event point hash n pile-id]
+   [[:db.fn/call event-tx-fn event point hash n pile-id {}]])
+  ([data _ point hash n pile-id opts]
+   [[:db.fn/call event-tx-fn :props/create-many point hash n
+     (assoc opts :tag-fn (fn [idx] {:pile/id pile-id :pile/position idx}))]]))
+
+(defmethod
+  ^{:doc "Moves the top-ordered prop (highest :pile/position, see
+          ogres.app.props/top-of-pile) of the pile identified by
+          `pile-id` to `target-point` (scene-space), or leaves it at its
+          current point if `target-point` is nil, and un-piles it --
+          clears just :pile/id/:pile/position (via
+          :objects/merge-variables), preserving any other variables
+          (e.g. :prop/copy-index). Deliberately does not touch
+          :object/hidden -- 'drawing' and 'revealing' stay separate,
+          composable actions; a caller issues :objects/toggle-hidden
+          itself if it wants the drawn card to also flip face-up. A
+          no-op if the pile has no members."}
+  event-tx-fn :props/draw-from-pile
+  [data _ pile-id target-point]
+  (let [top (props/top-of-pile (props/pile (scene-props data) pile-id))]
+    (if top
+      (cond-> [[:db.fn/call event-tx-fn :objects/merge-variables [(:db/id top)]
+                {:pile/id nil :pile/position nil}]]
+        (some? target-point) (conj [:db/add (:db/id top) :object/point target-point]))
+      [])))
+
+(defmethod
+  ^{:doc "Tags `prop-id` onto the pile identified by `pile-id` at
+          next-pile-position (on top) and relocates it to the pile's
+          existing anchor point (the first member's :object/point),
+          re-stacking it visually -- the physical analogue of
+          :deck/discard. If the pile has no existing members, `prop-id`
+          simply becomes its first, at its own current point."}
+  event-tx-fn :props/discard-to-pile
+  [data _ prop-id pile-id]
+  (let [members (props/pile (scene-props data) pile-id)]
+    (cond-> [[:db.fn/call event-tx-fn :objects/merge-variables [prop-id]
+              {:pile/id pile-id :pile/position (props/next-pile-position members)}]]
+      (:object/point (first members))
+      (conj [:db/add prop-id :object/point (:object/point (first members))]))))
 
 ;; --- Board ---
 
