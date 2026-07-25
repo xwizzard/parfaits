@@ -1,13 +1,13 @@
 (ns ogres.app.events
   (:require [datascript.core :as ds]
-            [ogres.app.cards :as cards]
-            [ogres.app.player :as player]
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
+            [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size hex-radius]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
+            [ogres.app.player :as player]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
@@ -767,21 +767,45 @@
        [:db/retract camera :camera/selected id]
        {:db/id camera :camera/selected {:db/id id}})]))
 
+(defn ^:private authorized-to-hide?
+  "True if the local viewer may toggle :object/hidden for `entity` --
+   the host, unless a *connected* controller is assigned to it via
+   :object/owner -> :player/controller, in which case only that
+   controller may (see ogres.app.player/authority?, the same primitive
+   the render-time visibility filters use, so who may flip the switch
+   and who's exempted from the hidden-filter always agree)."
+  [data entity]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
 (defmethod
-  ^{:doc "Hide or reveal the given object."}
+  ^{:doc "Hide or reveal the given object. The host may always do this
+          unless a connected controller is assigned to it (see
+          authorized-to-hide?), in which case only that controller may
+          -- silently no-ops for anyone else, the same advisory
+          defense-in-depth spirit as :player/change-color."}
   event-tx-fn :objects/toggle-hidden
   [data _ id]
   (let [entity (ds/entity data id)]
-    [[:db/add id :object/hidden (not (:object/hidden entity))]]))
+    (if (authorized-to-hide? data entity)
+      [[:db/add id :object/hidden (not (:object/hidden entity))]]
+      [])))
 
 (defmethod
-  ^{:doc "Hides or reveals the currently selected objects."}
+  ^{:doc "Hides or reveals the currently selected objects. Same
+          per-object authorization as :objects/toggle-hidden -- objects
+          the caller isn't authorized for are silently left untouched
+          rather than blocking the rest of the selection."}
   event-tx-fn :objects/toggle-hidden-selected
   [data _]
   (let [user (ds/entity data [:db/ident :user])
-        selected (:camera/selected (:user/camera user))]
-    (for [{id :db/id} selected]
-      [:db/add id :object/hidden (not (every? :object/hidden selected))])))
+        selected (:camera/selected (:user/camera user))
+        target (not (every? :object/hidden selected))]
+    (for [entity selected
+          :when (authorized-to-hide? data entity)]
+      [:db/add (:db/id entity) :object/hidden target])))
 
 (defmethod
   ^{:doc "Locks or unlocks the currently selected objects."}
@@ -791,6 +815,32 @@
         selected (:camera/selected (:user/camera user))]
     (for [{id :db/id} selected]
       [:db/add id :object/locked (not (every? :object/locked selected))])))
+
+(defmethod
+  ^{:doc "Assigns (or, when player-id is nil, unassigns) the given
+          objects' (tokens or props, by id) owning roster player -- the
+          seam :objects/toggle-hidden(-selected) authorizes against via
+          :player/controller (see authorized-to-hide?)."}
+  event-tx-fn :objects/assign-owner
+  [_ _ idxs player-id]
+  (for [id idxs]
+    (if player-id
+      {:db/id id :object/owner player-id}
+      [:db/retract id :object/owner])))
+
+(defmethod
+  ^{:doc "Sets (or, when hash is nil, clears) the given objects' (tokens
+          or props, by id) placeholder image -- the image rendered in
+          place of the real one for a viewer who lacks authority to see
+          it while it's :object/hidden (see resolve-hidden,
+          scene_objects.cljs). image-key is :token/image-alt or
+          :prop/image-alt, matching the object's own type."}
+  event-tx-fn :objects/assign-alt-image
+  [_ _ idxs image-key hash]
+  (for [id idxs]
+    (if hash
+      {:db/id id image-key [:image/hash hash]}
+      [:db/retract id image-key])))
 
 (defmethod
   ^{:doc "Resets all transformations for the currently selected objects."}
@@ -1346,7 +1396,6 @@
   [_ _ deck-id]
   [[:db/retractEntity deck-id]])
 
-
 ;; --- Players ---
 (defmethod
   ^{:doc "Creates a new player or NPC (kind is :human or :npc) on the
@@ -1421,6 +1470,22 @@
           :player/color (player/next-color (player/colors-for-kind kind) taken)}]))))
 
 (defmethod
+  ^{:doc "Sets which currently-connected user controls the given
+          player/NPC (a ref to their :user/uuid), or clears it (control
+          reverts to the host default) when user-id is nil. This is how
+          NPC control (host by default) gets reassigned to a guest, and
+          how a human roster entry gets bound to whichever guest is
+          playing them -- see ogres.app.player/authority?, which
+          resolves this against currently-connected sessions at read
+          time (a stale controller whose session disconnected is
+          treated as unassigned, not an error)."}
+  event-tx-fn :player/set-controller
+  [_ _ player-id user-id]
+  (if user-id
+    [{:db/id player-id :player/controller user-id}]
+    [[:db/retract player-id :player/controller]]))
+
+(defmethod
   ^{:doc "Takes the given player/NPC out of active play (active? false) or
           restores them (active? true), without deleting the roster
           entry. Their name, kind, and color are untouched and the color
@@ -1435,7 +1500,6 @@
   event-tx-fn :player/remove
   [_ _ player-id]
   [[:db/retractEntity player-id]])
-
 
 ;; --- Token Images ---
 (defmethod event-tx-fn :token-images/create-many

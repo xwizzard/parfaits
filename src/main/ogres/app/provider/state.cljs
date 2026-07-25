@@ -22,9 +22,12 @@
    :image/thumbnail      {:db/valueType :db.type/ref :db/isComponent true}
    :initiative/played    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :initiative/turn      {:db/valueType :db.type/ref}
+   :object/owner         {:db/valueType :db.type/ref}
+   :player/controller    {:db/valueType :db.type/ref}
    :prop/image           {:db/valueType :db.type/ref}
-   :root/players         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :prop/image-alt       {:db/valueType :db.type/ref}
    :root/game-types      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :root/players         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scene-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scenes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/session         {:db/valueType :db.type/ref :db/isComponent true}
@@ -32,17 +35,18 @@
    :root/props-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/user            {:db/valueType :db.type/ref :db/isComponent true}
    :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/game-type      {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/tokens         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/notes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/props          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :session/conns        {:db/valueType :db.type/ref :db.cardinality :db.cardinality/many :db/isComponent true}
    :session/host         {:db/valueType :db.type/ref}
    :token/image          {:db/valueType :db.type/ref}
+   :token/image-alt      {:db/valueType :db.type/ref}
    :user/camera          {:db/valueType :db.type/ref}
    :user/cameras         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :user/dragging        {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}

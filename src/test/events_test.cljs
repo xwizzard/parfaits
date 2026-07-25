@@ -843,3 +843,128 @@
     (is (= (count (root-players conn)) 1)
         "the roster is shared -- creating a new scene doesn't reset or duplicate it")))
 
+;; --- Player/object visibility authority ---
+(defn ^:private scene-token [conn]
+  (first (:scene/tokens (:camera/scene (:user/camera (user conn))))))
+
+(defn ^:private add-conn!
+  "Test helper -- upserts a fake connected guest (:user/host false) with
+   the given :user/uuid into :root/session's :session/conns, mirroring
+   the pattern already used by test-scene-focus above."
+  [conn uuid]
+  (transact! conn [{:db/ident :root
+                     :root/session
+                     {:db/ident :session
+                      :session/conns [{:user/host false :user/uuid uuid}]}}]))
+
+(deftest test-player-set-controller
+  (let [conn (ds/conn-from-db (initial-data true))
+        guest-uuid (random-uuid)]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn guest-uuid)
+      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (is (= (:user/uuid (:player/controller (entity @conn player-id))) guest-uuid))
+      (dispatch conn :player/set-controller player-id nil)
+      (is (nil? (:player/controller (entity @conn player-id)))
+          "clearing the controller reverts to host-controlled"))))
+
+(deftest test-objects-assign-owner
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :player/create :npc)
+    (let [token-id (:db/id (scene-token conn))
+          player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :objects/assign-owner [token-id] player-id)
+      (is (= (:db/id (:object/owner (entity @conn token-id))) player-id))
+      (dispatch conn :objects/assign-owner [token-id] nil)
+      (is (nil? (:object/owner (entity @conn token-id)))
+          "unassigning clears :object/owner"))))
+
+(deftest test-objects-assign-alt-image
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token-images/create-many [[{:hash "abc" :name "back" :size 1 :width 1 :height 1}
+                                                {:hash "abc" :name "back" :size 1 :width 1 :height 1}]])
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (let [token-id (:db/id (scene-token conn))]
+      (dispatch conn :objects/assign-alt-image [token-id] :token/image-alt "abc")
+      (is (= (:image/hash (:token/image-alt (entity @conn token-id))) "abc"))
+      (dispatch conn :objects/assign-alt-image [token-id] :token/image-alt nil)
+      (is (nil? (:token/image-alt (entity @conn token-id)))
+          "clearing the placeholder image retracts it"))))
+
+(deftest test-objects-toggle-hidden-host-allowed-when-unassigned
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (let [id (:db/id (scene-token conn))]
+      (dispatch conn :objects/toggle-hidden id)
+      (is (:object/hidden (entity @conn id))
+          "the host may hide/reveal an unassigned object, same as before this feature"))))
+
+(deftest test-objects-toggle-hidden-host-rejected-once-controller-assigned
+  (let [conn (ds/conn-from-db (initial-data true))
+        guest-uuid (random-uuid)]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :player/create :npc)
+    (let [id (:db/id (scene-token conn))
+          player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn guest-uuid)
+      (dispatch conn :objects/assign-owner [id] player-id)
+      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (dispatch conn :objects/toggle-hidden id)
+      (is (not (:object/hidden (entity @conn id)))
+          "the host's own toggle attempt is rejected once a connected
+           controller owns the object -- authority belongs to the
+           controller alone, this is what lets a player hide something
+           from the host"))))
+
+(deftest test-objects-toggle-hidden-controller-allowed
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :player/create :npc)
+    (let [id (:db/id (scene-token conn))
+          player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn my-uuid)
+      (dispatch conn :objects/assign-owner [id] player-id)
+      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (dispatch conn :objects/toggle-hidden id)
+      (is (:object/hidden (entity @conn id))
+          "the assigned, connected controller may toggle it even though
+           they aren't the host"))))
+
+(deftest test-objects-toggle-hidden-unrelated-guest-noop
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)
+        other-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :player/create :npc)
+    (let [id (:db/id (scene-token conn))
+          player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn other-uuid)
+      (dispatch conn :objects/assign-owner [id] player-id)
+      (dispatch conn :player/set-controller player-id [:user/uuid other-uuid])
+      (dispatch conn :objects/toggle-hidden id)
+      (is (not (:object/hidden (entity @conn id)))
+          "a connected guest who isn't the assigned controller (and isn't
+           the host) may not toggle it"))))
+
+(deftest test-objects-toggle-hidden-stale-controller-falls-back-to-host
+  (let [conn (ds/conn-from-db (initial-data true))
+        stale-uuid (random-uuid)]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :player/create :npc)
+    (let [id (:db/id (scene-token conn))
+          player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn stale-uuid)
+      (dispatch conn :objects/assign-owner [id] player-id)
+      (dispatch conn :player/set-controller player-id [:user/uuid stale-uuid])
+      ;; simulate the controlling guest disconnecting -- retracted from
+      ;; :session/conns, but :player/controller still points at them
+      (transact! conn [[:db/retract [:db/ident :session] :session/conns [:user/uuid stale-uuid]]])
+      (dispatch conn :objects/toggle-hidden id)
+      (is (:object/hidden (entity @conn id))
+          "a controller ref pointing at someone no longer connected falls
+           back to host-only, same as an unassigned object"))))

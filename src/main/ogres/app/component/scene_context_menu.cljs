@@ -4,6 +4,7 @@
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
+            [ogres.app.player :as player]
             [ogres.app.util :as util]
             [uix.core :as uix :refer [defui $]]))
 
@@ -217,6 +218,54 @@
                :aria-label "Increase aura size by 5 feet"}
               "+")))))))
 
+(def ^:private owner-query
+  [{:root/players [:db/id :player/name :player/kind]}
+   {:root/token-images [:image/hash :image/name]}
+   {:root/props-images [:image/hash :image/name]}])
+
+(defui ^:private token-form-owner
+  "Shared by both the token and prop context menus (see context-menu-
+   token/context-menu-prop's :owner toolbar tab) -- assigns which
+   roster player owns the selected objects (:objects/assign-owner) and,
+   separately, a placeholder image shown in place of the real one to a
+   viewer who lacks authority to see it while hidden
+   (:objects/assign-alt-image, see resolve-hidden in scene_objects.cljs).
+   `object-type` (:token/token or :prop/prop) picks which image library
+   the placeholder picker offers, matching the object's own image
+   namespace (:token/image-alt vs :prop/image-alt)."
+  [{:keys [object-type values on-change]
+    :or   {values (constantly (list)) on-change identity}}]
+  (let [result (hooks/use-query owner-query [:db/ident :root])
+        players (:root/players result)
+        token? (= object-type :token/token)
+        images (if token? (:root/token-images result) (:root/props-images result))
+        alt-key (if token? :token/image-alt :prop/image-alt)
+        owner-ids (values (comp :db/id :object/owner))
+        owner-id (if (= (count owner-ids) 1) (first owner-ids) nil)
+        alt-hashes (values (comp :image/hash alt-key))
+        alt-hash (if (= (count alt-hashes) 1) (first alt-hashes) nil)]
+    ($ :<>
+      ($ :label "Owner")
+      ($ :select
+        {:value (or owner-id "")
+         :on-change
+         (fn [event]
+           (let [v (.. event -target -value)]
+             (on-change :objects/assign-owner (if (seq v) (js/Number v) nil))))}
+        ($ :option {:value ""} "Unassigned")
+        (for [p players]
+          ($ :option {:key (:db/id p) :value (:db/id p)} (:player/name p))))
+      ($ :label "Placeholder image")
+      ($ :select
+        {:value (or alt-hash "")
+         :on-change
+         (fn [event]
+           (let [v (.. event -target -value)]
+             (on-change :objects/assign-alt-image alt-key (if (seq v) v nil))))}
+        ($ :option {:value ""} "None")
+        (for [img images]
+          ($ :option {:key (:image/hash img) :value (:image/hash img)} (:image/name img)))))))
+
 (defui ^:private context-menu-token [props]
   (let [dispatch (hooks/use-dispatch)
         data     (:data props)
@@ -234,6 +283,7 @@
          ($ :<>
            (for [[form icon-name tooltip]
                  (into (cond-> [[:label "fonts" "Label"]]
+                         (:host props) (conj [:owner "person-circle" "Owner"])
                          details? (conj [:details "sliders" "Options"]))
                        (map (fn [[id element]]
                               [id
@@ -284,7 +334,16 @@
          ($ :<>
            ($ action-hide
              {:value (every? :object/hidden data)
-              :disabled (not (:host props))
+              :disabled
+              ;; Not just `(:host props)` -- player/authority? already
+              ;; falls back to host when unassigned/disconnected; ORing
+              ;; host in here too would wrongly let the host bypass a
+              ;; *connected* controller's exclusive authority, defeating
+              ;; the point of hiding something from the host.
+              (not (every? #(player/authority?
+                              (:viewer-uuid props) (:host props) (:connected-uuids props)
+                              (get-in % [:object/owner :player/controller :user/uuid]))
+                            data))
               :on-change
               (fn []
                 (dispatch :objects/toggle-hidden-selected))})
@@ -309,6 +368,7 @@
                                   ([f init] (into init (map f) data)))}]
           (case selected
             :label   ($ token-form-label props)
+            :owner   ($ token-form-owner (assoc props :object-type :token/token))
             :details ($ token-form-details props)
             (if-let [element (get game-type/elements selected)]
               ((get-in element [:token-panel :render]) props))))))))
@@ -381,6 +441,7 @@
 (defui context-menu-prop [props]
   (let [dispatch (hooks/use-dispatch)
         data     (:data props)
+        idxs     (into [] (map :db/id) data)
         entity   (first data)
         id       (:db/id entity)
         camera   (first (:camera/_selected entity))
@@ -394,8 +455,15 @@
       nil
       ($ context-menu-fn
         {:render-toolbar
-         (fn []
+         (fn [{:keys [selected on-change]}]
            ($ :<>
+             (if (:host props)
+               ($ :button
+                 {:type "button"
+                  :data-selected (= selected :owner)
+                  :data-tooltip "Owner"
+                  :on-click #(on-change :owner)}
+                 ($ icon {:name "person-circle"})))
              ($ :button
                {:type "button"
                 :data-tooltip "Reset size/rotation"
@@ -436,7 +504,12 @@
            ($ :<>
              ($ action-hide
                {:value (every? :object/hidden data)
-                :disabled (not (:host props))
+                :disabled
+                (not (or (:host props)
+                         (every? #(player/authority?
+                                   (:viewer-uuid props) (:host props) (:connected-uuids props)
+                                   (get-in % [:object/owner :player/controller :user/uuid]))
+                                  data)))
                 :on-change
                 (fn []
                   (dispatch :objects/toggle-hidden-selected))})
@@ -458,7 +531,15 @@
                {:on-click
                 (fn []
                   (dispatch :objects/remove-selected))})))}
-        (fn [{:keys []}])))))
+        (fn [{:keys [selected on-change]}]
+          (if (= selected :owner)
+            ($ token-form-owner
+               {:object-type :prop/prop
+                :on-close  #(on-change nil)
+                :on-change #(apply dispatch %1 idxs %&)
+                :values    (fn vs
+                             ([f] (vs f #{}))
+                             ([f init] (into init (map f) data)))})))))))
 
 (def ^:private options-board-rotation-hex
   [["Free" :free] ["15°" 15] ["30°" 30] ["60°" 60] ["90°" 90]])

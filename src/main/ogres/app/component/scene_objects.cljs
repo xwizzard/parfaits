@@ -9,6 +9,7 @@
             [ogres.app.hooks :as hooks]
             [ogres.app.matrix :as matrix]
             [ogres.app.modifiers :as modifiers]
+            [ogres.app.player :as player]
             [ogres.app.segment :as seg :refer [Segment]]
             [ogres.app.util :as util]
             [ogres.app.vec :as vec :refer [Vec2]]
@@ -71,14 +72,38 @@
                   (map (juxt :db/id (constantly user))
                        (:user/dragging user))))))
 
+(defn ^:private object-authority?
+  "Whether the local viewer has visibility authority over `entity` -- the
+   host by default, or its assigned player's connected controller once
+   assigned (see ogres.app.player/authority?)."
+  [viewer-uuid host? connected-uuids entity]
+  (player/authority? viewer-uuid host? connected-uuids
+                      (get-in entity [:object/owner :player/controller :user/uuid])))
+
+(defn ^:private resolve-hidden
+  "Resolves how a token/prop entity should render given whether the
+   viewer is `authorized?` for it: authorized, or not hidden -- render
+   normally, unchanged. Hidden and unauthorized, with a placeholder
+   image set (`alt-key`, e.g. :token/image-alt) -- still render, at its
+   normal position, with `image-key`'s value swapped for the
+   placeholder's (reads as a face-down card, not a ghost). Hidden,
+   unauthorized, no placeholder set -- nil (dropped entirely), the same
+   fully-invisible behavior as before this existed."
+  [entity authorized? image-key alt-key]
+  (cond
+    (or authorized? (not (:object/hidden entity))) entity
+    (some? (get entity alt-key)) (assoc entity image-key (get entity alt-key))
+    :else nil))
+
 (defn ^:private tokens-xf
-  "Defines a transducer which expects a collection of token entities
-   and returns only the elements suitable for rendering given the
-   user type."
-  [host]
-  (filter
+  "Defines a transducer which expects a collection of token entities and
+   returns only the elements suitable for rendering given the viewer's
+   authority over each -- see object-authority?/resolve-hidden."
+  [viewer-uuid host? connected-uuids]
+  (keep
    (fn [token]
-     (or host (not (:object/hidden token))))))
+     (resolve-hidden token (object-authority? viewer-uuid host? connected-uuids token)
+                     :token/image :token/image-alt))))
 
 (defn ^:private use-cursor-point
   "Defines a React state hook which returns a point [Ax Ay] of the
@@ -925,6 +950,7 @@
 (def ^:private query
   [{:root/user
     [:user/host
+     :user/uuid
      [:user/bounds :default seg/zero]
      {:user/camera
       [:db/id
@@ -949,6 +975,8 @@
            [:token/light :default 15]
            [:token/aura-radius :default 0]
            {:token/image [:token-image/url :image/hash :image/public]}
+           {:token/image-alt [:token-image/url :image/hash :image/public]}
+           {:object/owner [:db/id {:player/controller [:user/uuid]}]}
            {:scene/_initiative [:db/id :initiative/turn]}]}
          {:scene/shapes
           [:db/id
@@ -972,6 +1000,12 @@
              [:image/width :default 0]
              [:image/height :default 0]
              :image/anchor]}
+           {:prop/image-alt
+            [:image/hash
+             [:image/width :default 0]
+             [:image/height :default 0]
+             :image/anchor]}
+           {:object/owner [:db/id {:player/controller [:user/uuid]}]}
            {:camera/_selected
             [[:camera/scale :default 1]
              [:camera/draw-mode :default :select]
@@ -1029,6 +1063,7 @@
         result (hooks/use-query query [:db/ident :root])
         {{bounds :user/bounds
           host :user/host
+          uuid :user/uuid
           {point :camera/point
            scale :camera/scale
            selected :camera/selected
@@ -1049,13 +1084,19 @@
         screen (Segment. point (vec/add point (vec/div (.-b (seg/rebase bounds)) scale)))
         selected (into #{} (map :db/id) selected)
         dragging (into {} user-drag-xf conns)
+        connected-uuids (into #{} (map :user/uuid) conns)
         bound-xf
         (comp (filter (comp selected :db/id))
               (map geom/object-bounding-rect)
               (mapcat seq))
         forward? #(= (:object/layer-shift %) :forward)
         back? #(= (:object/layer-shift %) :back)
-        sorted-tokens (sort compare-tokens (sequence (tokens-xf host) tokens))
+        visible? (fn [entity] (or host (not (:object/hidden entity))))
+        sorted-tokens (sort compare-tokens (sequence (tokens-xf uuid host connected-uuids) tokens))
+        resolved-props
+        (into [] (keep #(resolve-hidden % (object-authority? uuid host connected-uuids %)
+                                         :prop/image :prop/image-alt))
+              props)
         board-entities (sort compare-objects board)
         ;; Props/shapes/notes/tokens keep today's relative order, except a
         ;; prop can be individually shifted :forward (above the token
@@ -1064,18 +1105,20 @@
         ;; always render above board-entities regardless (see
         ;; scene.cljs's scene-elements, which portals board-entities and
         ;; this "rest" band to two separately-orderable positions relative
-        ;; to the grid, board always first/bottom).
+        ;; to the grid, board always first/bottom). Tokens/props are
+        ;; already authority-resolved above (sorted-tokens/resolved-props
+        ;; -- either normal, placeholder-swapped, or dropped), so only
+        ;; shapes/notes (no owner concept, still plain host-only) go
+        ;; through `visible?` here.
         rest-entities
         (concat
          (filter back? sorted-tokens)
-         (sort compare-objects (remove forward? props))
-         (sort compare-objects shapes)
-         (sort compare-objects notes)
+         (sort compare-objects (remove forward? resolved-props))
+         (sort compare-objects (filter visible? shapes))
+         (sort compare-objects (filter visible? notes))
          (remove back? sorted-tokens)
-         (filter forward? props))
-        visible? (fn [entity] (or host (not (:object/hidden entity))))
+         (filter forward? resolved-props))
         board-entities (into [] (filter visible?) board-entities)
-        rest-entities (into [] (filter visible?) rest-entities)
         entities (into [] cat [board-entities rest-entities])
         ;; A solo-selected board piece stays rendered in its own board band
         ;; (respecting :scene/grid-order-board) instead of being promoted
@@ -1219,4 +1262,6 @@
                          :data-type (namespace (:object/type (first select)))}
                         ($ context-menu
                           {:data select
-                           :host host})))))))))))))
+                           :host host
+                           :viewer-uuid uuid
+                           :connected-uuids connected-uuids})))))))))))))

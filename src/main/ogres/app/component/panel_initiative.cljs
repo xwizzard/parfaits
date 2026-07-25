@@ -3,10 +3,15 @@
             [ogres.app.component :refer [icon image]]
             [ogres.app.game-type :as game-type]
             [ogres.app.hooks :as hooks]
+            [ogres.app.player :as player]
             [uix.core :as uix :refer [defui $]]))
 
 (def ^:private query
   [:user/host
+   :user/uuid
+   {:root/_user
+    [{:root/session
+      [{:session/conns [:user/uuid]}]}]}
    {:user/camera
     [{:camera/scene
       [:db/id
@@ -24,6 +29,7 @@
          :initiative/suffix
          :initiative/health
          :camera/_selected
+         {:object/owner [{:player/controller [:user/uuid]}]}
          {:token/image
           [:token-image/url
            :image/public
@@ -106,11 +112,15 @@
   [{:keys [context entity]}]
   (let [dispatch (hooks/use-dispatch)
         {host :user/host
+         uuid :user/uuid
          {{curr :initiative/turn
            rnds :initiative/rounds
            went :initiative/played
            game-type-entity :scene/game-type}
           :camera/scene} :user/camera} context
+        connected-uuids
+        (into #{} (map :user/uuid)
+              (:session/conns (:root/session (first (:root/_user context)))))
         enabled-elements (:game-type/enabled-elements game-type-entity #{})
         {id :db/id
          label :token/label
@@ -119,7 +129,9 @@
          {{hash :image/hash} :image/thumbnail} :token/image} entity
         playing (= (:db/id curr) (:db/id entity))
         played (boolean (some #{{:db/id id}} went))
-        hidden (and (not host) (:object/hidden entity))]
+        controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])
+        authorized? (player/authority? uuid host connected-uuids controller-uuid)
+        hidden (and (not authorized?) (:object/hidden entity))]
     ($ :li.initiative-token
       {:data-playing playing
        :data-played played
