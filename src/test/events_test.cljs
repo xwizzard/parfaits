@@ -611,3 +611,114 @@
                  "most visible on the 'vertical' variants because their "
                  "extra 90-degree rotation made the missing correction "
                  "look like an outright reversed drag direction)."))))))
+
+;; --- Cards / Decks ---
+(defn ^:private current-deck [conn]
+  (first (:scene/decks (:camera/scene (:user/camera (user conn))))))
+
+(defn ^:private by-location [deck location]
+  (filter (comp #{location} :card/location) (:deck/cards deck)))
+
+(deftest test-deck-create
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck (current-deck conn)]
+      (is (= (:deck/name deck) "Standard 52-Card Deck"))
+      (is (= (count (:deck/cards deck)) 52)
+          "extras (jokers) are excluded unless asked for")
+      (is (every? (comp #{:draw} :card/location) (:deck/cards deck))
+          "every card starts in the draw pile")
+      (is (= (count (into #{} (map :card/position) (:deck/cards deck))) 52)
+          "every card has a distinct position -- a real shuffle, not ties"))))
+
+(deftest test-deck-create-with-extras
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52 {:include-extras? true})
+    (is (= (count (:deck/cards (current-deck conn))) 54)
+        "the standard 52 plus 2 jokers")))
+
+(deftest test-deck-draw
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dispatch conn :deck/draw deck-id)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (by-location deck :draw)) 51))
+        (is (= (count (by-location deck :discard)) 1))))))
+
+(deftest test-deck-draw-auto-reshuffles-when-draw-pile-empties
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dotimes [_ 52] (dispatch conn :deck/draw deck-id))
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (by-location deck :discard)) 52)
+            "every card has been discarded once")
+        (is (= (count (by-location deck :draw)) 0)))
+      (dispatch conn :deck/draw deck-id)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (by-location deck :draw)) 51)
+            "the empty draw pile auto-reshuffled the discard pile back in,
+             then the draw proceeded, all in one dispatch")
+        (is (= (count (by-location deck :discard)) 1))))))
+
+(deftest test-deck-draw-into-hand
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))
+          host-id (:db/id (user conn))]
+      (dispatch conn :deck/draw deck-id [:hand host-id])
+      (let [deck (entity @conn deck-id)
+            held (first (by-location deck :hand))]
+        (is (some? held) "a card landed in the hand location")
+        (is (= (:db/id (:card/holder held)) host-id))))))
+
+(deftest test-deck-discard
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))
+          host-id (:db/id (user conn))]
+      (dispatch conn :deck/draw deck-id [:hand host-id])
+      (let [held (first (by-location (entity @conn deck-id) :hand))]
+        (dispatch conn :deck/discard (:db/id held))
+        (let [card (entity @conn (:db/id held))]
+          (is (= (:card/location card) :discard))
+          (is (nil? (:card/holder card))
+              "holder is cleared when a card leaves a hand"))))))
+
+(deftest test-deck-deal
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))
+          host-id (:db/id (user conn))]
+      (dispatch conn :deck/deal deck-id [host-id] 5)
+      (let [hand (by-location (entity @conn deck-id) :hand)]
+        (is (= (count hand) 5))
+        (is (every? (comp #{host-id} :db/id :card/holder) hand))))))
+
+(deftest test-deck-reset
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))
+          host-id (:db/id (user conn))]
+      (dispatch conn :deck/deal deck-id [host-id] 5)
+      (dispatch conn :deck/draw deck-id)
+      (dispatch conn :deck/reset deck-id)
+      (let [deck (entity @conn deck-id)]
+        (is (every? (comp #{:draw} :card/location) (:deck/cards deck))
+            "every card -- drawn, discarded, or held -- is back in the draw pile")
+        (is (every? (comp nil? :card/holder) (:deck/cards deck)))
+        (is (= (count (into #{} (map :card/position) (:deck/cards deck))) 52)
+            "freshly shuffled, not just moved with stale positions")))))
+
+(deftest test-deck-remove
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :deck/create :standard-52)
+    (let [deck-id (:db/id (current-deck conn))
+          card-id (:db/id (first (:deck/cards (entity @conn deck-id))))]
+      (dispatch conn :deck/remove deck-id)
+      (is (nil? (:db/id (entity @conn deck-id))) "the deck entity is gone")
+      (is (nil? (:card/location (entity @conn card-id)))
+          "its cards were retracted too, via :deck/cards' isComponent cleanup")
+      (is (empty? (:scene/decks (:camera/scene (:user/camera (user conn)))))))))
+

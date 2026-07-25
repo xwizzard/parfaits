@@ -1,0 +1,78 @@
+.decks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.decks-list-item {
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+}
+
+.decks-list-name {
+  font-weight: 600;
+}
+
+.decks-list-piles {
+  display: flex;
+  gap: 16px;
+}
+
+.decks-list-pile {
+  align-items: center;
+  display: flex;
+}
+
+.decks-card {
+  align-items: center;
+  background-color: var(--color-paper-500);
+  border-radius: 4px;
+  border: 1.5px solid var(--color-blues-900);
+  box-sizing: border-box;
+  color: var(--color-blues-900);
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  height: 44px;
+  justify-content: center;
+  position: relative;
+  width: 32px;
+
+  &[data-back="true"] {
+    background-image: repeating-linear-gradient(
+      45deg,
+      var(--color-blues-700), var(--color-blues-700) 3px,
+      var(--color-blues-500) 3px, var(--color-blues-500) 6px);
+  }
+
+  &[data-empty="true"] {
+    background-color: transparent;
+    border-style: dashed;
+    border-color: var(--color-blues-300);
+  }
+}
+
+.decks-card-rank {
+  font-size: 10px;
+  font-weight: 700;
+  inset: 2px auto auto 3px;
+  line-height: 1;
+  position: absolute;
+}
+
+.decks-card-count {
+  color: var(--color-paper-500);
+  font-size: 14px;
+  font-weight: 700;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+}
+
+.decks-list-buttons {
+  display: flex;
+  gap: 4px;
+}

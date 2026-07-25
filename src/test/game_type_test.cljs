@@ -14,6 +14,19 @@
       ":tool/measurement and :tool/measurement-cells aren't mutually exclusive --
        a game-type can enable either, or both at once."))
 
+(deftest test-cards-registry-entry
+  (is (= (get-in core/elements [:tool/cards :label]) "Cards"))
+  (is (string? (get-in core/elements [:tool/cards :icon]))))
+
+(deftest test-deck-definitions
+  (is (contains? game-type/deck-definitions :standard-52))
+  (let [standard (get game-type/deck-definitions :standard-52)]
+    (is (= (count (:deck/cards standard)) 52))
+    (is (= (count (into #{} (:deck/cards standard))) 52)
+        "all 52 cards are distinct (rank+suit combinations don't repeat)")
+    (is (= (count (:deck/extras standard)) 2)
+        "the standard deck's extras are its 2 jokers")))
+
 (deftest test-grid-tool-id-round-trip
   (doseq [value [:square :hex-pointy :hex-flat
                  :iso-square :iso-hex-pointy :iso-hex-flat

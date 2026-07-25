@@ -1,6 +1,7 @@
 (ns ogres.app.component.panel
   (:require [ogres.app.component :refer [icon]]
             [ogres.app.component.panel-data :as data]
+            [ogres.app.component.panel-decks :as decks]
             [ogres.app.component.panel-game-type-builder :as game-type-builder]
             [ogres.app.component.panel-initiative :as initiative]
             [ogres.app.component.panel-lobby :as lobby]
@@ -59,6 +60,7 @@
    :scene      {:icon "images" :label "Scene options"}
    :tokens     {:icon "pawn" :label "Token images"}
    :props      {:icon "rock" :label "Prop images" :size 26}
+   :decks      {:icon "suit-spade-fill" :label "Decks"}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -68,6 +70,7 @@
    :scene      {:form scene/panel}
    :tokens     {:form tokens/panel :footer tokens/actions}
    :props      {:form props/panel :footer props/actions}
+   :decks      {:form decks/panel :footer decks/actions}
    :game-type-builder {:form game-type-builder/panel}})
 
 (defn ^:private visible-tabs
@@ -83,16 +86,20 @@
    'participates in the turn tracker' flag every game-type starts with
    (see ogres.app.game-type/default-enabled-elements), making turn
    tracking baseline rather than something only specific game modules
-   (e.g. D&D 5e's d20 roll) unlock."
+   (e.g. D&D 5e's d20 roll) unlock. The Decks tab, in both Setup and Play,
+   likewise requires :tool/cards -- the generic card/deck system is opt-in
+   the same way, not enabled by any seeded template yet."
   [host mode enabled-elements]
-  (cond
-    (not host) [:tokens :initiative :lobby]
-    (= mode :builder) [:game-type-builder :data]
-    (= mode :play)
-    (cond-> [:tokens :props :initiative :lobby]
-      (not (contains? enabled-elements :unit/initiative))
-      (->> (remove #{:initiative}) vec))
-    :else [:scene :props :tokens]))
+  (let [cards? (contains? enabled-elements :tool/cards)]
+    (cond
+      (not host) [:tokens :initiative :lobby]
+      (= mode :builder) [:game-type-builder :data]
+      (= mode :play)
+      (into (cond-> [:tokens :props] cards? (conj :decks))
+            (if (contains? enabled-elements :unit/initiative)
+              [:initiative :lobby]
+              [:lobby]))
+      :else (cond-> [:scene :props :tokens] cards? (conj :decks)))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)

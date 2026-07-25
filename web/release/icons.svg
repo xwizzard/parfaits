@@ -356,5 +356,27 @@
 <symbol id="icon-hexagon-flat" viewBox="0 0 32 32">
 <path d="M2,16 L9,28.124 L23,28.124 L30,16 L23,3.876 L9,3.876 Z M5,16 L10.5,25.526 L21.5,25.526 L27,16 L21.5,6.474 L10.5,6.474 Z"></path>
 </symbol>
+<symbol id="icon-suit-club-fill" viewBox="0 0 32 32">
+<circle cx="16" cy="11" r="6.6"></circle>
+<circle cx="10" cy="19.5" r="6.6"></circle>
+<circle cx="22" cy="19.5" r="6.6"></circle>
+<path d="M16,21 L21,31 L11,31 Z"></path>
+</symbol>
+<symbol id="icon-suit-diamond-fill" viewBox="0 0 32 32">
+<path d="M16,2 L26,16 L16,30 L6,16 Z"></path>
+</symbol>
+<symbol id="icon-suit-heart-fill" viewBox="0 0 32 32">
+<path d="M16,27 C16,27 3,17.5 3,9.5 C3,4.8 6.8,2 10.5,2 C13,2 15,3.3 16,6 C17,3.3 19,2 21.5,2 C25.2,2 29,4.8 29,9.5 C29,17.5 16,27 16,27 Z"></path>
+</symbol>
+<symbol id="icon-suit-spade-fill" viewBox="0 0 32 32">
+<path d="M16,3 C16,3 3,14 3,20.5 C3,24 6.2,26.3 9.5,26.3 C12,26.3 14.2,25.1 16,22.5 C17.8,25.1 20,26.3 22.5,26.3 C25.8,26.3 29,24 29,20.5 C29,14 16,3 16,3 Z"></path>
+<path d="M16,24 L20,32 L12,32 Z"></path>
+</symbol>
+<symbol id="icon-joker" viewBox="0 0 32 32">
+<path d="M4,26 L8,10 C10,14 13,16 16,12 C19,16 22,14 24,10 L28,26 Z"></path>
+<circle cx="8" cy="8" r="2.2"></circle>
+<circle cx="16" cy="9" r="2.2"></circle>
+<circle cx="24" cy="8" r="2.2"></circle>
+</symbol>
 </defs>
 </svg>

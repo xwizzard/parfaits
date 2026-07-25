@@ -1,5 +1,6 @@
 (ns ogres.app.events
   (:require [datascript.core :as ds]
+            [ogres.app.cards :as cards]
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
             [ogres.app.const :refer [grid-size hex-radius]]
@@ -1201,6 +1202,149 @@
              [[:db/retract id :initiative/rank]
               [:db/retract id :initiative/health]
               [:db/retract id :initiative/suffix]]))))
+
+;; --- Cards / Decks ---
+(defn ^:private pile
+  "The subset of a (pulled) deck's :deck/cards currently in `location`
+   (:draw, :discard, or :hand)."
+  [deck location]
+  (filter (comp #{location} :card/location) (:deck/cards deck)))
+
+(defn ^:private top-card
+  "The card with the highest :card/position among `cards` -- 'top of the
+   pile' by the same position-as-order-key idiom :initiative/rank uses."
+  [cards]
+  (apply max-key :card/position cards))
+
+(defn ^:private next-position
+  "The position a newly-arriving card should take to land on top of
+   `cards` -- one past the current max, or 0 for an empty pile."
+  [cards]
+  (if (seq cards) (inc (apply max (map :card/position cards))) 0))
+
+(defn ^:private move-card-tx
+  "Tx-data moving one card to `location` at `position`, setting
+   :card/holder when `holder` is given (moving into a hand) or explicitly
+   retracting it otherwise (moving out of one, or it was never set)."
+  [card-id location position holder]
+  (if (some? holder)
+    [{:db/id card-id :card/location location :card/position position :card/holder holder}]
+    [{:db/id card-id :card/location location :card/position position}
+     [:db/retract card-id :card/holder]]))
+
+(defmethod
+  ^{:doc "Creates a new deck instance on the current scene from a
+          registered deck definition (see game-type/deck-definitions),
+          shuffled into its draw pile immediately. Extras (e.g. jokers)
+          are included only when include-extras? is true -- excluded by
+          default, since they're not part of a deck's 'real' count. The
+          optional label overrides the definition's own display name for
+          this particular instance (e.g. distinguishing two decks built
+          from the same template)."}
+  event-tx-fn :deck/create
+  ([data event deck-key]
+   [[:db.fn/call event-tx-fn event deck-key {}]])
+  ([_ _ deck-key {:keys [include-extras? label]}]
+   (let [definition (get game-type/deck-definitions deck-key)
+         cards-data (cond-> (vec (:deck/cards definition))
+                      include-extras? (into (:deck/extras definition)))
+         n (count cards-data)
+         ids (mapv - (range 1 (inc n)))
+         positions (cards/shuffle-positions ids)
+         deck-id (dec (apply min ids))
+         card-tx (map (fn [card id]
+                        (assoc card :db/id id :card/location :draw :card/position (get positions id)))
+                      cards-data ids)]
+     (concat [{:db/id deck-id
+               :deck/name (or label (:deck/name definition))
+               :deck/cards ids}]
+             card-tx
+             [[:db.fn/call assoc-scene :scene/decks deck-id]]))))
+
+(defmethod
+  ^{:doc "Reassigns fresh random positions to every card currently in the
+          given deck's draw pile -- discard and any hands are untouched.
+          :deck/create already shuffles a fresh deck, so this is for
+          re-shuffling later (e.g. a manual 'reshuffle' action)."}
+  event-tx-fn :deck/shuffle
+  [data _ deck-id]
+  (let [deck (ds/entity data deck-id)
+        ids (map :db/id (pile deck :draw))
+        positions (cards/shuffle-positions ids)]
+    (for [id ids] {:db/id id :card/position (get positions id)})))
+
+(defmethod
+  ^{:doc "Draws the top card of the given deck's draw pile to `target` --
+          :discard (default) or [:hand holder-id]. If the draw pile is
+          empty and the discard pile has cards to reclaim (see
+          ogres.app.cards/needs-reshuffle?), reshuffles the whole discard
+          pile back into the draw pile first, then draws from that in the
+          same transaction -- this default rule (reshuffle only once the
+          draw pile is truly empty) is the seam a later Gloomhaven-
+          specific rule (reshuffle triggered early by a flagged card)
+          would replace. A no-op if there's truly nothing left to draw."}
+  event-tx-fn :deck/draw
+  ([data event deck-id]
+   [[:db.fn/call event-tx-fn event deck-id :discard]])
+  ([data _ deck-id target]
+   (let [deck (ds/entity data deck-id)
+         draw (pile deck :draw)
+         discard (pile deck :discard)]
+     (cond
+       (cards/needs-reshuffle? draw discard)
+       (let [ids (map :db/id discard)
+             positions (cards/shuffle-positions ids)]
+         (concat
+          (for [id ids] {:db/id id :card/location :draw :card/position (get positions id)})
+          [[:db.fn/call event-tx-fn :deck/draw deck-id target]]))
+
+       (seq draw)
+       (let [top (:db/id (top-card draw))
+             [location holder] (if (vector? target) [:hand (second target)] [target nil])
+             dest (pile deck location)
+             dest (if holder (filter (comp #{holder} :db/id :card/holder) dest) dest)]
+         (move-card-tx top location (next-position dest) holder))
+
+       :else []))))
+
+(defmethod
+  ^{:doc "Moves one card (typically drawn into a hand earlier) to its own
+          deck's discard pile, on top."}
+  event-tx-fn :deck/discard
+  [data _ card-id]
+  (let [card (ds/entity data card-id)
+        deck (first (:deck/_cards card))]
+    (move-card-tx card-id :discard (next-position (pile deck :discard)) nil)))
+
+(defmethod
+  ^{:doc "Draws n cards into each of the given holders' hands, one
+          transaction -- wraps the same draw logic :deck/draw uses,
+          batched across every holder."}
+  event-tx-fn :deck/deal
+  [_ _ deck-id holder-ids n]
+  (apply concat
+         (for [holder-id holder-ids _ (range n)]
+           [[:db.fn/call event-tx-fn :deck/draw deck-id [:hand holder-id]]])))
+
+(defmethod
+  ^{:doc "Moves every card (draw + discard + every hand) for the given
+          deck back to a freshly-shuffled draw pile -- a 'start over'
+          action."}
+  event-tx-fn :deck/reset
+  [data _ deck-id]
+  (let [deck (ds/entity data deck-id)
+        ids (map :db/id (:deck/cards deck))
+        positions (cards/shuffle-positions ids)]
+    (into [] (mapcat (fn [id] (move-card-tx id :draw (get positions id) nil))) ids)))
+
+(defmethod
+  ^{:doc "Removes the given deck instance and all its cards (isComponent
+          cleanup, same as removing any other owned collection in this
+          schema)."}
+  event-tx-fn :deck/remove
+  [_ _ deck-id]
+  [[:db/retractEntity deck-id]])
+
 
 ;; --- Token Images ---
 (defmethod event-tx-fn :token-images/create-many

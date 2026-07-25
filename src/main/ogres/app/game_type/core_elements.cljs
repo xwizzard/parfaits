@@ -56,6 +56,11 @@
    :tool/measurement-cells {:label "Cell Measurement" :icon "square-cell"}
    :tool/mask        {:label "Masking" :icon "eye-slash-fill"}
    :tool/shapes      {:label "Shape drawing" :icon "triangle"}
+   ;; Gates the Decks panel/tab -- the generic card/deck system (see
+   ;; ogres.app.cards, game-type/core-decks.cljs, and events.cljs's
+   ;; :deck/* methods). Not enabled by any seeded template yet; proven by
+   ;; a Standard 52-card deck any game-type can opt into via the Builder.
+   :tool/cards       {:label "Cards" :icon "suit-spade-fill"}
 
    ;; One entry per concrete :scene/grid-type value (see
    ;; component/panel_scene.cljs's `options-grid-type`, which this mirrors

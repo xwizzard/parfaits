@@ -14,7 +14,9 @@
   {:board/image          {:db/valueType :db.type/ref}
    :camera/scene         {:db/valueType :db.type/ref}
    :camera/selected      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :card/holder          {:db/valueType :db.type/ref}
    :db/ident             {:db/unique :db.unique/identity}
+   :deck/cards           {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :game-type/key        {:db/unique :db.unique/identity}
    :image/hash           {:db/unique :db.unique/identity}
    :image/thumbnail      {:db/valueType :db.type/ref :db/isComponent true}
@@ -33,6 +35,7 @@
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/tokens         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/notes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/props          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}

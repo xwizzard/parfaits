@@ -9,12 +9,22 @@
    they're consumed generically via the :initiative-panel/:token-panel/
    :token-badge keys an element may declare)."
   (:require [clojure.string :refer [capitalize]]
+            [ogres.app.game-type.core-decks :as core-decks]
             [ogres.app.game-type.core-elements :as core]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]))
 
 (def elements
   (merge core/elements dnd5e/elements gloomhaven/elements))
+
+(def deck-definitions
+  "Every registered card-deck template, keyed by its own id (e.g.
+   :standard-52) -- gated behind the :tool/cards element (see
+   core-elements.cljs), not any single game-type. A single-source merge
+   today; a future game module contributing its own deck (Gloomhaven's
+   monster ability decks, say) is added to this merge the same way a game
+   module's `elements` map is added above, no other file changes needed."
+  (merge core-decks/definitions))
 
 (def game-labels
   "Display name for each contributing game module's element-id namespace,
@@ -93,9 +103,15 @@
    D&D-only): Gloomhaven's own turn order comes from drawn initiative
    cards, not a d20 roll, so this template just leaves the base
    manually-assigned order as-is rather than pretending the d20 mechanic
-   fits. Building Gloomhaven's own card-draw element (or Catan-style
-   clockwise seating, or Root's nested sub-turn groups) is out of scope
-   for this pass, but each could plug into the exact same
+   fits. The generic card/deck system now exists (:tool/cards, see
+   core-elements.cljs, core-decks.cljs, and events.cljs's :deck/*
+   methods) -- proven here by a Standard 52-card deck available to any
+   game-type -- but this template doesn't enable it by default yet:
+   Gloomhaven's own monster ability-deck *content* (and its
+   reshuffle-on-a-flagged-card rule, layered on the
+   `ogres.app.cards/needs-reshuffle?` seam) is still out of scope for this
+   pass. Catan-style clockwise seating or Root's nested sub-turn groups
+   remain open turn-order ideas too. Each could plug into the exact same
    :initiative-panel/:initiative-actions mechanism D&D's module already
    proves out -- demonstrating that two real games legitimately want
    different subsets of the same shared primitives, decided here in
