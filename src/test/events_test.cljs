@@ -722,3 +722,124 @@
           "its cards were retracted too, via :deck/cards' isComponent cleanup")
       (is (empty? (:scene/decks (:camera/scene (:user/camera (user conn)))))))))
 
+;; --- Players ---
+(defn ^:private root-players [conn]
+  (:root/players (root conn)))
+
+(deftest test-player-create
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (let [player (first (root-players conn))]
+      (is (= (:player/name player) "Player 1"))
+      (is (= (:player/kind player) :human))
+      (is (= (:player/color player) "red") "the first human palette color")
+      (is (:player/active player) "created active by default"))))
+
+(deftest test-player-create-npc-uses-muted-palette
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :npc)
+    (let [player (first (root-players conn))]
+      (is (= (:player/color player) "npc-red")
+          "NPCs draw from their own disjoint, muted palette"))))
+
+(deftest test-player-create-per-kind-numbering
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :npc)
+    (let [names (into #{} (map :player/name) (root-players conn))]
+      (is (= names #{"Player 1" "Player 2" "NPC 1"})
+          "each kind numbers independently, not globally"))))
+
+(deftest test-player-create-color-skips-taken-within-kind
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :npc)
+    (let [players (root-players conn)
+          humans (into [] (map :player/color) (filter (comp #{:human} :player/kind) players))
+          npcs (into [] (map :player/color) (filter (comp #{:npc} :player/kind) players))]
+      (is (= (set humans) #{"red" "blue"})
+          "two humans never start with the same color")
+      (is (= npcs ["npc-red"])
+          "an NPC's color comes from its own pool, unaffected by human colors taken"))))
+
+(deftest test-player-change-color-rejects-conflict-within-kind
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[a b] (root-players conn)]
+      (dispatch conn :player/change-color (:db/id b) (:player/color a))
+      (is (not= (:player/color (entity @conn (:db/id b))) (:player/color a))
+          "changing to a color another same-kind player already has is a no-op")
+      (dispatch conn :player/change-color (:db/id b) "teal")
+      (is (= (:player/color (entity @conn (:db/id b))) "teal")
+          "changing to a genuinely free color succeeds"))))
+
+(deftest test-player-rename
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (let [id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/rename id "Aramis")
+      (is (= (:player/name (entity @conn id)) "Aramis")))))
+
+(deftest test-player-change-kind-reassigns-color
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (let [id (:db/id (first (root-players conn)))]
+      (is (= (:player/color (entity @conn id)) "red"))
+      (dispatch conn :player/change-kind id :npc)
+      (is (= (:player/kind (entity @conn id)) :npc))
+      (is (= (:player/color (entity @conn id)) "npc-red")
+          "switching kind reassigns a color from the new kind's own palette"))))
+
+(deftest test-player-change-kind-noop-when-unchanged
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (let [id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/change-kind id :human)
+      (is (= (:player/color (entity @conn id)) "red")
+          "no-op when the kind doesn't actually change -- color untouched"))))
+
+(deftest test-player-set-active
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (let [id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/set-active id false)
+      (is (false? (:player/active (entity @conn id))) "benched")
+      (is (= (:player/color (entity @conn id)) "red") "color untouched while benched")
+      (dispatch conn :player/set-active id true)
+      (is (:player/active (entity @conn id)) "restored")
+      (is (= (:player/name (entity @conn id)) "Player 1") "name untouched"))))
+
+(deftest test-player-create-color-reserved-when-benched
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (let [id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/set-active id false)
+      (dispatch conn :player/create :human)
+      (let [colors (into #{} (map :player/color) (root-players conn))]
+        (is (= colors #{"red" "blue"})
+            "a benched player's color still counts as taken for a new player")))))
+
+(deftest test-player-remove
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :npc)
+    (let [[a b] (root-players conn)]
+      (dispatch conn :player/remove (:db/id a))
+      (is (nil? (:db/id (entity @conn (:db/id a)))) "the removed player entity is gone")
+      (is (= (into #{} (map :db/id) (root-players conn)) #{(:db/id b)})
+          "the other player is untouched")
+      (dispatch conn :player/create :human)
+      (is (= (:player/color (first (filter (comp #{:human} :player/kind) (root-players conn))))
+             "red")
+          "the removed player's color is available again for a new one"))))
+
+(deftest test-player-roster-global-across-scenes
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :scenes/create)
+    (is (= (count (root-players conn)) 1)
+        "the roster is shared -- creating a new scene doesn't reset or duplicate it")))
+

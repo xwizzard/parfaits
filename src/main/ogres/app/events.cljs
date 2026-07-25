@@ -1,6 +1,7 @@
 (ns ogres.app.events
   (:require [datascript.core :as ds]
             [ogres.app.cards :as cards]
+            [ogres.app.player :as player]
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
             [ogres.app.const :refer [grid-size hex-radius]]
@@ -1344,6 +1345,96 @@
   event-tx-fn :deck/remove
   [_ _ deck-id]
   [[:db/retractEntity deck-id]])
+
+
+;; --- Players ---
+(defmethod
+  ^{:doc "Creates a new player or NPC (kind is :human or :npc) on the
+          global roster (:root/players, shared across every scene). Name
+          is auto-assigned as 'Player N'/'NPC N' (N one more than however
+          many same-kind participants already exist, so numbering is
+          per-kind); color is auto-assigned as the first color from the
+          kind's own palette (ogres.app.player/colors-for-kind -- humans
+          and NPCs draw from two disjoint palettes, see player.cljs) not
+          already used by another participant of the same kind, active or
+          benched (a benched player's color stays reserved), via
+          ogres.app.player/next-color -- the same
+          first-available-color-at-connect-time idea
+          provider.session/next-color already uses for connected users'
+          cursor colors, just applied to a persistent roster instead."}
+  event-tx-fn :player/create
+  [data _ kind]
+  (let [root (ds/entity data [:db/ident :root])
+        existing (:root/players root)
+        same-kind (filter (comp #{kind} :player/kind) existing)
+        taken (into #{} (map :player/color) same-kind)]
+    [{:db/ident :root
+      :root/players
+      [{:player/name (str (if (= kind :npc) "NPC" "Player") " " (inc (count same-kind)))
+        :player/kind kind
+        :player/color (player/next-color (player/colors-for-kind kind) taken)
+        :player/active true}]}]))
+
+(defmethod
+  ^{:doc "Renames the given player/NPC."}
+  event-tx-fn :player/rename
+  [_ _ player-id name]
+  [{:db/id player-id :player/name name}])
+
+(defmethod
+  ^{:doc "Sets the given player/NPC's color, unless another participant of
+          the same kind on the roster (active or benched) already has it
+          -- a no-op in that case. Humans and NPCs draw from disjoint
+          palettes (ogres.app.player/colors-for-kind), so only same-kind
+          participants can ever conflict. The roster UI also disables
+          already-taken swatches, but this enforces the color-exclusivity
+          invariant regardless of caller, the same spirit as
+          :game-type/toggle-element's :exclusive-group handling."}
+  event-tx-fn :player/change-color
+  [data _ player-id color]
+  (let [entity (ds/entity data player-id)
+        root (ds/entity data [:db/ident :root])
+        same-kind (filter (comp #{(:player/kind entity)} :player/kind) (:root/players root))
+        taken-by-other
+        (some #(and (= (:player/color %) color) (not= (:db/id %) player-id)) same-kind)]
+    (if taken-by-other [] [{:db/id player-id :player/color color}])))
+
+(defmethod
+  ^{:doc "Sets the given player/NPC's kind (:human or :npc). Humans and
+          NPCs draw from disjoint color palettes
+          (ogres.app.player/colors-for-kind), so a kind change also
+          reassigns color to the first available color in the new kind's
+          palette (same reservation rule as :player/create, scanning
+          active and benched participants of the new kind) -- the old
+          color would otherwise be meaningless (or, worse, collide) in
+          the new palette. A no-op if `kind` matches the current kind."}
+  event-tx-fn :player/change-kind
+  [data _ player-id kind]
+  (let [entity (ds/entity data player-id)]
+    (if (= kind (:player/kind entity))
+      []
+      (let [root (ds/entity data [:db/ident :root])
+            same-kind (filter (comp #{kind} :player/kind) (:root/players root))
+            taken (into #{} (map :player/color) same-kind)]
+        [{:db/id player-id
+          :player/kind kind
+          :player/color (player/next-color (player/colors-for-kind kind) taken)}]))))
+
+(defmethod
+  ^{:doc "Takes the given player/NPC out of active play (active? false) or
+          restores them (active? true), without deleting the roster
+          entry. Their name, kind, and color are untouched and the color
+          stays reserved either way -- this is the reversible 'bench/
+          restore' action, distinct from the permanent :player/remove."}
+  event-tx-fn :player/set-active
+  [_ _ player-id active?]
+  [{:db/id player-id :player/active active?}])
+
+(defmethod
+  ^{:doc "Removes the given player/NPC permanently."}
+  event-tx-fn :player/remove
+  [_ _ player-id]
+  [[:db/retractEntity player-id]])
 
 
 ;; --- Token Images ---

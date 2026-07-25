@@ -243,6 +243,7 @@
   --color-stone-950: oklch(0.147 0.004 49.25);
   --color-black: #000;
   --color-white: #fff;
+  --color-brown: #8b5e3c;
 }
 
 [data-color="red"] {
@@ -339,4 +340,60 @@
 
 [data-color="black"] {
   --color-context: var(--color-black);
+}
+
+[data-color="brown"] {
+  --color-context: var(--color-brown);
+}
+
+[data-color="dark-green"] {
+  --color-context: var(--color-green-800);
+}
+
+[data-color="npc-red"] {
+  --color-context: var(--color-red-800);
+}
+
+[data-color="npc-orange"] {
+  --color-context: var(--color-orange-800);
+}
+
+[data-color="npc-yellow"] {
+  --color-context: var(--color-yellow-800);
+}
+
+[data-color="npc-green"] {
+  --color-context: var(--color-green-900);
+}
+
+[data-color="npc-teal"] {
+  --color-context: var(--color-teal-800);
+}
+
+[data-color="npc-sky"] {
+  --color-context: var(--color-sky-800);
+}
+
+[data-color="npc-blue"] {
+  --color-context: var(--color-blue-800);
+}
+
+[data-color="npc-purple"] {
+  --color-context: var(--color-purple-800);
+}
+
+[data-color="npc-pink"] {
+  --color-context: var(--color-pink-800);
+}
+
+[data-color="npc-gray"] {
+  --color-context: var(--color-gray-800);
+}
+
+[data-color="npc-slate"] {
+  --color-context: var(--color-slate-700);
+}
+
+[data-color="npc-stone"] {
+  --color-context: var(--color-stone-700);
 }

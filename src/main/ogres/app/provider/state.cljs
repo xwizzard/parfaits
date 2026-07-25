@@ -23,6 +23,7 @@
    :initiative/played    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :initiative/turn      {:db/valueType :db.type/ref}
    :prop/image           {:db/valueType :db.type/ref}
+   :root/players         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/game-types      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scene-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scenes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}

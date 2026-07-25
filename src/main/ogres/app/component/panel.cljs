@@ -5,6 +5,7 @@
             [ogres.app.component.panel-game-type-builder :as game-type-builder]
             [ogres.app.component.panel-initiative :as initiative]
             [ogres.app.component.panel-lobby :as lobby]
+            [ogres.app.component.panel-roster :as roster]
             [ogres.app.component.panel-scene :as scene]
             [ogres.app.component.panel-tokens :as tokens]
             [ogres.app.component.panel-props :as props]
@@ -61,6 +62,7 @@
    :tokens     {:icon "pawn" :label "Token images"}
    :props      {:icon "rock" :label "Prop images" :size 26}
    :decks      {:icon "suit-spade-fill" :label "Decks"}
+   :roster     {:icon "person-circle" :label "Players"}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -71,6 +73,7 @@
    :tokens     {:form tokens/panel :footer tokens/actions}
    :props      {:form props/panel :footer props/actions}
    :decks      {:form decks/panel :footer decks/actions}
+   :roster     {:form roster/panel :footer roster/actions}
    :game-type-builder {:form game-type-builder/panel}})
 
 (defn ^:private visible-tabs
@@ -88,18 +91,20 @@
    tracking baseline rather than something only specific game modules
    (e.g. D&D 5e's d20 roll) unlock. The Decks tab, in both Setup and Play,
    likewise requires :tool/cards -- the generic card/deck system is opt-in
-   the same way, not enabled by any seeded template yet."
+   the same way, not enabled by any seeded template yet. The Players
+   (roster) tab is baseline like Tokens/Props -- no gating element,
+   host-only (roster management is a GM/setup concern, same as Scene)."
   [host mode enabled-elements]
   (let [cards? (contains? enabled-elements :tool/cards)]
     (cond
       (not host) [:tokens :initiative :lobby]
       (= mode :builder) [:game-type-builder :data]
       (= mode :play)
-      (into (cond-> [:tokens :props] cards? (conj :decks))
+      (into (cond-> [:tokens :roster :props] cards? (conj :decks))
             (if (contains? enabled-elements :unit/initiative)
               [:initiative :lobby]
               [:lobby]))
-      :else (cond-> [:scene :props :tokens] cards? (conj :decks)))))
+      :else (cond-> [:scene :props :tokens :roster] cards? (conj :decks)))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)
