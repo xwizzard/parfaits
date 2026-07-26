@@ -37,6 +37,7 @@
    :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/game-type      {:db/valueType :db.type/ref}
+   :scene/go-fish-deck   {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
@@ -57,15 +58,16 @@
 (def ^:private seed-game-types
   "Idempotent tx-data (keyed by the unique :game-type/key) that seeds the
    bundled starter game-types -- 'Default' (the bare universal element set),
-   plus 'D&D 5e'/'Gloomhaven'/'Memory' as curated templates demonstrating
-   the pluggable game-module framework (see `ogres.app.game-type`). Re-
-   transacting this on every boot is a safe upsert, not a duplicate, so a
-   database saved before a given template existed still gets it added.
-   'Memory' also carries a :game-type/category \"card\" -- a plain,
-   unregistered string used purely to group the Game Builder's template
-   picker (see panel_game_type_builder.cljs), not part of the
-   element/enabled-elements toggle system at all; Default/D&D 5e/
-   Gloomhaven are deliberately left uncategorized."
+   plus 'D&D 5e'/'Gloomhaven'/'Memory'/'Go Fish' as curated templates
+   demonstrating the pluggable game-module framework (see
+   `ogres.app.game-type`). Re-transacting this on every boot is a safe
+   upsert, not a duplicate, so a database saved before a given template
+   existed still gets it added. 'Memory' and 'Go Fish' also carry a
+   :game-type/category \"card\" -- a plain, unregistered string used
+   purely to group the Game Builder's template picker (see
+   panel_game_type_builder.cljs), not part of the element/enabled-
+   elements toggle system at all; Default/D&D 5e/Gloomhaven are
+   deliberately left uncategorized."
   [{:db/id [:db/ident :root]
     :root/game-types [{:game-type/key :default
                         :game-type/name "Default"
@@ -79,7 +81,11 @@
                        {:game-type/key :memory
                         :game-type/name "Memory"
                         :game-type/category "card"
-                        :game-type/enabled-elements game-type/memory-enabled-elements}]}])
+                        :game-type/enabled-elements game-type/memory-enabled-elements}
+                       {:game-type/key :go-fish
+                        :game-type/name "Go Fish"
+                        :game-type/category "card"
+                        :game-type/enabled-elements game-type/go-fish-enabled-elements}]}])
 
 (def ^:private card-back-svg
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 280'><rect width='200' height='280' rx='14' fill='#2c3e50'/><rect x='10' y='10' width='180' height='260' rx='8' fill='none' stroke='#ecf0f1' stroke-width='4'/><path d='M20,20 L180,260 M180,20 L20,260' stroke='#ecf0f1' stroke-width='2' opacity='0.4'/></svg>")
@@ -163,7 +169,12 @@
     [:db/add -9 :game-type/key :memory]
     [:db/add -9 :game-type/name "Memory"]
     [:db/add -9 :game-type/category "card"]
-    [:db/add -9 :game-type/enabled-elements game-type/memory-enabled-elements]]
+    [:db/add -9 :game-type/enabled-elements game-type/memory-enabled-elements]
+    [:db/add -1 :root/game-types -10]
+    [:db/add -10 :game-type/key :go-fish]
+    [:db/add -10 :game-type/name "Go Fish"]
+    [:db/add -10 :game-type/category "card"]
+    [:db/add -10 :game-type/enabled-elements game-type/go-fish-enabled-elements]]
     seed-props-images)))
 
 (def context (uix/create-context))

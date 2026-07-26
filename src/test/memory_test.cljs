@@ -11,32 +11,6 @@
     (testing "every card lands at a distinct grid position"
       (is (= (count (into #{} (map :point) cards)) 44)))))
 
-(deftest test-valid-turn-index
-  (testing "the given index, when its player is active"
-    (is (= (memory/valid-turn-index [:a :b :c] (constantly true) 1) 1)))
-  (testing "skips forward past a benched/nonexistent player"
-    (is (= (memory/valid-turn-index [:a :b :c] #{:a :c} 1) 2)))
-  (testing "wraps around to find the next active player"
-    (is (= (memory/valid-turn-index [:a :b :c] #{:a} 1) 0)))
-  (testing "nil when no player qualifies"
-    (is (nil? (memory/valid-turn-index [:a :b :c] (constantly false) 0))))
-  (testing "nil for an empty player list"
-    (is (nil? (memory/valid-turn-index [] (constantly true) 0)))))
-
-(deftest test-next-turn-index
-  (is (= (memory/next-turn-index [:a :b :c] (constantly true) 0) 1))
-  (is (= (memory/next-turn-index [:a :b :c] (constantly true) 1) 2))
-  (is (= (memory/next-turn-index [:a :b :c] (constantly true) 2) 0)
-      "wraps back to the first player")
-  (testing "skips a benched player found while advancing"
-    (is (= (memory/next-turn-index [:a :b :c] #{:a :c} 0) 2)))
-  (testing "nil when every player is benched/removed"
-    (is (nil? (memory/next-turn-index [:a :b :c] (constantly false) 0)))))
-
-(deftest test-winners
-  (testing "a single winner"
-    (is (= (memory/winners {1 3 2 1 3 0}) #{1})))
-  (testing "a tie -- every player at the max score"
-    (is (= (memory/winners {1 2 2 2 3 1}) #{1 2})))
-  (testing "no scores -- no winners"
-    (is (= (memory/winners {}) #{}))))
+;; valid-turn-index/next-turn-index/winners moved to
+;; ogres.app.turn-order (see turn_order_test.cljs) once Go Fish needed
+;; the identical, already-generic logic.

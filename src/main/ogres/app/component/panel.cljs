@@ -3,6 +3,7 @@
             [ogres.app.component.panel-data :as data]
             [ogres.app.component.panel-decks :as decks]
             [ogres.app.component.panel-game-type-builder :as game-type-builder]
+            [ogres.app.component.panel-go-fish :as go-fish]
             [ogres.app.component.panel-initiative :as initiative]
             [ogres.app.component.panel-lobby :as lobby]
             [ogres.app.component.panel-memory :as memory]
@@ -65,6 +66,7 @@
    :decks      {:icon "suit-spade-fill" :label "Decks"}
    :roster     {:icon "person-circle" :label "Players"}
    :memory     {:icon "card-front" :label "Memory"}
+   :go-fish    {:icon "suit-heart-fill" :label "Go Fish"}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -77,6 +79,7 @@
    :decks      {:form decks/panel :footer decks/actions}
    :roster     {:form roster/panel :footer roster/actions}
    :memory     {:form memory/panel :footer memory/actions}
+   :go-fish    {:form go-fish/panel :footer go-fish/actions}
    :game-type-builder {:form game-type-builder/panel}})
 
 (defn ^:private visible-tabs
@@ -97,26 +100,28 @@
    the same way, not enabled by any seeded template yet. The Players
    (roster) tab is baseline like Tokens/Props -- no gating element,
    host-only (roster management is a GM/setup concern, same as Scene).
-   The Memory tab -- the example game built on top of the generic prop-
-   copy/shared-toggle mechanism -- is gated the same way Decks is,
-   behind its own :memory/game element (see
-   game-type/games/memory.cljs), true for the seeded 'Memory' template
-   and any custom template that enables it. Unlike Roster it's visible
-   to guests as well: seeing turn order and scores, and flipping cards
-   on your own turn, is exactly what every connected participant needs,
-   not just the host."
+   The Memory and Go Fish tabs -- example games built on the generic
+   prop-copy/shared-toggle and card/deck-hand mechanisms respectively
+   -- are gated the same way Decks is, behind their own :memory/game/
+   :go-fish/game elements (see game-type/games/memory.cljs and
+   game-type/games/go-fish.cljs), true for their seeded templates and
+   any custom template that enables them. Unlike Roster, both are
+   visible to guests as well: seeing turn order and scores, and acting
+   on your own turn, is exactly what every connected participant
+   needs, not just the host."
   [host mode enabled-elements]
-  (let [cards?  (contains? enabled-elements :tool/cards)
-        memory? (contains? enabled-elements :memory/game)]
+  (let [cards?   (contains? enabled-elements :tool/cards)
+        memory?  (contains? enabled-elements :memory/game)
+        go-fish? (contains? enabled-elements :go-fish/game)]
     (cond
-      (not host) (cond-> [:tokens :initiative :lobby] memory? (conj :memory))
+      (not host) (cond-> [:tokens :initiative :lobby] memory? (conj :memory) go-fish? (conj :go-fish))
       (= mode :builder) [:game-type-builder :data]
       (= mode :play)
-      (into (cond-> [:tokens :roster :props] cards? (conj :decks) memory? (conj :memory))
+      (into (cond-> [:tokens :roster :props] cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish))
             (if (contains? enabled-elements :unit/initiative)
               [:initiative :lobby]
               [:lobby]))
-      :else (cond-> [:scene :props :tokens :roster] cards? (conj :decks) memory? (conj :memory)))))
+      :else (cond-> [:scene :props :tokens :roster] cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish)))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)

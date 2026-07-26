@@ -8,7 +8,12 @@
 
    A card belongs to the current game iff its :object/variables map
    has a :memory/value key -- there's no separate 'session id' since
-   this is a single-game-per-scene v1 (see the plan's scope cuts)."
+   this is a single-game-per-scene v1 (see the plan's scope cuts).
+
+   The turn-cycle/winner logic every such game needs lives in
+   ogres.app.turn-order, not here -- see events.cljs's :memory/* and
+   component/panel_memory.cljs for how this namespace and that one
+   compose."
   (:require [ogres.app.props :as props]
             [ogres.app.vec :refer [Vec2]]))
 
@@ -43,36 +48,3 @@
          {:memory/value value :point (Vec2. dx dy)}))
      values)))
 
-(defn valid-turn-index
-  "The first index at or after `idx` (wrapping through `players`, trying
-   at most (count players) positions) whose player-id satisfies
-   `active?` -- or nil if none do. Lets the turn cycle skip over
-   benched/removed players without resizing or renumbering `players`
-   itself; a re-activated player naturally rejoins at their original
-   seat next time the cycle reaches them."
-  [players active? idx]
-  (let [n (count players)]
-    (when (pos? n)
-      (loop [i 0]
-        (when (< i n)
-          (let [candidate (mod (+ idx i) n)]
-            (if (active? (nth players candidate))
-              candidate
-              (recur (inc i)))))))))
-
-(defn next-turn-index
-  "The turn index that follows `turn-index` in `players`' wrapping turn
-   cycle, skipping forward past anyone `active?` now rejects -- nil if
-   no one qualifies (e.g. every player benched at once)."
-  [players active? turn-index]
-  (valid-turn-index players active? (mod (inc turn-index) (count players))))
-
-(defn winners
-  "The set of player-ids tied for the highest score in `scores` (a
-   {player-id count} map) -- empty if scores is empty. More than one
-   id means a tie."
-  [scores]
-  (if (seq scores)
-    (let [maximum (apply max (vals scores))]
-      (into #{} (comp (filter (comp #{maximum} val)) (map key)) scores))
-    #{}))

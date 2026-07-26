@@ -6,12 +6,14 @@
             [ogres.app.const :refer [grid-size hex-radius]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
+            [ogres.app.go-fish :as go-fish]
             [ogres.app.matrix :as matrix]
             [ogres.app.memory :as memory]
             [ogres.app.player :as player]
             [ogres.app.props :as props]
             [ogres.app.provider.state :as state]
             [ogres.app.segment :as seg]
+            [ogres.app.turn-order :as turn-order]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
 (def ^:private suffix-max-xf
@@ -1366,6 +1368,62 @@
     [{:db/id card-id :card/location location :card/position position}
      [:db/retract card-id :card/holder]]))
 
+(defn ^:private deck-create-tx
+  "Tx-data (paired with the deck's own :db/id, as [deck-id tx-data])
+   creating a new deck instance from a registered definition (see
+   game-type/deck-definitions), shuffled into its draw pile immediately
+   -- the core of :deck/create, factored out as a plain function (not
+   an event-tx-fn) so another event that needs to create a deck AND
+   immediately reference its :db/id within its OWN single transaction
+   (e.g. :go-fish/start dealing hands from the deck it just created)
+   can call it directly and get the id back synchronously, rather than
+   going through :deck/create's own opaque :db.fn/call indirection.
+   Extras (e.g. jokers) are included only when include-extras? is true
+   -- excluded by default, since they're not part of a deck's 'real'
+   count. The optional label overrides the definition's own display
+   name for this particular instance (e.g. distinguishing two decks
+   built from the same template)."
+  [deck-key {:keys [include-extras? label]}]
+  (let [definition (get game-type/deck-definitions deck-key)
+        cards-data (cond-> (vec (:deck/cards definition))
+                     include-extras? (into (:deck/extras definition)))
+        n (count cards-data)
+        ids (mapv - (range 1 (inc n)))
+        positions (cards/shuffle-positions ids)
+        deck-id (dec (apply min ids))
+        card-tx (map (fn [card id]
+                       (assoc card :db/id id :card/location :draw :card/position (get positions id)))
+                     cards-data ids)]
+    [deck-id
+     (concat [{:db/id deck-id
+               :deck/name (or label (:deck/name definition))
+               :deck/cards ids}]
+             card-tx)]))
+
+(defn ^:private deal-tx
+  "Tx-data dealing `n` cards to each of `holder-ids`, taken from the top
+   (highest :card/position) of `cards` -- a deck's own just-generated,
+   not-yet-committed card tx-data (see deck-create-tx), NOT a deck
+   already resolved in `data`. This exists specifically because a
+   freshly created deck's :db/id is still a temp id at this point in
+   the same transaction -- ds/entity (which :deck/draw/:deck/deal both
+   need to re-read the CURRENT draw pile) can't resolve a temp id, only
+   a real one, so routing a fresh deck's initial deal through those
+   events would fail. Building the deal directly from `cards` (plain
+   Clojure data already in hand, no db read needed) sidesteps that
+   entirely -- used by :go-fish/start, not needed by :deck/create
+   itself (which never deals on creation)."
+  [cards holder-ids n]
+  (let [ordered (sort-by :card/position > cards)]
+    (mapcat (fn [holder-id batch]
+              (map-indexed
+               (fn [i card]
+                 {:db/id (:db/id card) :card/location :hand
+                  :card/holder holder-id :card/position i})
+               batch))
+            holder-ids
+            (partition n ordered))))
+
 (defmethod
   ^{:doc "Creates a new deck instance on the current scene from a
           registered deck definition (see game-type/deck-definitions),
@@ -1378,22 +1436,9 @@
   event-tx-fn :deck/create
   ([data event deck-key]
    [[:db.fn/call event-tx-fn event deck-key {}]])
-  ([_ _ deck-key {:keys [include-extras? label]}]
-   (let [definition (get game-type/deck-definitions deck-key)
-         cards-data (cond-> (vec (:deck/cards definition))
-                      include-extras? (into (:deck/extras definition)))
-         n (count cards-data)
-         ids (mapv - (range 1 (inc n)))
-         positions (cards/shuffle-positions ids)
-         deck-id (dec (apply min ids))
-         card-tx (map (fn [card id]
-                        (assoc card :db/id id :card/location :draw :card/position (get positions id)))
-                      cards-data ids)]
-     (concat [{:db/id deck-id
-               :deck/name (or label (:deck/name definition))
-               :deck/cards ids}]
-             card-tx
-             [[:db.fn/call assoc-scene :scene/decks deck-id]]))))
+  ([_ _ deck-key opts]
+   (let [[deck-id tx] (deck-create-tx deck-key opts)]
+     (conj (vec tx) [:db.fn/call assoc-scene :scene/decks deck-id]))))
 
 (defmethod
   ^{:doc "Reassigns fresh random positions to every card currently in the
@@ -2286,7 +2331,7 @@
   "True if roster player-id refers to a still-existing, still-active
    (:player/active true) player -- used to let the Memory turn cycle
    skip over anyone benched or removed mid-game, see
-   ogres.app.memory/valid-turn-index."
+   ogres.app.turn-order/valid-turn-index."
   [data player-id]
   (let [entity (ds/entity data player-id)]
     (boolean (and entity (:player/active entity)))))
@@ -2303,7 +2348,7 @@
         players (:scene/memory-players scene)
         idx (:scene/memory-turn-index scene)]
     (if (seq players)
-      (let [corrected (memory/valid-turn-index players (partial memory-player-active? data) idx)]
+      (let [corrected (turn-order/valid-turn-index players (partial memory-player-active? data) idx)]
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
@@ -2447,7 +2492,7 @@
           turn index UNCHANGED (matching players go again, same as a
           real game of Memory). A mismatch flips both back face-down
           and advances :scene/memory-turn-index to the next player,
-          wrapping around (ogres.app.memory/next-turn-index)."}
+          wrapping around (ogres.app.turn-order/next-turn-index)."}
   event-tx-fn :memory/resolve
   [data _]
   (let [face-up (memory-face-up data)]
@@ -2465,7 +2510,7 @@
           (let [idx (:scene/memory-turn-index scene)
                 players (:scene/memory-players scene)
                 active? (partial memory-player-active? data)
-                next-idx (or (memory/next-turn-index players active? idx) idx)]
+                next-idx (or (turn-order/next-turn-index players active? idx) idx)]
             [[:db/add (:db/id a) :object/hidden true]
              [:db/add (:db/id b) :object/hidden true]
              [:db.fn/call assoc-scene :scene/memory-turn-index next-idx]])))
@@ -2490,6 +2535,229 @@
       [:db/add scene-id :scene/neutral-authority? false]]
      (map (fn [c] [:db/retractEntity (:db/id c)]))
      (memory-cards data))))
+
+;; --- Go Fish (example game) ---
+;; A second concrete demonstration of the generic card/deck system
+;; (:card/holder-based hands, :deck/deal, move-card-tx) -- Memory never
+;; needed private per-player hands or transferring a card between two
+;; specific players; Go Fish exercises both, plus four independently
+;; toggleable rules (see game_type/games/go_fish.cljs), checked live
+;; from the active game-type's enabled-elements below rather than
+;; stored anywhere new. See ogres.app.go-fish for the pure rank-
+;; matching/scoring logic and ogres.app.turn-order for the shared
+;; turn-cycle logic both this and Memory use.
+
+(defn ^:private go-fish-player-active?
+  "True if roster player-id refers to a still-existing, still-active
+   (:player/active true) player -- same role as memory-player-active?,
+   kept as its own function (not shared) since each game's turn-player
+   resolution reads its own distinct :scene/go-fish-*/:scene/memory-*
+   attributes, the same way dnd5e.cljs/gloomhaven.cljs each own their
+   own similarly-shaped widget code rather than sharing one function."
+  [data player-id]
+  (let [entity (ds/entity data player-id)]
+    (boolean (and entity (:player/active entity)))))
+
+(defn ^:private go-fish-turn-player
+  "The roster player entity whose turn it currently is, or nil if no
+   Go Fish game is in progress, or if every seated player has since
+   been benched/removed -- resolves the corrected index the same way
+   memory-turn-player does, see ogres.app.turn-order/valid-turn-index."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        players (:scene/go-fish-players scene)
+        idx (:scene/go-fish-turn-index scene)]
+    (if (seq players)
+      (let [corrected (turn-order/valid-turn-index players (partial go-fish-player-active? data) idx)]
+        (if corrected
+          (ds/entity data (nth players corrected)))))))
+
+(defn ^:private go-fish-authorized-for-turn?
+  "True if the local viewer speaks for the current Go Fish turn player
+   -- same player/authority? primitive Memory's own authorized-for-
+   turn? uses, deliberately still just host-only fallback (not
+   suppressed by :scene/neutral-authority?) for the same turn-
+   continuity-safety-net reason Memory's version is."
+  [data]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (go-fish-turn-player data) [:player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
+(defn ^:private go-fish-hand
+  "Every card in `player-id`'s hand, from a (ds/entity-pulled) `deck`."
+  [deck player-id]
+  (filter (comp #{player-id} :db/id :card/holder) (:deck/cards deck)))
+
+(defmethod
+  ^{:doc "Starts a new Go Fish game on the current scene: creates a
+          fresh 36-card deck (9 ranks x 4 copies, see
+          game-type.games.go-fish/deck-definitions), adds it to
+          :scene/decks (so it's also visible/manageable via the
+          existing Decks panel), deals 6 cards to each currently-active
+          roster player's hand (:deck/deal, reused as-is), and
+          initializes the turn cycle -- the same active-roster-
+          snapshot/:scene/neutral-authority? pattern :memory/start
+          uses. Host-driven like every other setup action in this app
+          -- UI-gated, not enforced here."}
+  event-tx-fn :go-fish/start
+  [data _]
+  (let [root (ds/entity data [:db/ident :root])
+        active (->> (:root/players root)
+                    (filter :player/active)
+                    (sort-by :db/id)
+                    (mapv :db/id))
+        [deck-id deck-tx] (deck-create-tx :go-fish-9 {})
+        cards (filter :card/rank deck-tx)]
+    (concat
+     deck-tx
+     ;; Dealt directly from `cards` (plain data, not yet committed) via
+     ;; deal-tx, NOT :deck/deal/:deck/draw -- deck-id is still a temp
+     ;; id at this point in the transaction, which ds/entity (what
+     ;; those events use to re-read the draw pile) can't resolve. See
+     ;; deal-tx's docstring.
+     (deal-tx cards active 6)
+     [[:db.fn/call assoc-scene
+       :scene/decks deck-id
+       :scene/go-fish-deck deck-id
+       :scene/go-fish-players active
+       :scene/go-fish-turn-index 0
+       :scene/go-fish-scores {}
+       ;; Go Fish needs impartiality by default for the exact same
+       ;; reason Memory does -- the host is often also a competing
+       ;; player, and must not automatically see every hand.
+       :scene/neutral-authority? true]])))
+
+(defmethod
+  ^{:doc "The core Go Fish turn action: `asker-id` asks `target-id` for
+          `rank`, which `asker-id` must already hold at least one copy
+          of (a hard rule gate, not just a UI convenience -- enforced
+          here the same way :memory/flip's own hidden/count checks
+          are). `target-id` must be a different, active player, and --
+          unless :go-fish/ask-anyone is enabled -- specifically the
+          next seat in the (skip-inactive) turn order. A hit transfers
+          every matching card from target's hand to asker's; a miss
+          draws the top of the draw pile into asker's hand instead
+          ('go fish'), with no draw at all if the pile is empty.
+          Whether the turn advances or stays with the asker depends on
+          :go-fish/extra-turn-on-hit (a hit) and
+          :go-fish/extra-turn-on-lucky-draw (drawing the exact rank
+          asked for) -- a miss with no lucky draw always advances the
+          turn, in every rule combination."}
+  event-tx-fn :go-fish/ask
+  [data _ asker-id target-id rank]
+  (if (and (go-fish-authorized-for-turn? data)
+           (= (:db/id (go-fish-turn-player data)) asker-id))
+    (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+          enabled (:game-type/enabled-elements (:scene/game-type scene))
+          ask-anyone? (contains? enabled :go-fish/ask-anyone)
+          extra-turn-on-hit? (contains? enabled :go-fish/extra-turn-on-hit)
+          extra-turn-on-lucky-draw? (contains? enabled :go-fish/extra-turn-on-lucky-draw)
+          players (:scene/go-fish-players scene)
+          idx (:scene/go-fish-turn-index scene)
+          active? (partial go-fish-player-active? data)
+          next-seat (turn-order/valid-turn-index players active? (mod (inc idx) (count players)))
+          next-seat-id (if next-seat (nth players next-seat))
+          deck-id (:db/id (:scene/go-fish-deck scene))
+          deck (ds/entity data deck-id)
+          asker-hand (go-fish-hand deck asker-id)]
+      (if (and (not= target-id asker-id)
+               (active? target-id)
+               (or ask-anyone? (= target-id next-seat-id))
+               (seq (go-fish/cards-of-rank asker-hand rank)))
+        (let [target-hand (go-fish-hand deck target-id)
+              matches (go-fish/cards-of-rank target-hand rank)]
+          (if (seq matches)
+            (let [start (next-position asker-hand)
+                  transfer-tx (mapcat (fn [card i] (move-card-tx (:db/id card) :hand (+ start i) asker-id))
+                                       matches (range))
+                  next-idx (if extra-turn-on-hit? idx (turn-order/next-turn-index players active? idx))]
+              (into (vec transfer-tx)
+                    [[:db.fn/call assoc-scene :scene/go-fish-turn-index (or next-idx idx)]]))
+            (let [draw-pile (pile deck :draw)]
+              (if (seq draw-pile)
+                (let [drawn (top-card draw-pile)
+                      lucky? (= (:card/rank drawn) rank)
+                      moved (move-card-tx (:db/id drawn) :hand (next-position asker-hand) asker-id)
+                      next-idx (if (and lucky? extra-turn-on-lucky-draw?)
+                                 idx
+                                 (turn-order/next-turn-index players active? idx))]
+                  (into (vec moved)
+                        [[:db.fn/call assoc-scene :scene/go-fish-turn-index (or next-idx idx)]]))
+                ;; empty draw pile -- no draw possible, a miss with
+                ;; nothing to fish for still just advances the turn.
+                (let [next-idx (turn-order/next-turn-index players active? idx)]
+                  [[:db.fn/call assoc-scene :scene/go-fish-turn-index (or next-idx idx)]])))))
+        []))
+    []))
+
+(defmethod
+  ^{:doc "Lays down a scored set from `player-id`'s own hand for
+          `rank`, gated by player/authority? over that specific seat
+          (explicit player-id arg, same pattern as everywhere else in
+          this app -- authority is derived from whose hand it is, not
+          guessed from the dispatching viewer). NOT gated by whose
+          turn it is -- laying down a completed set is bookkeeping,
+          not a strategic action, and gating it by turn would just add
+          'forgot to score on my turn' friction with no fairness
+          benefit. How many cards move, and whether a completed 4-card
+          group is worth 1 point (a 'book', the classic rule) or 2
+          (two separate pairs) depends on :go-fish/book-scoring vs.
+          :go-fish/pair-scoring -- see ogres.app.go-fish/scoreable-
+          count. A no-op if `player-id` doesn't yet have an eligible
+          set for `rank`."}
+  event-tx-fn :go-fish/score
+  [data _ player-id rank]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
+    (if (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)
+      (let [scene (:camera/scene (:user/camera user))
+            enabled (:game-type/enabled-elements (:scene/game-type scene))
+            book-scoring? (contains? enabled :go-fish/book-scoring)
+            deck-id (:db/id (:scene/go-fish-deck scene))
+            deck (ds/entity data deck-id)
+            hand (go-fish-hand deck player-id)
+            group (go-fish/cards-of-rank hand rank)
+            n (go-fish/scoreable-count (count group) book-scoring?)]
+        (if (pos? n)
+          (let [to-score (take n group)
+                scored (filter (comp #{:scored} :card/location) (:deck/cards deck))
+                start (next-position scored)
+                lay-tx (mapcat (fn [card i] (move-card-tx (:db/id card) :scored (+ start i) player-id))
+                                to-score (range))
+                scores (or (:scene/go-fish-scores scene) {})
+                ;; A completed book is always 1 point regardless of n
+                ;; (n is always 4 in book mode) -- it's a single scored
+                ;; unit, not "2 pairs bundled together". Pair mode's
+                ;; point currency is the pair itself, so n/2 (n is
+                ;; always even) counts every pair laid down at once.
+                points (if book-scoring? 1 (quot n 2))]
+            (into (vec lay-tx)
+                  [[:db.fn/call assoc-scene :scene/go-fish-scores (update scores player-id (fnil + 0) points)]]))
+          []))
+      [])))
+
+(defmethod
+  ^{:doc "Ends the current Go Fish game: retracts the deck (and every
+          card in it, via :deck/cards' :db/isComponent cascade),
+          clears the four :scene/go-fish-* attributes, and clears
+          :scene/neutral-authority? back to false -- directly mirrors
+          :memory/end. Works whether the game finished naturally (empty
+          draw pile and every hand empty) or is being aborted mid-round
+          -- the host-only 'End Game' button is the only place this is
+          dispatched from."}
+  event-tx-fn :go-fish/end
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        scene-id (:db/id scene)
+        deck-id (:db/id (:scene/go-fish-deck scene))]
+    (cond-> [[:db/retract scene-id :scene/go-fish-players]
+             [:db/retract scene-id :scene/go-fish-turn-index]
+             [:db/retract scene-id :scene/go-fish-scores]
+             [:db/retract scene-id :scene/go-fish-deck]
+             [:db/add scene-id :scene/neutral-authority? false]]
+      deck-id (conj [:db/retractEntity deck-id]))))
 
 ;; --- Board ---
 

@@ -13,19 +13,20 @@
             [ogres.app.game-type.core-elements :as core]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]
+            [ogres.app.game-type.games.go-fish :as go-fish]
             [ogres.app.game-type.games.memory :as memory]))
 
 (def elements
-  (merge core/elements dnd5e/elements gloomhaven/elements memory/elements))
+  (merge core/elements dnd5e/elements gloomhaven/elements memory/elements go-fish/elements))
 
 (def deck-definitions
   "Every registered card-deck template, keyed by its own id (e.g.
    :standard-52) -- gated behind the :tool/cards element (see
-   core-elements.cljs), not any single game-type. A single-source merge
-   today; a future game module contributing its own deck (Gloomhaven's
-   monster ability decks, say) is added to this merge the same way a game
-   module's `elements` map is added above, no other file changes needed."
-  (merge core-decks/definitions))
+   core-elements.cljs), not any single game-type. A future game module
+   contributing its own deck is added to this merge the same way a game
+   module's `elements` map is added above, no other file changes needed
+   -- proven by go-fish/deck-definitions here, the first one to do so."
+  (merge core-decks/definitions go-fish/deck-definitions))
 
 (def game-labels
   "Display name for each contributing game module's element-id namespace,
@@ -33,7 +34,8 @@
    A module not listed here still works -- its namespace is title-cased as
    a fallback -- this only controls the nicer label."
   {"dnd5e" "D&D 5e"
-   "gloomhaven" "Gloomhaven"})
+   "gloomhaven" "Gloomhaven"
+   "go-fish" "Go Fish"})
 
 (defn game-label [namespace-str]
   (get game-labels namespace-str (capitalize namespace-str)))
@@ -134,6 +136,23 @@
    redundant 'whose turn is it' panel with nothing in it (Memory cards
    aren't tokens and never populate the initiative tracker)."
   (into (disj default-enabled-elements :unit/initiative) (keys memory/elements)))
+
+(def go-fish-enabled-elements
+  "The seeded 'Go Fish' game-type's starting set -- the bare default
+   (Go Fish has no use for the tactical-map primitives either, same
+   reasoning as Memory's own template) plus :go-fish/game and
+   :go-fish/book-scoring, the classic 4-card 'books' ruleset out of
+   the box -- deliberately NOT `(keys go-fish/elements)` wholesale,
+   since that would also pull in :go-fish/pair-scoring and violate
+   its own :exclusive-group with book-scoring. The three extra-turn/
+   ask-anyone rule elements are left off by default -- classic Go Fish
+   turn order (one ask per turn, miss or hit, always ask the next
+   player) -- each independently toggleable later via the Builder.
+   Also drops :unit/initiative, for the exact same reason Memory's
+   template does: Go Fish has its own turn-order UI
+   (panel_go_fish.cljs, driven by :scene/go-fish-*)."
+  (into (disj default-enabled-elements :unit/initiative)
+        [:go-fish/game :go-fish/book-scoring]))
 
 (defn grid-tool-id
   "The :tool/grid-* element id for a :scene/grid-type value, e.g.

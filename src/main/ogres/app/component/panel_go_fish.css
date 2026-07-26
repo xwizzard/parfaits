@@ -1,0 +1,134 @@
+.go-fish-draw-count {
+  color: var(--color-blues-700);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.go-fish-hands,
+.go-fish-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.go-fish-hand-item,
+.go-fish-score-item {
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+.go-fish-score-item {
+  align-items: center;
+  flex-direction: row;
+  justify-content: space-between;
+}
+
+.go-fish-hand-item[data-current="true"] {
+  border-color: var(--color-prime-500);
+  box-shadow: 0 0 0 1px var(--color-prime-500);
+}
+
+.go-fish-hand-item[data-active="false"] {
+  opacity: 0.5;
+}
+
+.go-fish-hand-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.go-fish-hand-color {
+  background-color: var(--color-context, var(--color-blues-900));
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 16px;
+  width: 16px;
+}
+
+.go-fish-hand-name {
+  flex: 1;
+}
+
+.go-fish-hand-score {
+  color: var(--color-blues-700);
+  font-weight: bold;
+}
+
+.go-fish-hand-count {
+  color: var(--color-black-500);
+  font-size: 12px;
+}
+
+.go-fish-hand-back {
+  color: var(--color-black-500);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.go-fish-hand-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.go-fish-hand-group {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.go-fish-card {
+  align-items: center;
+  background-color: var(--color-paper-500);
+  border-radius: 4px;
+  border: 1.5px solid var(--color-blues-900);
+  box-sizing: border-box;
+  color: var(--color-blues-900);
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  height: 44px;
+  justify-content: center;
+  position: relative;
+  width: 32px;
+}
+
+.go-fish-card-rank {
+  font-size: 10px;
+  font-weight: 700;
+  inset: 2px auto auto 3px;
+  line-height: 1;
+  position: absolute;
+}
+
+.go-fish-score-button {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.go-fish-ask {
+  border-top: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
+.go-fish-ask-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.go-fish-ask-target-fixed {
+  font-weight: 600;
+}

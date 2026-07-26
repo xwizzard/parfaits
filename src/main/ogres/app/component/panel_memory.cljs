@@ -1,7 +1,8 @@
 (ns ogres.app.component.panel-memory
   "The 'Memory' example game panel/tab -- a minimal UI over events.cljs's
-   :memory/* methods and ogres.app.memory's pure dealing/turn/scoring
-   logic. Visible to host and guest alike (unlike the host-only Roster/
+   :memory/* methods, ogres.app.memory's pure dealing logic, and
+   ogres.app.turn-order's shared turn-cycle/winner logic. Visible to
+   host and guest alike (unlike the host-only Roster/
    Scene tabs), since seeing turn/score state is exactly what every
    connected participant needs -- but the host-only actions (Start/End)
    are gated inline within this panel rather than via tab visibility.
@@ -14,7 +15,7 @@
   (:require [clojure.string :refer [join]]
             [ogres.app.component :refer [icon]]
             [ogres.app.hooks :as hooks]
-            [ogres.app.memory :as memory]
+            [ogres.app.turn-order :as turn-order]
             [uix.core :as uix :refer [defui $]]))
 
 (def ^:private query
@@ -47,7 +48,7 @@
      :players-by-id players-by-id
      :turn-players turn-players
      :turn-index turn-index
-     :current-index (memory/valid-turn-index
+     :current-index (turn-order/valid-turn-index
                       turn-players
                       (fn [id] (:player/active (players-by-id id)))
                       (or turn-index 0))
@@ -72,7 +73,7 @@
            tab before starting.")
 
         finished?
-        (let [winner-ids (memory/winners scores)]
+        (let [winner-ids (turn-order/winners scores)]
           ($ :<>
             ($ :.form-notice
               (if (= (count winner-ids) 1)

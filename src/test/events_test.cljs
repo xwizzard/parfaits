@@ -140,17 +140,27 @@
         dnd5e (first (filter (comp #{:dnd5e} :game-type/key) game-types))
         gloomhaven (first (filter (comp #{:gloomhaven} :game-type/key) game-types))
         memory (first (filter (comp #{:memory} :game-type/key) game-types))
+        go-fish (first (filter (comp #{:go-fish} :game-type/key) game-types))
         scene (:camera/scene (:user/camera (user conn)))]
-    (is (= (count game-types) 4)
-        "The bundled 'Default', 'D&D 5e', 'Gloomhaven', and 'Memory'
-         game-types are all seeded on a fresh db.")
+    (is (= (count game-types) 5)
+        "The bundled 'Default', 'D&D 5e', 'Gloomhaven', 'Memory', and
+         'Go Fish' game-types are all seeded on a fresh db.")
     (is (= (:game-type/name default) "Default"))
     (is (= (:game-type/name dnd5e) "D&D 5e"))
     (is (= (:game-type/name gloomhaven) "Gloomhaven"))
     (is (= (:game-type/name memory) "Memory"))
+    (is (= (:game-type/name go-fish) "Go Fish"))
     (is (= (:game-type/category memory) "card")
         "Memory carries a template-picker grouping category -- the
-         other three seeded templates deliberately don't.")
+         other three non-card-game seeded templates deliberately don't.")
+    (is (= (:game-type/category go-fish) "card")
+        "Go Fish shares Memory's 'card' category, grouping them together
+         in the template picker.")
+    (is (some #(= (namespace %) "go-fish") (:game-type/enabled-elements go-fish))
+        "The seeded Go Fish template enables its own module's elements.")
+    (is (not (contains? (:game-type/enabled-elements go-fish) :unit/initiative))
+        "Go Fish has its own turn-order UI, same reasoning as Memory's
+         template -- the generic Turn Order tab is excluded.")
     (is (contains? (:game-type/enabled-elements default) :unit/dead)
         "The seeded default enables the bare universal element set.")
     (is (not-any? #(contains? (:game-type/enabled-elements default) %)
@@ -206,9 +216,10 @@
           custom (entity @conn custom-id)]
       (is (= (set (:game-type/enabled-elements custom)) (set default-elements))
           "A newly created game-type clones its source's enabled elements.")
-      (is (= (count (:root/game-types (root conn))) 5)
+      (is (= (count (:root/game-types (root conn))) 6)
           "The new game-type is linked into :root/game-types alongside the
-           four bundled templates (Default, D&D 5e, Gloomhaven, Memory)."))))
+           five bundled templates (Default, D&D 5e, Gloomhaven, Memory,
+           Go Fish)."))))
 
 (deftest test-game-type-toggle-element
   (let [conn (ds/conn-from-db (initial-data true))
@@ -1337,6 +1348,258 @@
              (the same one already used for an unassigned turn player)
              still lets the host act rather than soft-locking the
              game")))))
+
+;; --- Go Fish (example game) ---
+(defn ^:private scene-go-fish [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private go-fish-hand [conn holder-id]
+  (filter (comp #{holder-id} :db/id :card/holder) (:deck/cards (current-deck conn))))
+
+(defn ^:private set-enabled-elements!
+  "Test helper: replaces the active scene's game-type's own
+   :game-type/enabled-elements wholesale (a schema-free, single-value
+   attribute -- map-form transact! replaces it, doesn't merge) so a
+   test can exercise a specific combination of Go Fish's four rule
+   toggles without switching to the seeded 'Go Fish' template at all."
+  [conn elements]
+  (let [game-type-id (:db/id (:scene/game-type (scene-go-fish conn)))]
+    (transact! conn [{:db/id game-type-id :game-type/enabled-elements (set elements)}])))
+
+(defn ^:private move-cards!
+  "Test helper: directly relocates `cards` into `holder-id`'s hand,
+   bypassing :go-fish/start's random deal -- ask/score tests need a
+   deterministic hand, not whatever the shuffle happened to produce."
+  [conn holder-id cards]
+  (transact! conn (for [c cards] {:db/id (:db/id c) :card/location :hand :card/holder holder-id})))
+
+(defn ^:private clear-all-cards-to-draw!
+  "Test helper: relocates EVERY card in the current Go Fish deck back to
+   the draw pile, holder cleared -- run right after :go-fish/start so
+   ask/score tests can deal out an exact, deterministic hand instead of
+   risking contamination from whatever the random initial deal put in
+   some OTHER player's hand (e.g. a 'guaranteed miss' scenario silently
+   becoming a hit because the shuffle happened to leave a matching rank
+   in the target's hand already)."
+  [conn]
+  (let [cards (:deck/cards (current-deck conn))]
+    (transact! conn (mapcat (fn [c i] [{:db/id (:db/id c) :card/location :draw :card/position i}
+                                        [:db/retract (:db/id c) :card/holder]])
+                             cards (range)))))
+
+(defn ^:private force-top-of-draw!
+  "Test helper: relocates one :draw-pile card of `rank` to the highest
+   :card/position (i.e. 'top of the pile') so the next go-fish draw is
+   deterministic -- returns that card's :db/id."
+  [conn rank]
+  (let [deck (current-deck conn)
+        draw (by-location deck :draw)
+        card (first (filter (comp #{rank} :card/rank) draw))
+        max-pos (apply max (map :card/position draw))]
+    (transact! conn [{:db/id (:db/id card) :card/position (inc max-pos)}])
+    (:db/id card)))
+
+(deftest test-go-fish-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (let [scene (scene-go-fish conn)
+          deck (current-deck conn)
+          active-ids (into #{} (map :db/id) (root-players conn))]
+      (is (= (count (:scene/go-fish-players scene)) 2))
+      (is (= (set (:scene/go-fish-players scene)) active-ids)
+          "the turn cycle is exactly the currently-active roster players")
+      (is (= (:scene/go-fish-turn-index scene) 0))
+      (is (= (:scene/go-fish-scores scene) {}))
+      (is (:scene/neutral-authority? scene))
+      (is (= (:deck/name deck) "Go Fish (9 Ranks)"))
+      (is (= (count (:deck/cards deck)) 36) "9 ranks x 4 copies")
+      (is (= (count (by-location deck :hand)) 12) "6 cards dealt to each of 2 players")
+      (is (= (count (by-location deck :draw)) 24))
+      (doseq [id (:scene/go-fish-players scene)]
+        (is (= (count (go-fish-hand conn id)) 6))))))
+
+(deftest test-go-fish-ask-hit-transfers-cards-and-advances-turn
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn asker-id [(first twos)])
+      (move-cards! conn target-id (rest twos))
+      (dispatch conn :go-fish/ask asker-id target-id :two)
+      (is (= (count (go-fish-hand conn asker-id)) 4)
+          "every matching card moved to the asker's hand")
+      (is (empty? (go-fish-hand conn target-id)) "none left with the target")
+      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 1)
+          "a hit advances the turn by default (extra-turn-on-hit off)"))))
+
+(deftest test-go-fish-ask-hit-grants-extra-turn-when-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring :go-fish/extra-turn-on-hit})
+    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn asker-id [(first twos)])
+      (move-cards! conn target-id (rest twos))
+      (dispatch conn :go-fish/ask asker-id target-id :two)
+      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 0)
+          "extra-turn-on-hit keeps the same player's turn after a hit"))))
+
+(deftest test-go-fish-ask-miss-draws-and-advances-turn
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
+          deck (current-deck conn)
+          twos (filter (comp #{:two} :card/rank) (:deck/cards deck))]
+      ;; asker holds a :two, target holds none -- guaranteed miss
+      (move-cards! conn asker-id [(first twos)])
+      (force-top-of-draw! conn :three)
+      (let [before (count (go-fish-hand conn asker-id))]
+        (dispatch conn :go-fish/ask asker-id target-id :two)
+        (is (= (count (go-fish-hand conn asker-id)) (inc before))
+            "the asker drew one card from the pile")
+        (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 1)
+            "a miss without a lucky draw always advances the turn")))))
+
+(deftest test-go-fish-ask-lucky-draw-grants-extra-turn-when-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring :go-fish/extra-turn-on-lucky-draw})
+    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn asker-id [(first twos)])
+      (force-top-of-draw! conn :two)
+      (dispatch conn :go-fish/ask asker-id target-id :two)
+      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 0)
+          "drawing the exact rank asked for keeps the turn when the rule is on"))))
+
+(deftest test-go-fish-ask-rejects-non-next-target-when-ask-anyone-off
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [[asker-id _mid-id third-id] (:scene/go-fish-players (scene-go-fish conn))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn asker-id [(first twos)])
+      (move-cards! conn third-id (rest twos))
+      (dispatch conn :go-fish/ask asker-id third-id :two)
+      (is (= (count (go-fish-hand conn asker-id)) 1)
+          "asking the 3rd seat instead of the next one is refused --
+           the asker's own :two never leaves their hand, still just
+           the 1 card placed there for setup")
+      (is (= (count (go-fish-hand conn third-id)) 3)
+          "third seat's cards are untouched too")
+      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 0) "no-op, turn unchanged"))))
+
+(deftest test-go-fish-ask-rejects-when-asker-lacks-rank
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn target-id twos)
+      (dispatch conn :go-fish/ask asker-id target-id :two)
+      (is (= (count (go-fish-hand conn target-id)) 4)
+          "asker never held a :two at all -- refused, nothing moves"))))
+
+(deftest test-go-fish-score-book-mode
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id twos)
+      (dispatch conn :go-fish/score player-id :two)
+      (is (every? (comp #{:scored} :card/location) (go-fish-hand conn player-id)))
+      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 1})
+          "a completed book is worth 1 point, not 2"))))
+
+(deftest test-go-fish-score-book-mode-refuses-incomplete-set
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id (take 3 twos))
+      (dispatch conn :go-fish/score player-id :two)
+      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {})
+          "3 of 4 isn't a complete book -- no-op"))))
+
+(deftest test-go-fish-score-pair-mode
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/pair-scoring})
+    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id (take 3 twos))
+      (dispatch conn :go-fish/score player-id :two)
+      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 1})
+          "a 3-of-a-kind lays down 1 pair, worth 1 point")
+      (is (= (count (filter (comp #{:scored} :card/location) (go-fish-hand conn player-id))) 2))
+      (is (= (count (filter (comp #{:hand} :card/location) (go-fish-hand conn player-id))) 1)
+          "the odd 3rd card stays in hand, unscored"))))
+
+(deftest test-go-fish-end
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dispatch conn :go-fish/end)
+      (let [scene (scene-go-fish conn)]
+        (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
+        (is (nil? (:scene/go-fish-players scene)))
+        (is (nil? (:scene/go-fish-turn-index scene)))
+        (is (nil? (:scene/go-fish-scores scene)))
+        (is (nil? (:scene/go-fish-deck scene)))
+        (is (false? (:scene/neutral-authority? scene)))))))
+
+(deftest test-go-fish-turn-skips-benched-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (let [[asker-id second-id third-id] (:scene/go-fish-players (scene-go-fish conn))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      (dispatch conn :player/set-active second-id false)
+      ;; asker holds a :two, nobody target-relevant matters here -- force
+      ;; a miss so the turn actually advances, landing on whichever seat
+      ;; is correctly next.
+      (move-cards! conn asker-id [(first twos)])
+      (force-top-of-draw! conn :three)
+      (dispatch conn :go-fish/ask asker-id third-id :two)
+      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 2)
+          "index 1 is benched -- the stored index skips straight to
+           index 2 instead of landing on a benched seat"))))
 
 ;; --- Neutral authority (impartial dealer) mode ---
 (deftest test-scene-toggle-neutral-authority

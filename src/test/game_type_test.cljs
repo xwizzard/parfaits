@@ -5,6 +5,7 @@
             [ogres.app.game-type.core-elements :as core]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]
+            [ogres.app.game-type.games.go-fish :as go-fish]
             [ogres.app.game-type.games.memory :as memory]
             [ogres.app.game-type.widgets :as widgets]))
 
@@ -115,13 +116,14 @@
         dnd5e-ids (set (keys dnd5e/elements))
         gloomhaven-ids (set (keys gloomhaven/elements))
         memory-ids (set (keys memory/elements))
-        sources [core-ids dnd5e-ids gloomhaven-ids memory-ids]]
+        go-fish-ids (set (keys go-fish/elements))
+        sources [core-ids dnd5e-ids gloomhaven-ids memory-ids go-fish-ids]]
     (is (every? empty? (for [a sources b sources :when (not= a b)] (set/intersection a b)))
         "every pair of sources contributes disjoint element ids -- any
          combination of game modules can be compiled in together
          without ever colliding.")
     (is (= (count game-type/elements) (apply + (map count sources)))
-        "The merged registry has exactly as many entries as its four
+        "The merged registry has exactly as many entries as its five
          sources combined -- nothing silently overwritten.")))
 
 (deftest test-memory-registry-entry
@@ -133,6 +135,38 @@
       "Memory has its own turn-order UI (panel_memory.cljs) -- the
        generic Turn Order tab is deliberately excluded to avoid a
        second, redundant 'whose turn is it' panel"))
+
+(deftest test-go-fish-registry-entry
+  (is (= (get-in game-type/elements [:go-fish/game :label]) "Go Fish"))
+  (is (string? (get-in game-type/elements [:go-fish/game :icon])))
+  (is (contains? game-type/go-fish-enabled-elements :go-fish/game)
+      "the seeded Go Fish template actually enables its own tab-gating element")
+  (is (contains? game-type/go-fish-enabled-elements :go-fish/book-scoring)
+      "classic 4-card book scoring is the default out of the box")
+  (is (not (contains? game-type/go-fish-enabled-elements :go-fish/pair-scoring))
+      "book-scoring/pair-scoring are mutually exclusive -- only one is
+       ever enabled by default")
+  (is (not-any? game-type/go-fish-enabled-elements
+                [:go-fish/extra-turn-on-hit :go-fish/extra-turn-on-lucky-draw :go-fish/ask-anyone])
+      "the three optional rule variants are off by default -- classic
+       Go Fish turn order out of the box")
+  (is (not (contains? game-type/go-fish-enabled-elements :unit/initiative))
+      "Go Fish has its own turn-order UI (panel_go_fish.cljs) -- the
+       generic Turn Order tab is deliberately excluded")
+  (is (= (get-in game-type/deck-definitions [:go-fish-9 :deck/name]) "Go Fish (9 Ranks)"))
+  (let [cards (get-in game-type/deck-definitions [:go-fish-9 :deck/cards])]
+    (is (= (count cards) 36) "9 ranks x 4 copies each = 36 cards")
+    (is (= (count (into #{} (map :card/rank) cards)) 9) "9 distinct ranks")
+    (is (every? #(= 4 %) (vals (frequencies (map :card/rank cards))))
+        "exactly 4 copies of every rank")
+    (is (not-any? :card/suit cards) "Go Fish matches by rank alone -- no suits")))
+
+(deftest test-go-fish-exclusive-scoring-group
+  (is (= (game-type/exclusive-group :go-fish/pair-scoring)
+         (game-type/exclusive-group :go-fish/book-scoring))
+      "pair-scoring and book-scoring share an :exclusive-group -- enabling
+       one via :game-type/toggle-element automatically disables the other")
+  (is (some? (game-type/exclusive-group :go-fish/pair-scoring))))
 
 (deftest test-initiative-panel-lookup-path
   (let [element (:dnd5e/hp-tracker game-type/elements)]
