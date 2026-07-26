@@ -1,0 +1,119 @@
+.card-hands {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.card-hand-item {
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+.card-hand-item[data-current="true"] {
+  border-color: var(--color-prime-500);
+  box-shadow: 0 0 0 1px var(--color-prime-500);
+}
+
+.card-hand-item[data-active="false"] {
+  opacity: 0.5;
+}
+
+.card-hand-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.card-hand-color {
+  background-color: var(--color-context, var(--color-blues-900));
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 16px;
+  width: 16px;
+}
+
+.card-hand-name {
+  flex: 1;
+}
+
+.card-hand-score {
+  color: var(--color-blues-700);
+  font-weight: bold;
+}
+
+.card-hand-count {
+  color: var(--color-black-500);
+  font-size: 12px;
+}
+
+.card-hand-back {
+  color: var(--color-black-500);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.card-hand-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.card-hand-group {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.card-hand-card {
+  align-items: center;
+  background-color: var(--color-paper-500);
+  border-radius: 4px;
+  border: 1.5px solid var(--color-blues-900);
+  box-sizing: border-box;
+  color: var(--color-blues-900);
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  height: 44px;
+  justify-content: center;
+  position: relative;
+  width: 32px;
+
+  &[data-playable="true"] {
+    cursor: pointer;
+
+    &:hover {
+      border-color: var(--color-prime-500);
+      box-shadow: 0 0 0 1px var(--color-prime-500);
+    }
+  }
+}
+
+.card-hand-card-rank {
+  font-size: 10px;
+  font-weight: 700;
+  inset: 2px auto auto 3px;
+  line-height: 1;
+  position: absolute;
+}
+
+.card-hand-card-back {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--color-blues-700), var(--color-blues-700) 3px,
+    var(--color-blues-500) 3px, var(--color-blues-500) 6px);
+
+  &[data-selectable="true"] {
+    cursor: pointer;
+
+    &:hover {
+      border-color: var(--color-prime-500);
+      box-shadow: 0 0 0 1px var(--color-prime-500);
+    }
+  }
+}

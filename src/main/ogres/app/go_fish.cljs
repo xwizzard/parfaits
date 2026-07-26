@@ -5,14 +5,9 @@
    itself. No DataScript, no UI; mirrors the role ogres.app.memory plays
    for its own game. See events.cljs's :go-fish/* methods and
    component/panel_go_fish.cljs. Turn-cycle/winner logic lives in
-   ogres.app.turn-order, shared with Memory -- nothing here duplicates
-   it.")
-
-(defn cards-of-rank
-  "The subset of `cards` (typically one player's hand) whose :card/rank
-   is `rank`."
-  [cards rank]
-  (filter (comp #{rank} :card/rank) cards))
+   ogres.app.turn-order, shared with Memory; card-filtering helpers
+   (cards-of-rank/cards-of-holder) live in ogres.app.cards, shared with
+   Old Maid -- nothing here duplicates either.")
 
 (defn scoreable-count
   "How many of a player's `n` cards of one rank can be laid down as a

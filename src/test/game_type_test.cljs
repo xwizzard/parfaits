@@ -3,10 +3,14 @@
             [clojure.set :as set]
             [ogres.app.game-type :as game-type]
             [ogres.app.game-type.core-elements :as core]
+            [ogres.app.game-type.games.crazy-eights :as crazy-eights]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]
             [ogres.app.game-type.games.go-fish :as go-fish]
             [ogres.app.game-type.games.memory :as memory]
+            [ogres.app.game-type.games.old-maid :as old-maid]
+            [ogres.app.game-type.games.rummy :as rummy]
+            [ogres.app.game-type.games.war :as war]
             [ogres.app.game-type.widgets :as widgets]))
 
 (deftest test-measurement-cells-registry-entry
@@ -117,13 +121,17 @@
         gloomhaven-ids (set (keys gloomhaven/elements))
         memory-ids (set (keys memory/elements))
         go-fish-ids (set (keys go-fish/elements))
-        sources [core-ids dnd5e-ids gloomhaven-ids memory-ids go-fish-ids]]
+        old-maid-ids (set (keys old-maid/elements))
+        crazy-eights-ids (set (keys crazy-eights/elements))
+        rummy-ids (set (keys rummy/elements))
+        war-ids (set (keys war/elements))
+        sources [core-ids dnd5e-ids gloomhaven-ids memory-ids go-fish-ids old-maid-ids crazy-eights-ids rummy-ids war-ids]]
     (is (every? empty? (for [a sources b sources :when (not= a b)] (set/intersection a b)))
         "every pair of sources contributes disjoint element ids -- any
          combination of game modules can be compiled in together
          without ever colliding.")
     (is (= (count game-type/elements) (apply + (map count sources)))
-        "The merged registry has exactly as many entries as its five
+        "The merged registry has exactly as many entries as its nine
          sources combined -- nothing silently overwritten.")))
 
 (deftest test-memory-registry-entry
@@ -167,6 +175,77 @@
       "pair-scoring and book-scoring share an :exclusive-group -- enabling
        one via :game-type/toggle-element automatically disables the other")
   (is (some? (game-type/exclusive-group :go-fish/pair-scoring))))
+
+(deftest test-old-maid-registry-entry
+  (is (= (get-in game-type/elements [:old-maid/game :label]) "Old Maid"))
+  (is (string? (get-in game-type/elements [:old-maid/game :icon])))
+  (is (contains? game-type/old-maid-enabled-elements :old-maid/game)
+      "the seeded Old Maid template actually enables its own tab-gating element")
+  (is (not (contains? game-type/old-maid-enabled-elements :unit/initiative))
+      "Old Maid has its own turn-order UI (panel_old_maid.cljs) -- the
+       generic Turn Order tab is deliberately excluded")
+  (is (= (get-in game-type/deck-definitions [:old-maid-52 :deck/name]) "Old Maid"))
+  (let [cards (get-in game-type/deck-definitions [:old-maid-52 :deck/cards])
+        queens (filter (comp #{:queen} :card/rank) cards)]
+    (is (= (count cards) 49) "the traditional 52 minus 3 of the 4 queens")
+    (is (= (count queens) 1) "exactly 1 queen survives, reskinned")
+    (is (= (:card/label (first queens)) "Old Maid"))
+    (is (= (:card/icon (first queens)) "skull"))
+    (is (every? #(= 4 %) (vals (dissoc (frequencies (map :card/rank cards)) :queen)))
+        "every non-queen rank keeps all 4 suits -- 12 ranks x 4 = 48 pairing cards")))
+
+(deftest test-crazy-eights-registry-entry
+  (is (= (get-in game-type/elements [:crazy-eights/game :label]) "Crazy 8s"))
+  (is (string? (get-in game-type/elements [:crazy-eights/game :icon])))
+  (is (contains? game-type/crazy-eights-enabled-elements :crazy-eights/game)
+      "the seeded Crazy 8s template actually enables its own tab-gating element")
+  (is (not (contains? game-type/crazy-eights-enabled-elements :unit/initiative))
+      "Crazy 8s has its own turn-order UI (panel_crazy_eights.cljs) -- the
+       generic Turn Order tab is deliberately excluded")
+  (is (= (get-in game-type/deck-definitions [:crazy-eights-52 :deck/name]) "Crazy 8s"))
+  (let [cards (get-in game-type/deck-definitions [:crazy-eights-52 :deck/cards])
+        eights (filter (comp #{:eight} :card/rank) cards)
+        non-eights (remove (comp #{:eight} :card/rank) cards)]
+    (is (= (count cards) 52) "the full traditional deck -- no cards removed")
+    (is (= (count eights) 4) "all four 8s survive, just re-skinned")
+    (is (every? #(= (:card/icon %) "star") eights)
+        "every 8 shares the wild 'star' icon instead of its suit's")
+    (is (every? #(= (:card/icon-color %) "var(--color-yellow-500)") eights)
+        "the wild star is colored, unlike every other card's default
+         (inherited) icon color")
+    (is (not-any? :card/suit eights)
+        "8s are suit-less wilds -- the whole point of the deck change")
+    (is (every? :card/suit non-eights)
+        "every OTHER card keeps its normal suit -- only the 8s are special-cased")))
+
+(deftest test-rummy-registry-entry
+  (is (= (get-in game-type/elements [:rummy/game :label]) "Rummy"))
+  (is (string? (get-in game-type/elements [:rummy/game :icon])))
+  (is (contains? game-type/rummy-enabled-elements :rummy/game)
+      "the seeded Rummy template actually enables its own tab-gating element")
+  (is (not (contains? game-type/rummy-enabled-elements :rummy/runs))
+      "runs are a real, independently-toggleable rule variant -- off by
+       default, unlike Old Maid/Crazy 8s' rulesets which had no real
+       variants to invent toggles for")
+  (is (not (contains? game-type/rummy-enabled-elements :unit/initiative))
+      "Rummy has its own turn-order UI (panel_rummy.cljs) -- the
+       generic Turn Order tab is deliberately excluded")
+  (is (not (contains? game-type/deck-definitions :rummy))
+      "Rummy contributes no deck-definitions entry at all -- it reuses
+       :standard-52 completely unmodified, the purest reuse case yet"))
+
+(deftest test-war-registry-entry
+  (is (= (get-in game-type/elements [:war/game :label]) "War"))
+  (is (string? (get-in game-type/elements [:war/game :icon])))
+  (is (contains? game-type/war-enabled-elements :war/game)
+      "the seeded War template actually enables its own tab-gating element")
+  (is (not (contains? game-type/war-enabled-elements :unit/initiative))
+      "War has no per-token turn order at all -- everyone plays
+       simultaneously -- but :unit/initiative is still dropped, same
+       reasoning as every other card game's template")
+  (is (not (contains? game-type/deck-definitions :war))
+      "War contributes no deck-definitions entry either -- reuses
+       :standard-52 completely unmodified, same reuse tier as Rummy"))
 
 (deftest test-initiative-panel-lookup-path
   (let [element (:dnd5e/hp-tracker game-type/elements)]

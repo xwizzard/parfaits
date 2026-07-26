@@ -1,0 +1,56 @@
+.war-players {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.war-player {
+  align-items: center;
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.war-player[data-active="false"] {
+  opacity: 0.5;
+}
+
+.war-player-color {
+  background-color: var(--color-context, var(--color-blues-900));
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 16px;
+  width: 16px;
+}
+
+.war-player-name {
+  flex: 1;
+}
+
+.war-player-count {
+  color: var(--color-black-500);
+  font-size: 12px;
+}
+
+.war-banner {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.war-pot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.war-pot-card {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}

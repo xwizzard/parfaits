@@ -1,0 +1,44 @@
+.rummy-piles {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  margin-bottom: 6px;
+}
+
+.rummy-pile {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.rummy-table {
+  margin-bottom: 6px;
+}
+
+.rummy-table-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.rummy-table-group {
+  display: flex;
+  gap: 4px;
+}
+
+.rummy-runs {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.rummy-draw-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}

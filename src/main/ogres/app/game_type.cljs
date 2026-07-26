@@ -11,13 +11,18 @@
   (:require [clojure.string :refer [capitalize]]
             [ogres.app.game-type.core-decks :as core-decks]
             [ogres.app.game-type.core-elements :as core]
+            [ogres.app.game-type.games.crazy-eights :as crazy-eights]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]
             [ogres.app.game-type.games.go-fish :as go-fish]
-            [ogres.app.game-type.games.memory :as memory]))
+            [ogres.app.game-type.games.memory :as memory]
+            [ogres.app.game-type.games.old-maid :as old-maid]
+            [ogres.app.game-type.games.rummy :as rummy]
+            [ogres.app.game-type.games.war :as war]))
 
 (def elements
-  (merge core/elements dnd5e/elements gloomhaven/elements memory/elements go-fish/elements))
+  (merge core/elements dnd5e/elements gloomhaven/elements memory/elements
+         go-fish/elements old-maid/elements crazy-eights/elements rummy/elements war/elements))
 
 (def deck-definitions
   "Every registered card-deck template, keyed by its own id (e.g.
@@ -25,8 +30,11 @@
    core-elements.cljs), not any single game-type. A future game module
    contributing its own deck is added to this merge the same way a game
    module's `elements` map is added above, no other file changes needed
-   -- proven by go-fish/deck-definitions here, the first one to do so."
-  (merge core-decks/definitions go-fish/deck-definitions))
+   -- proven by go-fish/deck-definitions (a brand new deck) and
+   old-maid/deck-definitions and crazy-eights/deck-definitions (both
+   derived from an existing one) here."
+  (merge core-decks/definitions go-fish/deck-definitions old-maid/deck-definitions
+         crazy-eights/deck-definitions))
 
 (def game-labels
   "Display name for each contributing game module's element-id namespace,
@@ -35,7 +43,11 @@
    a fallback -- this only controls the nicer label."
   {"dnd5e" "D&D 5e"
    "gloomhaven" "Gloomhaven"
-   "go-fish" "Go Fish"})
+   "go-fish" "Go Fish"
+   "old-maid" "Old Maid"
+   "crazy-eights" "Crazy 8s"
+   "rummy" "Rummy"
+   "war" "War"})
 
 (defn game-label [namespace-str]
   (get game-labels namespace-str (capitalize namespace-str)))
@@ -153,6 +165,50 @@
    (panel_go_fish.cljs, driven by :scene/go-fish-*)."
   (into (disj default-enabled-elements :unit/initiative)
         [:go-fish/game :go-fish/book-scoring]))
+
+(def old-maid-enabled-elements
+  "The seeded 'Old Maid' game-type's starting set -- the bare default
+   (same 'no use for tactical-map primitives' reasoning as Memory/Go
+   Fish) plus :old-maid/game. No other elements to add -- there's
+   nothing else in this module, unlike Go Fish's rule toggles. Also
+   drops :unit/initiative, same reasoning as the other two: Old Maid
+   has its own turn-order UI (panel_old_maid.cljs, driven by
+   :scene/old-maid-*)."
+  (into (disj default-enabled-elements :unit/initiative) (keys old-maid/elements)))
+
+(def crazy-eights-enabled-elements
+  "The seeded 'Crazy 8s' game-type's starting set -- the bare default
+   (same 'no use for tactical-map primitives' reasoning as Memory/Go
+   Fish/Old Maid) plus :crazy-eights/game. No other elements to add --
+   the ruleset here was fully specified by the user, so no toggles are
+   invented just to look symmetric with Go Fish. Also drops :unit/
+   initiative, same reasoning as the other three: Crazy 8s has its own
+   turn-order UI (panel_crazy_eights.cljs, driven by :scene/crazy-
+   eights-*)."
+  (into (disj default-enabled-elements :unit/initiative) (keys crazy-eights/elements)))
+
+(def rummy-enabled-elements
+  "The seeded 'Rummy' game-type's starting set -- the bare default
+   (same 'no use for tactical-map primitives' reasoning as the other
+   card games) plus :rummy/game only. :rummy/runs stays OFF by
+   default -- it's a real, independently-toggleable rule variant (Go
+   Fish's own precedent for its off-by-default extra-turn-on-hit/
+   extra-turn-on-lucky-draw/ask-anyone elements), not something every
+   Rummy game needs, unlike Old Maid/Crazy 8s' rulesets, which had no
+   real variants to toggle at all. Also drops :unit/initiative, same
+   reasoning as the other four: Rummy has its own turn-order UI
+   (panel_rummy.cljs, driven by :scene/rummy-*)."
+  (into (disj default-enabled-elements :unit/initiative) [:rummy/game]))
+
+(def war-enabled-elements
+  "The seeded 'War' game-type's starting set -- the bare default (same
+   'no use for tactical-map primitives' reasoning as the other card
+   games) plus :war/game only. War has no per-token turn-order concept
+   at all (every active player plays simultaneously every round), but
+   :unit/initiative is still dropped for the same reason as every
+   other card game's template: the generic Turn Order tab would just
+   be a second, redundant panel with nothing meaningful in it."
+  (into (disj default-enabled-elements :unit/initiative) [:war/game]))
 
 (defn grid-tool-id
   "The :tool/grid-* element id for a :scene/grid-type value, e.g.

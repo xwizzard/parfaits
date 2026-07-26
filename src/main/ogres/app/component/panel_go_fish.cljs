@@ -18,10 +18,12 @@
    because they're host -- the same 'host is often also a competing
    player' reasoning applies here."
   (:require [clojure.string :refer [join]]
+            [ogres.app.cards :as cards]
             [ogres.app.component :refer [icon]]
+            [ogres.app.component.card-hand :as card-hand :refer [hand-authorized?]]
+            [ogres.app.component.card-pile :refer [rank-short]]
             [ogres.app.go-fish :as go-fish]
             [ogres.app.hooks :as hooks]
-            [ogres.app.player :as player]
             [ogres.app.turn-order :as turn-order]
             [uix.core :as uix :refer [defui $]]))
 
@@ -49,16 +51,6 @@
     [:db/id :player/name :player/color :player/kind [:player/active :default true]
      {:player/controller [:user/uuid]}]}
    {:root/session [{:session/conns [:user/uuid]}]}])
-
-(def ^:private rank-short
-  {:two "2" :three "3" :four "4" :five "5" :six "6" :seven "7" :eight "8" :nine "9" :ten "10"})
-
-(defn ^:private cards-of-holder [cards holder-id]
-  (filter (comp #{holder-id} :db/id :card/holder) cards))
-
-(defn ^:private hand-authorized?
-  [uuid default-authority connected entity]
-  (player/authority? uuid default-authority connected (get-in entity [:player/controller :user/uuid])))
 
 (defn ^:private go-fish-state
   "Derived Go Fish state `panel`/`actions` both need, pulled once per
@@ -115,12 +107,6 @@
      :my-turn? (and current-player-id
                     (hand-authorized? uuid turn-authority connected (players-by-id current-player-id)))}))
 
-(defui ^:private hand-card [{:keys [card]}]
-  ($ :.go-fish-card
-    (if-let [abbrev (rank-short (:card/rank card))]
-      ($ :.go-fish-card-rank abbrev))
-    ($ icon {:name (:card/icon card) :size 14})))
-
 (defui ^:private ask-controls
   [{:keys [asker-id targets rank-options ask-anyone? next-player dispatch]}]
   (let [[target set-target] (uix/use-state (:db/id (first targets)))
@@ -144,30 +130,6 @@
          :disabled (or (nil? rank) (nil? (if ask-anyone? target (:db/id next-player))))
          :on-click #(dispatch :go-fish/ask asker-id (if ask-anyone? target (:db/id next-player)) rank)}
         "Ask"))))
-
-(defui ^:private hand-view
-  [{:keys [entity cards authorized? current? dispatch book-scoring? score]}]
-  (let [id (:db/id entity)
-        hand (cards-of-holder cards id)
-        by-rank (group-by :card/rank hand)]
-    ($ :li.go-fish-hand-item
-      {:key id :data-current current? :data-active (boolean (:player/active entity))}
-      ($ :.go-fish-hand-header
-        ($ :span.go-fish-hand-color {:data-color (:player/color entity)})
-        ($ :span.go-fish-hand-name (:player/name entity))
-        ($ :span.go-fish-hand-score score)
-        ($ :span.go-fish-hand-count (count hand)))
-      (if authorized?
-        ($ :ul.go-fish-hand-cards
-          (for [[rank group] (sort-by (comp rank-short key) by-rank)]
-            ($ :li.go-fish-hand-group {:key rank}
-              (for [card group] ($ hand-card {:key (:db/id card) :card card}))
-              (let [n (go-fish/scoreable-count (count group) book-scoring?)]
-                (if (pos? n)
-                  ($ :button.button.button-neutral.go-fish-score-button
-                    {:type "button" :on-click #(dispatch :go-fish/score id rank)}
-                    "Score"))))))
-        ($ :.go-fish-hand-back (str (count hand) " card" (if (not= (count hand) 1) "s")))))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)
@@ -204,17 +166,23 @@
         :else
         ($ :<>
           ($ :.go-fish-draw-count "Draw pile: " draw-count)
-          ($ :ul.go-fish-hands
+          ($ :ul.card-hands
             (for [[i id] (map-indexed vector turn-players)
                   :let [entity (players-by-id id)
                         authorized? (hand-authorized? uuid default-authority connected entity)]]
-              ($ hand-view
+              ($ card-hand/hand-view
                 {:key id :entity entity :cards cards :authorized? authorized?
                  :current? (= i current-index) :score (get scores id 0)
-                 :dispatch dispatch :book-scoring? book-scoring?})))
+                 :render-group-extra
+                 (fn [rank group]
+                   (let [n (go-fish/scoreable-count (count group) book-scoring?)]
+                     (if (pos? n)
+                       ($ :button.button.button-neutral.go-fish-score-button
+                         {:type "button" :on-click #(dispatch :go-fish/score id rank)}
+                         "Score"))))})))
           (if my-turn?
             (let [asker (players-by-id current-player-id)
-                  hand (cards-of-holder cards current-player-id)
+                  hand (cards/cards-of-holder cards current-player-id)
                   rank-options (sort-by rank-short (into #{} (map :card/rank) hand))
                   targets (->> turn-players
                                (remove #{current-player-id})

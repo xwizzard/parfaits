@@ -2,10 +2,8 @@
   (:require [cljs.test :refer-macros [deftest is testing]]
             [ogres.app.go-fish :as go-fish]))
 
-(deftest test-cards-of-rank
-  (let [cards [{:db/id 1 :card/rank :two} {:db/id 2 :card/rank :three} {:db/id 3 :card/rank :two}]]
-    (is (= (set (map :db/id (go-fish/cards-of-rank cards :two))) #{1 3}))
-    (is (empty? (go-fish/cards-of-rank cards :nine)))))
+;; cards-of-rank moved to ogres.app.cards (see cards_test.cljs) once
+;; Old Maid needed the identical, already-generic logic.
 
 (deftest test-scoreable-count
   (testing "book mode -- all-or-nothing"

@@ -1,0 +1,32 @@
+.crazy-eights-piles {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  margin-bottom: 6px;
+}
+
+.crazy-eights-pile {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.crazy-eights-declared-suit {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.crazy-eights-suit-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.crazy-eights-suit-picker-buttons {
+  display: flex;
+  gap: 4px;
+}

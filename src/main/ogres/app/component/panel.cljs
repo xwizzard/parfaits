@@ -1,5 +1,6 @@
 (ns ogres.app.component.panel
   (:require [ogres.app.component :refer [icon]]
+            [ogres.app.component.panel-crazy-eights :as crazy-eights]
             [ogres.app.component.panel-data :as data]
             [ogres.app.component.panel-decks :as decks]
             [ogres.app.component.panel-game-type-builder :as game-type-builder]
@@ -7,10 +8,13 @@
             [ogres.app.component.panel-initiative :as initiative]
             [ogres.app.component.panel-lobby :as lobby]
             [ogres.app.component.panel-memory :as memory]
+            [ogres.app.component.panel-old-maid :as old-maid]
             [ogres.app.component.panel-roster :as roster]
+            [ogres.app.component.panel-rummy :as rummy]
             [ogres.app.component.panel-scene :as scene]
             [ogres.app.component.panel-tokens :as tokens]
             [ogres.app.component.panel-props :as props]
+            [ogres.app.component.panel-war :as war]
             [ogres.app.hooks :as hooks]
             [uix.core :refer [defui $]]))
 
@@ -67,6 +71,10 @@
    :roster     {:icon "person-circle" :label "Players"}
    :memory     {:icon "card-front" :label "Memory"}
    :go-fish    {:icon "suit-heart-fill" :label "Go Fish"}
+   :old-maid   {:icon "skull" :label "Old Maid"}
+   :crazy-eights {:icon "magic" :label "Crazy 8s"}
+   :rummy      {:icon "suit-diamond-fill" :label "Rummy"}
+   :war        {:icon "fist" :label "War"}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -80,6 +88,10 @@
    :roster     {:form roster/panel :footer roster/actions}
    :memory     {:form memory/panel :footer memory/actions}
    :go-fish    {:form go-fish/panel :footer go-fish/actions}
+   :old-maid   {:form old-maid/panel :footer old-maid/actions}
+   :crazy-eights {:form crazy-eights/panel :footer crazy-eights/actions}
+   :rummy      {:form rummy/panel :footer rummy/actions}
+   :war        {:form war/panel :footer war/actions}
    :game-type-builder {:form game-type-builder/panel}})
 
 (defn ^:private visible-tabs
@@ -100,28 +112,41 @@
    the same way, not enabled by any seeded template yet. The Players
    (roster) tab is baseline like Tokens/Props -- no gating element,
    host-only (roster management is a GM/setup concern, same as Scene).
-   The Memory and Go Fish tabs -- example games built on the generic
-   prop-copy/shared-toggle and card/deck-hand mechanisms respectively
-   -- are gated the same way Decks is, behind their own :memory/game/
-   :go-fish/game elements (see game-type/games/memory.cljs and
-   game-type/games/go-fish.cljs), true for their seeded templates and
-   any custom template that enables them. Unlike Roster, both are
-   visible to guests as well: seeing turn order and scores, and acting
-   on your own turn, is exactly what every connected participant
-   needs, not just the host."
+   The Memory, Go Fish, Old Maid, Crazy 8s, Rummy, and War tabs --
+   example games built on the generic prop-copy/shared-toggle and
+   card/deck-hand mechanisms -- are gated the same way Decks is,
+   behind their own :memory/game/:go-fish/game/:old-maid/game/:crazy-
+   eights/game/:rummy/game/:war/game elements (see game-type/games/
+   memory.cljs, game-type/games/go-fish.cljs, game-type/games/old-
+   maid.cljs, game-type/games/crazy-eights.cljs, game-type/games/
+   rummy.cljs, and game-type/games/war.cljs), true for their seeded
+   templates and any custom template that enables them. Unlike
+   Roster, all six are visible to guests as well: seeing turn order
+   and scores, and acting on your own turn, is exactly what every
+   connected participant needs, not just the host."
   [host mode enabled-elements]
-  (let [cards?   (contains? enabled-elements :tool/cards)
-        memory?  (contains? enabled-elements :memory/game)
-        go-fish? (contains? enabled-elements :go-fish/game)]
+  (let [cards?       (contains? enabled-elements :tool/cards)
+        memory?      (contains? enabled-elements :memory/game)
+        go-fish?     (contains? enabled-elements :go-fish/game)
+        old-maid?    (contains? enabled-elements :old-maid/game)
+        crazy-eights? (contains? enabled-elements :crazy-eights/game)
+        rummy?       (contains? enabled-elements :rummy/game)
+        war?         (contains? enabled-elements :war/game)]
     (cond
-      (not host) (cond-> [:tokens :initiative :lobby] memory? (conj :memory) go-fish? (conj :go-fish))
+      (not host) (cond-> [:tokens :initiative :lobby]
+                   memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
+                   crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war))
       (= mode :builder) [:game-type-builder :data]
       (= mode :play)
-      (into (cond-> [:tokens :roster :props] cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish))
+      (into (cond-> [:tokens :roster :props]
+              cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
+              crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war))
             (if (contains? enabled-elements :unit/initiative)
               [:initiative :lobby]
               [:lobby]))
-      :else (cond-> [:scene :props :tokens :roster] cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish)))))
+      :else (cond-> [:scene :props :tokens :roster]
+              cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
+              crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war)))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)

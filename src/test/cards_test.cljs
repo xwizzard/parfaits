@@ -33,6 +33,22 @@
   (testing "an undefined rank (e.g. a joker) has no numeric value"
     (is (nil? (cards/rank-value :joker {})))))
 
+(deftest test-cards-of-rank
+  (let [cards [{:db/id 1 :card/rank :two} {:db/id 2 :card/rank :three} {:db/id 3 :card/rank :two}]]
+    (is (= (set (map :db/id (cards/cards-of-rank cards :two))) #{1 3}))
+    (is (empty? (cards/cards-of-rank cards :nine)))))
+
+(deftest test-cards-of-holder
+  (let [cards [{:db/id 1 :card/location :hand :card/holder {:db/id 10}}
+               {:db/id 2 :card/location :hand :card/holder {:db/id 20}}
+               {:db/id 3 :card/location :hand :card/holder {:db/id 10}}
+               {:db/id 4 :card/location :scored :card/holder {:db/id 10}}]]
+    (is (= (set (map :db/id (cards/cards-of-holder cards 10))) #{1 3}))
+    (is (empty? (cards/cards-of-holder cards 99)))
+    (is (not (contains? (set (map :db/id (cards/cards-of-holder cards 10))) 4))
+        "a card credited to holder-id but no longer :card/location :hand
+         (e.g. already scored) isn't still counted as being in their hand")))
+
 (deftest test-needs-reshuffle?
   (is (true? (cards/needs-reshuffle? [] [{:card/rank :two}]))
       "empty draw, non-empty discard -- reclaim it")

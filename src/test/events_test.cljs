@@ -1,10 +1,13 @@
 (ns events-test
-  (:require [cljs.test :refer-macros [deftest is]]
+  (:require [cljs.test :refer-macros [deftest is testing]]
             [datascript.core :as ds :refer [transact! entity]]
+            [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size half-size hex-radius]]
+            [ogres.app.crazy-eights :as crazy-eights]
             [ogres.app.events :refer [event-tx-fn]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
+            [ogres.app.old-maid :as old-maid]
             [ogres.app.props :as props]
             [ogres.app.provider.state :refer [initial-data]]
             [ogres.app.vec :as vec :refer [Vec2]]))
@@ -141,26 +144,67 @@
         gloomhaven (first (filter (comp #{:gloomhaven} :game-type/key) game-types))
         memory (first (filter (comp #{:memory} :game-type/key) game-types))
         go-fish (first (filter (comp #{:go-fish} :game-type/key) game-types))
+        old-maid (first (filter (comp #{:old-maid} :game-type/key) game-types))
+        crazy-eights (first (filter (comp #{:crazy-eights} :game-type/key) game-types))
+        rummy (first (filter (comp #{:rummy} :game-type/key) game-types))
+        war (first (filter (comp #{:war} :game-type/key) game-types))
         scene (:camera/scene (:user/camera (user conn)))]
-    (is (= (count game-types) 5)
-        "The bundled 'Default', 'D&D 5e', 'Gloomhaven', 'Memory', and
-         'Go Fish' game-types are all seeded on a fresh db.")
+    (is (= (count game-types) 9)
+        "The bundled 'Default', 'D&D 5e', 'Gloomhaven', 'Memory', 'Go
+         Fish', 'Old Maid', 'Crazy 8s', 'Rummy', and 'War' game-types
+         are all seeded on a fresh db.")
     (is (= (:game-type/name default) "Default"))
     (is (= (:game-type/name dnd5e) "D&D 5e"))
     (is (= (:game-type/name gloomhaven) "Gloomhaven"))
     (is (= (:game-type/name memory) "Memory"))
     (is (= (:game-type/name go-fish) "Go Fish"))
+    (is (= (:game-type/name old-maid) "Old Maid"))
+    (is (= (:game-type/name crazy-eights) "Crazy 8s"))
+    (is (= (:game-type/name rummy) "Rummy"))
+    (is (= (:game-type/name war) "War"))
     (is (= (:game-type/category memory) "card")
         "Memory carries a template-picker grouping category -- the
          other three non-card-game seeded templates deliberately don't.")
     (is (= (:game-type/category go-fish) "card")
         "Go Fish shares Memory's 'card' category, grouping them together
          in the template picker.")
+    (is (= (:game-type/category old-maid) "card")
+        "Old Maid shares the same 'card' category too.")
+    (is (= (:game-type/category crazy-eights) "card")
+        "Crazy 8s shares the same 'card' category too.")
+    (is (= (:game-type/category rummy) "card")
+        "Rummy shares the same 'card' category too.")
+    (is (= (:game-type/category war) "card")
+        "War shares the same 'card' category too.")
     (is (some #(= (namespace %) "go-fish") (:game-type/enabled-elements go-fish))
         "The seeded Go Fish template enables its own module's elements.")
     (is (not (contains? (:game-type/enabled-elements go-fish) :unit/initiative))
         "Go Fish has its own turn-order UI, same reasoning as Memory's
          template -- the generic Turn Order tab is excluded.")
+    (is (some #(= (namespace %) "old-maid") (:game-type/enabled-elements old-maid))
+        "The seeded Old Maid template enables its own module's element.")
+    (is (not (contains? (:game-type/enabled-elements old-maid) :unit/initiative))
+        "Old Maid has its own turn-order UI too -- the generic Turn
+         Order tab is excluded.")
+    (is (some #(= (namespace %) "crazy-eights") (:game-type/enabled-elements crazy-eights))
+        "The seeded Crazy 8s template enables its own module's element.")
+    (is (not (contains? (:game-type/enabled-elements crazy-eights) :unit/initiative))
+        "Crazy 8s has its own turn-order UI too -- the generic Turn
+         Order tab is excluded.")
+    (is (some #(= (namespace %) "rummy") (:game-type/enabled-elements rummy))
+        "The seeded Rummy template enables its own module's element.")
+    (is (not (contains? (:game-type/enabled-elements rummy) :rummy/runs))
+        "runs stay off by default -- a real, independently-toggleable
+         rule variant, not baked into the seeded template.")
+    (is (not (contains? (:game-type/enabled-elements rummy) :unit/initiative))
+        "Rummy has its own turn-order UI too -- the generic Turn Order
+         tab is excluded.")
+    (is (some #(= (namespace %) "war") (:game-type/enabled-elements war))
+        "The seeded War template enables its own module's element.")
+    (is (not (contains? (:game-type/enabled-elements war) :unit/initiative))
+        "War has no per-token turn order at all -- everyone plays
+         simultaneously -- but the generic Turn Order tab is still
+         excluded, same as every other card game's template.")
     (is (contains? (:game-type/enabled-elements default) :unit/dead)
         "The seeded default enables the bare universal element set.")
     (is (not-any? #(contains? (:game-type/enabled-elements default) %)
@@ -216,10 +260,10 @@
           custom (entity @conn custom-id)]
       (is (= (set (:game-type/enabled-elements custom)) (set default-elements))
           "A newly created game-type clones its source's enabled elements.")
-      (is (= (count (:root/game-types (root conn))) 6)
+      (is (= (count (:root/game-types (root conn))) 10)
           "The new game-type is linked into :root/game-types alongside the
-           five bundled templates (Default, D&D 5e, Gloomhaven, Memory,
-           Go Fish)."))))
+           nine bundled templates (Default, D&D 5e, Gloomhaven, Memory,
+           Go Fish, Old Maid, Crazy 8s, Rummy, War)."))))
 
 (deftest test-game-type-toggle-element
   (let [conn (ds/conn-from-db (initial-data true))
@@ -1354,7 +1398,7 @@
   (:camera/scene (:user/camera (user conn))))
 
 (defn ^:private go-fish-hand [conn holder-id]
-  (filter (comp #{holder-id} :db/id :card/holder) (:deck/cards (current-deck conn))))
+  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
 
 (defn ^:private set-enabled-elements!
   "Test helper: replaces the active scene's game-type's own
@@ -1533,7 +1577,9 @@
           twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
       (move-cards! conn player-id twos)
       (dispatch conn :go-fish/score player-id :two)
-      (is (every? (comp #{:scored} :card/location) (go-fish-hand conn player-id)))
+      (is (empty? (go-fish-hand conn player-id))
+          "all 4 moved to :scored -- go-fish-hand (now :card/location-
+           filtered) no longer counts them as still 'in hand'")
       (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 1})
           "a completed book is worth 1 point, not 2"))))
 
@@ -1562,9 +1608,41 @@
       (dispatch conn :go-fish/score player-id :two)
       (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 1})
           "a 3-of-a-kind lays down 1 pair, worth 1 point")
-      (is (= (count (filter (comp #{:scored} :card/location) (go-fish-hand conn player-id))) 2))
-      (is (= (count (filter (comp #{:hand} :card/location) (go-fish-hand conn player-id))) 1)
+      (is (= (count (filter (comp #{:scored} :card/location) (:deck/cards (current-deck conn)))) 2)
+          "2 of the 3 twos are now scored (go-fish-hand itself no longer
+           counts them as 'in hand' once scored, see cards-of-holder's
+           :card/location filter)")
+      (is (= (count (go-fish-hand conn player-id)) 1)
           "the odd 3rd card stays in hand, unscored"))))
+
+(deftest test-go-fish-score-pair-mode-then-more-of-the-same-rank-arrives
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :go-fish/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/pair-scoring})
+    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
+          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
+      ;; Score a pair, leaving the odd 3rd two unscored in hand -- then
+      ;; a 4th two arrives later (e.g. from a subsequent successful
+      ;; ask). Scoring again must count ONLY the 2 currently-in-hand
+      ;; twos (the odd 3rd plus the new 4th), never the 2 already-
+      ;; scored ones -- this is exactly the bug cards-of-holder's
+      ;; missing :card/location filter would cause: go-fish-hand would
+      ;; wrongly still include the 2 already-scored twos (they keep
+      ;; :card/holder to record credit), inflating the rank-count to 4
+      ;; and re-processing already-scored cards.
+      (move-cards! conn player-id (take 3 twos))
+      (dispatch conn :go-fish/score player-id :two)
+      (move-cards! conn player-id [(nth twos 3)])
+      (dispatch conn :go-fish/score player-id :two)
+      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 2})
+          "1 point for the first pair, 1 more for the second -- not a
+           single inflated re-score of stale already-scored cards")
+      (is (= (count (filter (comp #{:scored} :card/location) (:deck/cards (current-deck conn)))) 4)
+          "all 4 twos are scored exactly once each, never touched twice")
+      (is (empty? (go-fish-hand conn player-id))))))
 
 (deftest test-go-fish-end
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -1600,6 +1678,930 @@
       (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 2)
           "index 1 is benched -- the stored index skips straight to
            index 2 instead of landing on a benched seat"))))
+
+;; --- Old Maid (example game) ---
+(defn ^:private scene-old-maid [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private old-maid-hand [conn holder-id]
+  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+
+(defn ^:private rank-with-copies
+  "[rank cards] for some rank still holding >= n copies among the
+   current Old Maid deck's remaining cards -- used by tests needing 2
+   same-rank cards for a deterministic setup, since :old-maid/start's
+   own auto-discard-at-deal-time means which ranks (if any) survive
+   with all their copies intact varies from run to run (round-robin
+   dealing a shuffled deck has real per-rank collision odds -- this is
+   expected, not a bug, the same way a real physical deal can land two
+   kings in the same hand by chance)."
+  [conn n]
+  (let [by-rank (group-by :card/rank (:deck/cards (current-deck conn)))]
+    (first (filter (fn [[_ cs]] (>= (count cs) n)) by-rank))))
+
+(defn ^:private two-different-ranks-one-card-each
+  "One card each from two DIFFERENT ranks still present in the current
+   Old Maid deck -- used by tests needing a guaranteed non-match."
+  [conn]
+  (map first (take 2 (vals (group-by :card/rank (:deck/cards (current-deck conn)))))))
+
+(deftest test-old-maid-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (let [scene (scene-old-maid conn)
+          deck (current-deck conn)
+          active-ids (into #{} (map :db/id) (root-players conn))
+          hands (map #(old-maid-hand conn %) (:scene/old-maid-players scene))
+          total-remaining (apply + (map count hands))]
+      (is (= (set (:scene/old-maid-players scene)) active-ids)
+          "the turn cycle is exactly the currently-active roster players")
+      (is (= (:scene/old-maid-turn-index scene) 0))
+      (is (:scene/neutral-authority? scene))
+      (is (= (:deck/name deck) "Old Maid"))
+      (is (= (count (:deck/cards deck)) total-remaining)
+          "every surviving card is in exactly one hand -- the deck's own
+           :deck/cards list and the sum of all hands always agree")
+      (is (odd? total-remaining)
+          "49 minus an even number of auto-discarded pairs is always odd,
+           regardless of how many pairs the random deal happened to
+           produce (round-robin dealing a shuffled deck has real
+           per-rank collision odds -- discarding several pairs right
+           at deal time is expected, not a bug)")
+      (is (every? empty? (map old-maid/pairs-to-discard hands))
+          "no hand holds a complete pair after start -- every pair the
+           deal happened to produce was auto-discarded immediately")
+      (is (= (count (filter (comp #{"Old Maid"} :card/label) (mapcat identity hands))) 1)
+          "the single reskinned queen is always dealt to someone -- it
+           never pairs, so auto-discard never touches it"))))
+
+(deftest test-old-maid-draw-completes-pair
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[drawer-id target-id] (:scene/old-maid-players (scene-old-maid conn))
+          [_ two-cards] (rank-with-copies conn 2)]
+      (move-cards! conn drawer-id [(first two-cards)])
+      (move-cards! conn target-id [(second two-cards)])
+      (dispatch conn :old-maid/draw drawer-id (:db/id (second two-cards)))
+      (is (empty? (old-maid-hand conn drawer-id))
+          "the drawn card completed a pair -- both vanish, none land in
+           the drawer's hand at all")
+      (is (empty? (old-maid-hand conn target-id)))
+      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 1)
+          "the turn unconditionally advances to whoever was drawn from"))))
+
+(deftest test-old-maid-draw-no-match
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[drawer-id target-id] (:scene/old-maid-players (scene-old-maid conn))
+          [a b] (two-different-ranks-one-card-each conn)]
+      (move-cards! conn drawer-id [a])
+      (move-cards! conn target-id [b])
+      (dispatch conn :old-maid/draw drawer-id (:db/id b))
+      (is (= (count (old-maid-hand conn drawer-id)) 2)
+          "no match -- the drawn card just moves into the drawer's hand")
+      (is (empty? (old-maid-hand conn target-id)))
+      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 1)))))
+
+(deftest test-old-maid-elimination-skips-empty-handed-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[first-id _second-id third-id] (:scene/old-maid-players (scene-old-maid conn))
+          [a b] (two-different-ranks-one-card-each conn)]
+      ;; _second-id starts with an empty hand -- eliminated before the
+      ;; game even really gets going, no separate event needed.
+      (move-cards! conn first-id [a])
+      (move-cards! conn third-id [b])
+      (dispatch conn :old-maid/draw first-id (:db/id b))
+      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 2)
+          "index 1 (second-id) has no cards -- the stored index skips
+           straight to index 2 instead of landing on an empty hand"))))
+
+(deftest test-old-maid-draw-after-external-bench-targets-drawers-real-neighbor
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[first-id second-id third-id] (:scene/old-maid-players (scene-old-maid conn))
+          [a b] (two-different-ranks-one-card-each conn)]
+      ;; Bench the CURRENT turn holder (index 0) -- the stored
+      ;; :scene/old-maid-turn-index (still 0) now points at a benched
+      ;; seat, no longer matching second-id's own real position (1).
+      ;; This reproduces exactly what a live manual-benching smoke
+      ;; test caught: :old-maid/draw must derive "who's next" from the
+      ;; DRAWER's own resolved position in `players`, not from the
+      ;; raw stored index, or the drawer ends up drawing from
+      ;; themselves (a spurious self-pair that silently vanishes one
+      ;; of their own cards).
+      (dispatch conn :player/set-active first-id false)
+      (move-cards! conn second-id [a])
+      (move-cards! conn third-id [b])
+      (dispatch conn :old-maid/draw second-id (:db/id b))
+      (is (= (count (old-maid-hand conn second-id)) 2)
+          "the drawer actually gained a card from someone else")
+      (is (empty? (old-maid-hand conn third-id))
+          "the card came from third-id, not a phantom duplicate of the
+           drawer's own card")
+      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 2)
+          "turn advances to third-id's real index, never back onto the
+           drawer itself"))))
+
+(deftest test-old-maid-draw-wrong-card-id-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[drawer-id target-id other-id] (:scene/old-maid-players (scene-old-maid conn))
+          [a b c] (take 3 (:deck/cards (current-deck conn)))]
+      ;; target-id (the correctly-resolved neighbor) holds b; other-id
+      ;; holds a DIFFERENT card, c. The drawer mistakenly tries to draw
+      ;; c -- e.g. a stale UI click after hands changed underneath it.
+      ;; :old-maid/draw must reject it: card-id must belong to the
+      ;; RESOLVED neighbor's hand specifically, not just belong to
+      ;; SOMEONE's hand.
+      (move-cards! conn drawer-id [a])
+      (move-cards! conn target-id [b])
+      (move-cards! conn other-id [c])
+      (dispatch conn :old-maid/draw drawer-id (:db/id c))
+      (is (= (count (old-maid-hand conn drawer-id)) 1) "no-op -- the drawer's hand is unchanged")
+      (is (= (count (old-maid-hand conn other-id)) 1) "no-op -- other-id still holds their card")
+      (is (= (count (old-maid-hand conn target-id)) 1) "target-id (the real neighbor) is untouched")
+      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 0) "no-op, turn unchanged"))))
+
+(deftest test-old-maid-end
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :old-maid/start)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dispatch conn :old-maid/end)
+      (let [scene (scene-old-maid conn)]
+        (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
+        (is (nil? (:scene/old-maid-players scene)))
+        (is (nil? (:scene/old-maid-turn-index scene)))
+        (is (nil? (:scene/old-maid-deck scene)))
+        (is (false? (:scene/neutral-authority? scene)))))))
+
+;; --- Crazy 8s (example game) ---
+(defn ^:private scene-crazy-eights [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private crazy-eights-hand [conn holder-id]
+  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+
+(defn ^:private discard-top [conn]
+  (apply max-key :card/position (by-location (current-deck conn) :discard)))
+
+(defn ^:private set-discard-top!
+  "Test helper: makes `card` the sole live top-of-discard card and sets
+   :scene/crazy-eights-suit to `suit` -- whatever was previously on top
+   moves back into the draw pile (at positions guaranteed lower than
+   `card`'s) so the discard pile never goes empty and `card` is
+   unambiguously the new max-position (i.e. 'top') card."
+  [conn card suit]
+  (let [deck (current-deck conn)
+        old-top (remove (comp #{(:db/id card)} :db/id) (by-location deck :discard))
+        scene-id (:db/id (scene-crazy-eights conn))
+        reclaim-tx (map-indexed
+                    (fn [i c] {:db/id (:db/id c) :card/location :draw :card/position (- i)})
+                    old-top)]
+    (transact! conn
+      (concat [{:db/id (:db/id card) :card/location :discard :card/position 0}
+               [:db/retract (:db/id card) :card/holder]
+               {:db/id scene-id :scene/crazy-eights-suit suit}]
+              reclaim-tx))))
+
+(deftest test-crazy-eights-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (let [scene (scene-crazy-eights conn)
+          deck (current-deck conn)
+          active-ids (into #{} (map :db/id) (root-players conn))
+          top (discard-top conn)]
+      (is (= (set (:scene/crazy-eights-players scene)) active-ids)
+          "the turn cycle is exactly the currently-active roster players")
+      (is (= (:scene/crazy-eights-turn-index scene) 0))
+      (is (:scene/neutral-authority? scene))
+      (is (nil? (:scene/crazy-eights-winner scene)) "nobody's won yet")
+      (is (= (:deck/name deck) "Crazy 8s"))
+      (is (= (count (:deck/cards deck)) 52) "the full deck, nothing removed")
+      (is (= (count (by-location deck :hand)) 18) "6 cards dealt to each of 3 players")
+      (is (every? #(= 6 (count (crazy-eights-hand conn %))) active-ids)
+          "every active player gets EXACTLY 6 -- unlike Old Maid, Crazy 8s
+           never auto-discards at deal time, so this is fully deterministic")
+      (is (= (count (by-location deck :discard)) 1) "exactly one starting card is face up")
+      (is (not= (:card/rank top) :eight)
+          "the starter is never a wild 8 -- there'd be no declared suit yet")
+      (is (= (:scene/crazy-eights-suit scene) (:card/suit top))
+          "the initial active suit is simply the starter's own printed suit")
+      (is (= (count (by-location deck :draw)) (- 52 18 1))
+          "everything not dealt or flipped stays in the draw pile"))))
+
+(deftest test-crazy-eights-play-legal-rank-match
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id _next-id] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          non-eights (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn)))
+          [_ [top-card hand-card]] (first (filter (fn [[_ cs]] (>= (count cs) 2))
+                                                    (group-by :card/rank non-eights)))
+          ;; A filler card so playing hand-card doesn't ALSO empty the
+          ;; hand -- that would be a win, a different scenario than
+          ;; "a normal legal play advances the turn".
+          filler (first (remove (comp #{(:db/id top-card) (:db/id hand-card)} :db/id)
+                                 (:deck/cards (current-deck conn))))]
+      (set-discard-top! conn top-card (:card/suit top-card))
+      (move-cards! conn player-id [hand-card filler])
+      (dispatch conn :crazy-eights/play player-id (:db/id hand-card) nil)
+      (is (not (contains? (into #{} (map :db/id) (crazy-eights-hand conn player-id)) (:db/id hand-card)))
+          "the played card leaves the player's hand")
+      (is (= (:db/id (discard-top conn)) (:db/id hand-card))
+          "the played card becomes the new top of the discard pile")
+      (is (= (:scene/crazy-eights-suit (scene-crazy-eights conn)) (:card/suit hand-card))
+          "a non-8 play's own suit becomes the new thing to match")
+      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 1)
+          "the turn advances"))))
+
+(deftest test-crazy-eights-play-illegal-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          illegal-card (first (remove #(crazy-eights/playable? % top-card (:card/suit top-card))
+                                       (:deck/cards (current-deck conn))))]
+      (set-discard-top! conn top-card (:card/suit top-card))
+      (move-cards! conn player-id [illegal-card])
+      (dispatch conn :crazy-eights/play player-id (:db/id illegal-card) nil)
+      (is (contains? (into #{} (map :db/id) (crazy-eights-hand conn player-id)) (:db/id illegal-card))
+          "the illegal card is rejected -- still in the player's hand")
+      (is (= (:db/id (discard-top conn)) (:db/id top-card)) "the discard top is unchanged")
+      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0) "no-op, turn unchanged"))))
+
+(deftest test-crazy-eights-play-eight-declares-suit-and-constrains-next-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-a player-b] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          eight (first (filter (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          ;; A filler so playing the 8 doesn't ALSO empty player-a's
+          ;; hand and win -- this test is about the declared suit, not
+          ;; the win condition (see test-crazy-eights-win-on-empty-hand).
+          filler (first (remove (comp #{(:db/id top-card) (:db/id eight)} :db/id)
+                                 (:deck/cards (current-deck conn))))]
+      (set-discard-top! conn top-card (:card/suit top-card))
+      (move-cards! conn player-a [eight filler])
+      (dispatch conn :crazy-eights/play player-a (:db/id eight) :hearts)
+      (is (= (:db/id (discard-top conn)) (:db/id eight)) "the wild 8 becomes the new top card")
+      (is (= (:scene/crazy-eights-suit (scene-crazy-eights conn)) :hearts)
+          "the chosen suit is now what must be matched")
+      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 1) "turn advances to player-b")
+
+      (testing "player-b, now facing a suit-less top card, can't play an off-suit non-8"
+        (let [off-suit (first (remove #(crazy-eights/playable? % eight :hearts)
+                                       (:deck/cards (current-deck conn))))]
+          (move-cards! conn player-b [off-suit])
+          (dispatch conn :crazy-eights/play player-b (:db/id off-suit) nil)
+          (is (contains? (into #{} (map :db/id) (crazy-eights-hand conn player-b)) (:db/id off-suit))
+              "rejected -- still in hand")
+          (is (= (:db/id (discard-top conn)) (:db/id eight)) "discard top still unchanged")))
+
+      (testing "but a card of the declared suit IS legal"
+        (let [hearts-card (first (filter #(= (:card/suit %) :hearts) (:deck/cards (current-deck conn))))]
+          (move-cards! conn player-b [hearts-card])
+          (dispatch conn :crazy-eights/play player-b (:db/id hearts-card) nil)
+          (is (= (:db/id (discard-top conn)) (:db/id hearts-card))
+              "legal -- the declared suit constrained play, and this card satisfies it"))))))
+
+(deftest test-crazy-eights-draw-does-not-advance-turn
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          _ (set-discard-top! conn top-card (:card/suit top-card))
+          deck (current-deck conn)
+          draw-before (by-location deck :draw)
+          non-matching (take 6 (remove #(crazy-eights/playable? % top-card (:card/suit top-card)) draw-before))]
+      (is (= (count non-matching) 6) "the draw pile has plenty of non-matching cards to build a stuck hand from")
+      (move-cards! conn player-id non-matching)
+      (let [draw-count-before (count (by-location (current-deck conn) :draw))]
+        (dispatch conn :crazy-eights/draw player-id)
+        (is (= (count (crazy-eights-hand conn player-id)) 7) "the player's hand grows by exactly 1")
+        (is (= (count (by-location (current-deck conn) :draw)) (dec draw-count-before))
+            "exactly 1 card leaves the draw pile")
+        (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0)
+            "drawing never advances the turn -- the same player continues")))))
+
+(deftest test-crazy-eights-draw-reshuffles-discard-preserving-top-card
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          _ (set-discard-top! conn top-card (:card/suit top-card))
+          deck (current-deck conn)
+          draw (by-location deck :draw)
+          non-matching (take 6 (remove #(crazy-eights/playable? % top-card (:card/suit top-card)) draw))]
+      (move-cards! conn player-id non-matching)
+      ;; Empty the draw pile entirely -- every remaining :draw card moves
+      ;; into the discard pile UNDER the live top card (lower positions),
+      ;; simulating a long game where most of the deck has been played.
+      (let [deck (current-deck conn)
+            remaining-draw (by-location deck :draw)
+            pool-size (count remaining-draw)]
+        (transact! conn
+          (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position (- (inc i))})
+                        remaining-draw))
+        (is (empty? (by-location (current-deck conn) :draw)) "draw pile is now empty, by construction")
+        (dispatch conn :crazy-eights/draw player-id)
+        (let [deck (current-deck conn)]
+          (is (= (count (crazy-eights-hand conn player-id)) 7) "the player still gets exactly 1 new card")
+          (is (= (count (by-location deck :draw)) (dec pool-size))
+              "the reclaimed discard pile (minus the 1 just drawn) is the new draw pile")
+          (is (= (count (by-location deck :discard)) 1) "only the original top card remains in discard")
+          (is (= (:db/id (discard-top conn)) (:db/id top-card))
+              "the live top card itself was never touched by the reshuffle")
+          (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0) "still no turn advance"))))))
+
+(deftest test-crazy-eights-win-on-empty-hand
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          ;; Excludes top-card's own id (every card trivially "matches"
+          ;; itself by rank, so without this a naive scan can pick
+          ;; top-card right back as "matching") AND excludes 8s (always
+          ;; "playable" regardless of top/suit -- an 8 landing here
+          ;; would need a real declared suit, not the `nil` this test
+          ;; dispatches with).
+          matching (some #(if (and (not= (:db/id %) (:db/id top-card))
+                                    (not= (:card/rank %) :eight)
+                                    (crazy-eights/playable? % top-card (:card/suit top-card)))
+                             %)
+                         (:deck/cards (current-deck conn)))]
+      (set-discard-top! conn top-card (:card/suit top-card))
+      (move-cards! conn player-id [matching])
+      (dispatch conn :crazy-eights/play player-id (:db/id matching) nil)
+      (is (empty? (crazy-eights-hand conn player-id)) "the winning play empties the hand")
+      (is (= (:scene/crazy-eights-winner (scene-crazy-eights conn)) player-id))
+      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0)
+          "the turn index is left alone -- the game is over, not paused"))))
+
+(deftest test-crazy-eights-play-after-external-bench-targets-players-real-neighbor
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[first-id second-id _third-id] (:scene/crazy-eights-players (scene-crazy-eights conn))
+          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
+          ;; Excludes 8s too -- always "playable" regardless of top/
+          ;; suit, but this test dispatches with a `nil` suit, which
+          ;; would corrupt :scene/crazy-eights-suit if `matching`
+          ;; happened to land on one.
+          matching (some #(if (and (not= (:db/id %) (:db/id top-card))
+                                    (not= (:card/rank %) :eight)
+                                    (crazy-eights/playable? % top-card (:card/suit top-card)))
+                             %)
+                         (:deck/cards (current-deck conn)))
+          ;; A filler so playing `matching` doesn't ALSO empty second-
+          ;; id's hand and win -- this test is about turn resolution,
+          ;; not the win condition.
+          filler (first (remove (comp #{(:db/id top-card) (:db/id matching)} :db/id)
+                                 (:deck/cards (current-deck conn))))]
+      ;; Bench the CURRENT turn holder (index 0) -- the stored
+      ;; :scene/crazy-eights-turn-index (still 0) now points at a
+      ;; benched seat, no longer matching second-id's own real position
+      ;; (1). Same regression Old Maid's live smoke test first caught:
+      ;; :crazy-eights/play must derive 'next' from the PLAYER's own
+      ;; resolved position, not the raw stored index, or the turn would
+      ;; land right back on second-id instead of advancing to third-id.
+      (set-discard-top! conn top-card (:card/suit top-card))
+      (dispatch conn :player/set-active first-id false)
+      (move-cards! conn second-id [matching filler])
+      (dispatch conn :crazy-eights/play second-id (:db/id matching) nil)
+      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 2)
+          "turn advances to third-id's real index, never back onto second-id itself"))))
+
+(deftest test-crazy-eights-end
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :crazy-eights/start)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dispatch conn :crazy-eights/end)
+      (let [scene (scene-crazy-eights conn)]
+        (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
+        (is (nil? (:scene/crazy-eights-players scene)))
+        (is (nil? (:scene/crazy-eights-turn-index scene)))
+        (is (nil? (:scene/crazy-eights-deck scene)))
+        (is (nil? (:scene/crazy-eights-suit scene)))
+        (is (nil? (:scene/crazy-eights-winner scene)))
+        (is (false? (:scene/neutral-authority? scene)))))))
+
+;; --- Rummy (example game) ---
+(defn ^:private scene-rummy [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private rummy-hand [conn holder-id]
+  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+
+(defn ^:private rummy-scored [conn]
+  (by-location (current-deck conn) :scored))
+
+(deftest test-rummy-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [scene (scene-rummy conn)
+          deck (current-deck conn)
+          active-ids (into #{} (map :db/id) (root-players conn))]
+      (is (= (set (:scene/rummy-players scene)) active-ids)
+          "the turn cycle is exactly the currently-active roster players")
+      (is (= (:scene/rummy-turn-index scene) 0))
+      (is (false? (:scene/rummy-drawn? scene)))
+      (is (:scene/neutral-authority? scene))
+      (is (= (:deck/name deck) "Standard 52-Card Deck")
+          "the purest reuse case yet -- no deck modification at all")
+      (is (= (count (:deck/cards deck)) 52))
+      (is (every? #(= 6 (count (rummy-hand conn %))) active-ids)
+          "every active player gets EXACTLY 6 -- no auto-discard at deal
+           time the way Old Maid has, fully deterministic")
+      (is (= (count (by-location deck :discard)) 1) "exactly one starting card is face up")
+      (is (= (count (by-location deck :draw)) (- 52 18 1))
+          "everything not dealt or flipped stays in the draw pile"))))
+
+(deftest test-rummy-draw-from-pile
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
+          draw-before (count (by-location (current-deck conn) :draw))
+          hand-before (count (rummy-hand conn player-id))]
+      (dispatch conn :rummy/draw-from-pile player-id)
+      (is (= (count (rummy-hand conn player-id)) (inc hand-before)))
+      (is (= (count (by-location (current-deck conn) :draw)) (dec draw-before)))
+      (is (:scene/rummy-drawn? (scene-rummy conn))))))
+
+(deftest test-rummy-draw-from-discard
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
+          top (apply max-key :card/position (by-location (current-deck conn) :discard))
+          hand-before (count (rummy-hand conn player-id))]
+      (dispatch conn :rummy/draw-from-discard player-id)
+      (is (contains? (into #{} (map :db/id) (rummy-hand conn player-id)) (:db/id top)))
+      (is (= (count (rummy-hand conn player-id)) (inc hand-before)))
+      (is (empty? (by-location (current-deck conn) :discard))
+          "momentarily empty -- refilled by this player's own mandatory discard, same turn")
+      (is (:scene/rummy-drawn? (scene-rummy conn))))))
+
+(deftest test-rummy-second-draw-same-turn-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))]
+      (dispatch conn :rummy/draw-from-pile player-id)
+      (let [hand-after-first (count (rummy-hand conn player-id))
+            draw-after-first (count (by-location (current-deck conn) :draw))]
+        (dispatch conn :rummy/draw-from-pile player-id)
+        (is (= (count (rummy-hand conn player-id)) hand-after-first) "no-op, already drawn this turn")
+        (is (= (count (by-location (current-deck conn) :draw)) draw-after-first))
+        (dispatch conn :rummy/draw-from-discard player-id)
+        (is (= (count (rummy-hand conn player-id)) hand-after-first)
+            "no-op -- the OTHER draw action is equally blocked, one draw total per turn")))))
+
+(deftest test-rummy-discard-before-draw-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
+          card (first (rummy-hand conn player-id))]
+      (dispatch conn :rummy/discard player-id (:db/id card))
+      (is (contains? (into #{} (map :db/id) (rummy-hand conn player-id)) (:db/id card))
+          "no-op -- must draw before discarding")
+      (is (= (:scene/rummy-turn-index (scene-rummy conn)) 0)))))
+
+(deftest test-rummy-discard-ends-turn
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))]
+      (dispatch conn :rummy/draw-from-pile player-id)
+      (let [card (first (rummy-hand conn player-id))]
+        (dispatch conn :rummy/discard player-id (:db/id card))
+        (is (not (contains? (into #{} (map :db/id) (rummy-hand conn player-id)) (:db/id card))))
+        (is (= (:db/id (apply max-key :card/position (by-location (current-deck conn) :discard)))
+               (:db/id card)))
+        (is (false? (:scene/rummy-drawn? (scene-rummy conn)))
+            "cleared -- the next player must draw before they can discard too")
+        (is (= (:scene/rummy-turn-index (scene-rummy conn)) 1))))))
+
+(deftest test-rummy-score-fresh-set
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
+          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id (take 3 sevens))
+      (dispatch conn :rummy/score player-id :seven)
+      (is (= (count (rummy-scored conn)) 3))
+      (is (every? #(= (:db/id (:card/holder %)) player-id) (rummy-scored conn))))))
+
+(deftest test-rummy-score-lay-off-fourth-by-different-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-a player-b] (:scene/rummy-players (scene-rummy conn))
+          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))
+          ;; A filler for player-a so scoring their 3 sevens doesn't
+          ;; ALSO empty their hand and end the game (rummy-finished?
+          ;; would then reject player-b's later lay-off outright) --
+          ;; this test is about shared-credit lay-off, not game-end.
+          filler (first (remove (comp #{:seven} :card/rank) (:deck/cards (current-deck conn))))]
+      (move-cards! conn player-a (conj (vec (take 3 sevens)) filler))
+      (move-cards! conn player-b [(nth sevens 3)])
+      (dispatch conn :rummy/score player-a :seven)
+      (dispatch conn :rummy/score player-b :seven)
+      (is (= (count (rummy-scored conn)) 4) "all 4 sevens now scored")
+      (let [scores (frequencies (map (comp :db/id :card/holder) (rummy-scored conn)))]
+        (is (= (get scores player-a) 3))
+        (is (= (get scores player-b) 1)
+            "player-b gets individual credit for laying off the 4th, even
+             though player-a started the set")))))
+
+(deftest test-rummy-score-over-full-rank-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
+          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id sevens)
+      (dispatch conn :rummy/score player-id :seven)
+      (is (= (count (rummy-scored conn)) 4))
+      (dispatch conn :rummy/score player-id :seven)
+      (is (= (count (rummy-scored conn)) 4) "no-op -- the rank is already fully scored"))))
+
+(deftest test-rummy-score-run-requires-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
+          run-cards (filter (fn [c] (and (= (:card/suit c) :hearts)
+                                          (contains? #{:five :six :seven} (:card/rank c))))
+                             (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id run-cards)
+      (dispatch conn :rummy/score-run player-id (mapv :db/id run-cards))
+      (is (empty? (rummy-scored conn)) "no-op -- :rummy/runs isn't enabled by default"))))
+
+(deftest test-rummy-score-run-when-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (clear-all-cards-to-draw! conn)
+    (set-enabled-elements! conn #{:rummy/game :rummy/runs})
+    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
+          run-cards (filter (fn [c] (and (= (:card/suit c) :hearts)
+                                          (contains? #{:five :six :seven} (:card/rank c))))
+                             (:deck/cards (current-deck conn)))]
+      (move-cards! conn player-id run-cards)
+      (dispatch conn :rummy/score-run player-id (mapv :db/id run-cards))
+      (is (= (count (rummy-scored conn)) 3))
+      (is (every? #(= (:db/id (:card/holder %)) player-id) (rummy-scored conn))))))
+
+(deftest test-rummy-draw-from-pile-reshuffles-discard-preserving-top-card
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
+          deck (current-deck conn)
+          top-card (apply max-key :card/position (by-location deck :discard))
+          remaining-draw (by-location deck :draw)
+          pool-size (count remaining-draw)]
+      ;; Empty the draw pile entirely -- every remaining :draw card
+      ;; moves into the discard pile UNDER the live top card (lower
+      ;; positions), simulating a long game where most of the deck has
+      ;; been played.
+      (transact! conn
+        (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position (- (inc i))})
+                      remaining-draw))
+      (is (empty? (by-location (current-deck conn) :draw)) "draw pile is now empty, by construction")
+      (dispatch conn :rummy/draw-from-pile player-id)
+      (let [deck (current-deck conn)]
+        (is (= (count (by-location deck :draw)) (dec pool-size))
+            "the reclaimed discard pile (minus the 1 just drawn) is the new draw pile")
+        (is (= (count (by-location deck :discard)) 1) "only the original top card remains in discard")
+        (is (= (:db/id (apply max-key :card/position (by-location deck :discard))) (:db/id top-card))
+            "the live top card itself was never touched by the reshuffle")
+        (is (:scene/rummy-drawn? (scene-rummy conn)))))))
+
+(deftest test-rummy-game-ends-and-tally-can-differ-from-who-emptied
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (clear-all-cards-to-draw! conn)
+    (let [[player-a player-b] (:scene/rummy-players (scene-rummy conn))
+          kings (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn)))
+          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))
+          filler (take 2 (remove (comp #{:king :seven} :card/rank) (:deck/cards (current-deck conn))))]
+      ;; player-a's ENTIRE hand is exactly 3 kings -- scoring them
+      ;; empties it completely and ends the game, without ever needing
+      ;; a turn or a discard (scoring is never turn-gated).
+      (move-cards! conn player-a (take 3 kings))
+      ;; player-b holds all 4 sevens plus 2 unrelated cards -- their
+      ;; hand stays non-empty even after scoring the sevens.
+      (move-cards! conn player-b (concat sevens filler))
+      ;; player-b scores FIRST, while the game is still active --
+      ;; player-a's own score (below) is what actually ends it, and
+      ;; once it does, rummy-finished? correctly blocks anything
+      ;; further, so ordering matters: player-b's score must land
+      ;; before player-a's does.
+      (dispatch conn :rummy/score player-b :seven)
+      (dispatch conn :rummy/score player-a :king)
+      (is (empty? (rummy-hand conn player-a)) "player-a's hand is empty -- the game has ended")
+      (is (seq (rummy-hand conn player-b)) "player-b's hand is NOT empty -- they didn't end the game")
+      (let [scores (frequencies (map (comp :db/id :card/holder) (rummy-scored conn)))]
+        (is (= (get scores player-a) 3))
+        (is (= (get scores player-b) 4))
+        (is (> (get scores player-b) (get scores player-a))
+            "player-b holds MORE scored cards despite NOT being the one
+             who ended the game -- the tallied winner (turn-order/
+             winners over this same scores map, computed live by
+             panel_rummy.cljs) would correctly be player-b, not
+             player-a")))))
+
+(deftest test-rummy-discard-after-external-bench-targets-players-real-neighbor
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [[first-id second-id _third-id] (:scene/rummy-players (scene-rummy conn))]
+      ;; Bench the CURRENT turn holder (index 0) -- the stored
+      ;; :scene/rummy-turn-index (still 0) now points at a benched
+      ;; seat, no longer matching second-id's own real position (1).
+      ;; Same regression class Old Maid's live smoke test first caught,
+      ;; and Crazy 8s' own analogous test guards against too.
+      (dispatch conn :player/set-active first-id false)
+      (dispatch conn :rummy/draw-from-pile second-id)
+      (let [card (first (rummy-hand conn second-id))]
+        (dispatch conn :rummy/discard second-id (:db/id card))
+        (is (= (:scene/rummy-turn-index (scene-rummy conn)) 2)
+            "turn advances to third-id's real index, never back onto second-id itself")))))
+
+(deftest test-rummy-end
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :rummy/start)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dispatch conn :rummy/end)
+      (let [scene (scene-rummy conn)]
+        (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
+        (is (nil? (:scene/rummy-players scene)))
+        (is (nil? (:scene/rummy-turn-index scene)))
+        (is (nil? (:scene/rummy-deck scene)))
+        (is (nil? (:scene/rummy-drawn? scene)))
+        (is (false? (:scene/neutral-authority? scene)))))))
+
+;; --- War (example game) ---
+(defn ^:private scene-war [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private war-pile [conn player-id location]
+  (filter (fn [c] (and (= (:card/location c) location) (= (:db/id (:card/holder c)) player-id)))
+          (:deck/cards (current-deck conn))))
+
+(defn ^:private war-total [conn player-id]
+  (+ (count (war-pile conn player-id :draw)) (count (war-pile conn player-id :won))))
+
+(defn ^:private set-war-draw!
+  "Test helper: makes `cards` (first = top) EXACTLY `player-id`'s
+   :draw pile, with no :won cards at all -- any of their OTHER current
+   cards (e.g. left over from :war/start's natural deal, in EITHER
+   pile) are shunted to `sink-id`'s :won pile instead, out of the way,
+   keeping the 'every card belongs to someone' invariant intact while
+   leaving `player-id`'s own piles an exact, uncontaminated match for
+   `cards` -- callers bench `sink-id` (or fully strip-player! it
+   afterward) so it doesn't show up as a live contender itself."
+  [conn player-id sink-id cards]
+  (let [wanted-ids (into #{} (map :db/id) cards)
+        leftover (concat (remove (comp wanted-ids :db/id) (war-pile conn player-id :draw))
+                          (war-pile conn player-id :won))
+        sink-start (count (war-pile conn sink-id :won))]
+    (transact! conn
+      (concat
+       (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won
+                                :card/holder sink-id :card/position (+ sink-start i)})
+                     leftover)
+       (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :draw
+                                :card/holder player-id :card/position (- (count cards) 1 i)})
+                     cards)))))
+
+(defn ^:private strip-player!
+  "Test helper: moves ALL of `player-id`'s cards (both piles) to
+   `to-id`'s :won pile, leaving `player-id` with nothing at all --
+   used to construct a deterministic 'already eliminated' scenario."
+  [conn player-id to-id]
+  (let [cards (concat (war-pile conn player-id :draw) (war-pile conn player-id :won))
+        start (count (war-pile conn to-id :won))]
+    (transact! conn
+      (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won
+                               :card/holder to-id :card/position (+ start i)})
+                    cards))))
+
+(deftest test-war-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [scene (scene-war conn)
+          deck (current-deck conn)
+          active-ids (into #{} (map :db/id) (root-players conn))]
+      (is (= (set (:scene/war-players scene)) active-ids)
+          "the turn cycle is exactly the currently-active roster players")
+      (is (nil? (:scene/war-contenders scene)))
+      (is (nil? (:scene/war-last-round scene)))
+      (is (= (count (:deck/cards deck)) 52) "the full deck, nothing removed")
+      (is (every? #(= (:card/location %) :draw) (:deck/cards deck))
+          "the ENTIRE deck goes straight into personal draw piles -- no shared pile at all")
+      (is (every? :card/holder (:deck/cards deck))
+          "every single card belongs to exactly one player from the start")
+      (is (= (apply + (map #(war-total conn %) (:scene/war-players scene))) 52))
+      (is (= (set (map #(war-total conn %) (:scene/war-players scene))) #{17 18})
+          "round-robin dealing 52 cards among 3 players -- 18/17/17"))))
+
+(deftest test-war-round-clear-winner
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [[p1 p2 sink] (:scene/war-players (scene-war conn))
+          king (first (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn))))
+          two (first (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn))))]
+      (dispatch conn :player/set-active sink false)
+      (set-war-draw! conn p1 sink [king])
+      (set-war-draw! conn p2 sink [two])
+      (dispatch conn :war/play-round)
+      (is (nil? (:scene/war-contenders (scene-war conn))) "resolved -- no ongoing war")
+      (is (= (:winner-id (:scene/war-last-round (scene-war conn))) p1))
+      (is (= (:cards-won (:scene/war-last-round (scene-war conn))) 2))
+      (is (= (set (map :db/id (war-pile conn p1 :won))) #{(:db/id king) (:db/id two)})
+          "p1 wins both cards played this round")
+      (is (empty? (war-pile conn p2 :won)))
+      (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn))))
+          "the pot is empty again -- fully swept to the winner"))))
+
+(deftest test-war-tie-then-continue
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [[p1 p2 sink] (:scene/war-players (scene-war conn))
+          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))
+          [s1 s2] (take 2 sevens)
+          king (first (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn))))
+          three (first (filter (comp #{:three} :card/rank) (:deck/cards (current-deck conn))))]
+      (dispatch conn :player/set-active sink false)
+      (set-war-draw! conn p1 sink [s1 king])
+      (set-war-draw! conn p2 sink [s2 three])
+      (dispatch conn :war/play-round)
+      (is (= (set (:scene/war-contenders (scene-war conn))) #{p1 p2}) "both played a 7 -- tied, war!")
+      (is (nil? (:scene/war-last-round (scene-war conn))) "not resolved yet")
+      (is (= (count (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn)))) 2)
+          "both 7s sit in the pot")
+      (is (empty? (war-pile conn p1 :won)))
+      (dispatch conn :war/play-round)
+      (is (nil? (:scene/war-contenders (scene-war conn))) "resolved -- p1's king beats p2's three")
+      (is (= (:winner-id (:scene/war-last-round (scene-war conn))) p1))
+      (is (= (:cards-won (:scene/war-last-round (scene-war conn))) 4))
+      (is (= (set (map :db/id (war-pile conn p1 :won)))
+             #{(:db/id s1) (:db/id s2) (:db/id king) (:db/id three)})
+          "the WHOLE accumulated pot -- both 7s plus both escalation cards -- goes to p1")
+      (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn))))))))
+
+(deftest test-war-personal-reshuffle
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [[p1 p2 sink] (:scene/war-players (scene-war conn))
+          two (first (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn))))]
+      (dispatch conn :player/set-active sink false)
+      (set-war-draw! conn p1 sink [])
+      (set-war-draw! conn p2 sink [two])
+      ;; Give p1 a concrete, non-empty :won pile (relocated from sink,
+      ;; which already absorbed p1's original leftovers) -- :draw stays
+      ;; genuinely empty, forcing a reshuffle on their next draw.
+      (let [p1-won (take 3 (war-pile conn sink :won))]
+        (transact! conn
+          (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won :card/holder p1 :card/position i})
+                       p1-won)))
+      (let [p1-total-before (war-total conn p1)
+            p2-total-before (war-total conn p2)]
+        (is (empty? (war-pile conn p1 :draw)) "p1's draw pile is genuinely empty")
+        (is (pos? (count (war-pile conn p1 :won))) "everything they hold sits in :won, unshuffled")
+        (dispatch conn :war/play-round)
+        (is (= (+ (war-total conn p1) (war-total conn p2)) (+ p1-total-before p2-total-before))
+            "no card lost or duplicated by the reshuffle -- the combined
+             total between the two participants is conserved, regardless
+             of who actually wins the round")
+        (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn))))
+            "the round still resolved -- reshuffling didn't block play")))))
+
+(deftest test-war-elimination-drops-empty-handed-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [[p1 p2 p3] (:scene/war-players (scene-war conn))
+          king (first (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn))))
+          two (first (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn))))]
+      (set-war-draw! conn p1 p3 [king])
+      (set-war-draw! conn p2 p3 [two])
+      ;; p3 has NOTHING at all in either pile -- eliminated before this
+      ;; round even starts, no separate event needed.
+      (strip-player! conn p3 p1)
+      (dispatch conn :war/play-round)
+      (is (= (:winner-id (:scene/war-last-round (scene-war conn))) p1))
+      (is (= (:cards-won (:scene/war-last-round (scene-war conn))) 2)
+          "only p1's and p2's cards -- p3 never participated at all"))))
+
+(deftest test-war-finished-when-one-player-has-everything
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [[p1 p2] (:scene/war-players (scene-war conn))]
+      (strip-player! conn p2 p1)
+      (is (zero? (war-total conn p2)) "p2 holds nothing -- eliminated")
+      (is (= (war-total conn p1) 52) "p1 holds the entire deck -- the win condition"))))
+
+(deftest test-war-end
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :war/start)
+    (let [deck-id (:db/id (current-deck conn))]
+      (dispatch conn :war/end)
+      (let [scene (scene-war conn)]
+        (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
+        (is (nil? (:scene/war-players scene)))
+        (is (nil? (:scene/war-contenders scene)))
+        (is (nil? (:scene/war-last-round scene)))
+        (is (nil? (:scene/war-deck scene)))))))
 
 ;; --- Neutral authority (impartial dealer) mode ---
 (deftest test-scene-toggle-neutral-authority

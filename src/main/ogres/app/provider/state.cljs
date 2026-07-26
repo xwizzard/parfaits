@@ -35,15 +35,19 @@
    :root/props-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/user            {:db/valueType :db.type/ref :db/isComponent true}
    :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/crazy-eights-deck {:db/valueType :db.type/ref}
    :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/game-type      {:db/valueType :db.type/ref}
    :scene/go-fish-deck   {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :scene/old-maid-deck  {:db/valueType :db.type/ref}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/tokens         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/notes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/props          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/rummy-deck     {:db/valueType :db.type/ref}
+   :scene/war-deck       {:db/valueType :db.type/ref}
    :session/conns        {:db/valueType :db.type/ref :db.cardinality :db.cardinality/many :db/isComponent true}
    :session/host         {:db/valueType :db.type/ref}
    :token/image          {:db/valueType :db.type/ref}
@@ -58,16 +62,17 @@
 (def ^:private seed-game-types
   "Idempotent tx-data (keyed by the unique :game-type/key) that seeds the
    bundled starter game-types -- 'Default' (the bare universal element set),
-   plus 'D&D 5e'/'Gloomhaven'/'Memory'/'Go Fish' as curated templates
-   demonstrating the pluggable game-module framework (see
-   `ogres.app.game-type`). Re-transacting this on every boot is a safe
-   upsert, not a duplicate, so a database saved before a given template
-   existed still gets it added. 'Memory' and 'Go Fish' also carry a
-   :game-type/category \"card\" -- a plain, unregistered string used
-   purely to group the Game Builder's template picker (see
-   panel_game_type_builder.cljs), not part of the element/enabled-
-   elements toggle system at all; Default/D&D 5e/Gloomhaven are
-   deliberately left uncategorized."
+   plus 'D&D 5e'/'Gloomhaven'/'Memory'/'Go Fish'/'Old Maid'/'Crazy 8s'/
+   'Rummy'/'War' as curated templates demonstrating the pluggable
+   game-module framework (see `ogres.app.game-type`). Re-transacting
+   this on every boot is a safe upsert, not a duplicate, so a database
+   saved before a given template existed still gets it added. 'Memory'/
+   'Go Fish'/'Old Maid'/'Crazy 8s'/'Rummy'/'War' also carry a :game-
+   type/category \"card\" -- a plain, unregistered string used purely
+   to group the Game Builder's template picker (see panel_game_type_
+   builder.cljs), not part of the element/enabled-elements toggle
+   system at all; Default/D&D 5e/Gloomhaven are deliberately left
+   uncategorized."
   [{:db/id [:db/ident :root]
     :root/game-types [{:game-type/key :default
                         :game-type/name "Default"
@@ -85,7 +90,23 @@
                        {:game-type/key :go-fish
                         :game-type/name "Go Fish"
                         :game-type/category "card"
-                        :game-type/enabled-elements game-type/go-fish-enabled-elements}]}])
+                        :game-type/enabled-elements game-type/go-fish-enabled-elements}
+                       {:game-type/key :old-maid
+                        :game-type/name "Old Maid"
+                        :game-type/category "card"
+                        :game-type/enabled-elements game-type/old-maid-enabled-elements}
+                       {:game-type/key :crazy-eights
+                        :game-type/name "Crazy 8s"
+                        :game-type/category "card"
+                        :game-type/enabled-elements game-type/crazy-eights-enabled-elements}
+                       {:game-type/key :rummy
+                        :game-type/name "Rummy"
+                        :game-type/category "card"
+                        :game-type/enabled-elements game-type/rummy-enabled-elements}
+                       {:game-type/key :war
+                        :game-type/name "War"
+                        :game-type/category "card"
+                        :game-type/enabled-elements game-type/war-enabled-elements}]}])
 
 (def ^:private card-back-svg
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 280'><rect width='200' height='280' rx='14' fill='#2c3e50'/><rect x='10' y='10' width='180' height='260' rx='8' fill='none' stroke='#ecf0f1' stroke-width='4'/><path d='M20,20 L180,260 M180,20 L20,260' stroke='#ecf0f1' stroke-width='2' opacity='0.4'/></svg>")
@@ -174,7 +195,27 @@
     [:db/add -10 :game-type/key :go-fish]
     [:db/add -10 :game-type/name "Go Fish"]
     [:db/add -10 :game-type/category "card"]
-    [:db/add -10 :game-type/enabled-elements game-type/go-fish-enabled-elements]]
+    [:db/add -10 :game-type/enabled-elements game-type/go-fish-enabled-elements]
+    [:db/add -1 :root/game-types -11]
+    [:db/add -11 :game-type/key :old-maid]
+    [:db/add -11 :game-type/name "Old Maid"]
+    [:db/add -11 :game-type/category "card"]
+    [:db/add -11 :game-type/enabled-elements game-type/old-maid-enabled-elements]
+    [:db/add -1 :root/game-types -12]
+    [:db/add -12 :game-type/key :crazy-eights]
+    [:db/add -12 :game-type/name "Crazy 8s"]
+    [:db/add -12 :game-type/category "card"]
+    [:db/add -12 :game-type/enabled-elements game-type/crazy-eights-enabled-elements]
+    [:db/add -1 :root/game-types -13]
+    [:db/add -13 :game-type/key :rummy]
+    [:db/add -13 :game-type/name "Rummy"]
+    [:db/add -13 :game-type/category "card"]
+    [:db/add -13 :game-type/enabled-elements game-type/rummy-enabled-elements]
+    [:db/add -1 :root/game-types -14]
+    [:db/add -14 :game-type/key :war]
+    [:db/add -14 :game-type/name "War"]
+    [:db/add -14 :game-type/category "card"]
+    [:db/add -14 :game-type/enabled-elements game-type/war-enabled-elements]]
     seed-props-images)))
 
 (def context (uix/create-context))

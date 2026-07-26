@@ -5,6 +5,22 @@
    transactional layer that uses these, and game_type/core_decks.cljs for
    the deck/card data these operate on.")
 
+(defn cards-of-rank
+  "The subset of `cards` whose :card/rank is `rank`."
+  [cards rank]
+  (filter (comp #{rank} :card/rank) cards))
+
+(defn cards-of-holder
+  "The subset of `cards` currently held by `holder-id` AND still
+   located in a hand -- typically one player's hand. Location-filtered
+   deliberately: a card moved to :scored/:discard/:draw can still
+   carry :card/holder afterward (e.g. Go Fish's/Rummy's scored cards
+   keep it, to record who gets individual credit), so matching by
+   holder alone would wrongly still count it as 'in that seat's
+   hand'."
+  [cards holder-id]
+  (filter (every-pred (comp #{:hand} :card/location) (comp #{holder-id} :db/id :card/holder)) cards))
+
 (defn shuffle-positions
   "Returns a map of {id position} assigning every id in `ids` a distinct
    position -- a dense 0..n-1 sequence, permuted -- so 'top of pile' is

@@ -4,17 +4,21 @@
             [clojure.string :refer [trim]]
             [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size hex-radius]]
+            [ogres.app.crazy-eights :as crazy-eights]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.go-fish :as go-fish]
             [ogres.app.matrix :as matrix]
             [ogres.app.memory :as memory]
+            [ogres.app.old-maid :as old-maid]
             [ogres.app.player :as player]
             [ogres.app.props :as props]
             [ogres.app.provider.state :as state]
+            [ogres.app.rummy :as rummy]
             [ogres.app.segment :as seg]
             [ogres.app.turn-order :as turn-order]
-            [ogres.app.vec :as vec :refer [Vec2]]))
+            [ogres.app.vec :as vec :refer [Vec2]]
+            [ogres.app.war :as war]))
 
 (def ^:private suffix-max-xf
   (map (fn [[label tokens]] [label (apply max (map :initiative/suffix tokens))])))
@@ -1400,29 +1404,77 @@
                :deck/cards ids}]
              card-tx)]))
 
-(defn ^:private deal-tx
-  "Tx-data dealing `n` cards to each of `holder-ids`, taken from the top
-   (highest :card/position) of `cards` -- a deck's own just-generated,
-   not-yet-committed card tx-data (see deck-create-tx), NOT a deck
-   already resolved in `data`. This exists specifically because a
-   freshly created deck's :db/id is still a temp id at this point in
-   the same transaction -- ds/entity (which :deck/draw/:deck/deal both
-   need to re-read the CURRENT draw pile) can't resolve a temp id, only
-   a real one, so routing a fresh deck's initial deal through those
-   events would fail. Building the deal directly from `cards` (plain
-   Clojure data already in hand, no db read needed) sidesteps that
-   entirely -- used by :go-fish/start, not needed by :deck/create
-   itself (which never deals on creation)."
+(defn ^:private deal-assignment
+  "Round-robin assigns cards from the top (highest :card/position) of
+   `cards` to each of `holder-ids` -- exactly `n` cards each if given,
+   or every remaining card in `cards` if nil, some holders getting one
+   more than others when it doesn't divide evenly (the same way
+   dealing a physical deck around a table works). Returns
+   {holder-id [card...]}, the cards themselves unchanged -- a plain
+   in-memory result, NOT tx-data, so a caller needing to reason about
+   the resulting hands before finalizing tx-data (e.g. Old Maid's
+   auto-discard-of-pairs-at-deal-time) can. `cards` is typically a
+   deck's own just-generated, not-yet-committed card tx-data (see
+   deck-create-tx), not a deck already resolved in `data` -- a freshly
+   created deck's :db/id is still a temp id at this point in the same
+   transaction, which ds/entity (what :deck/draw/:deck/deal both need
+   to re-read the CURRENT draw pile) can't resolve, only a real id
+   can; building the deal directly from `cards` (plain Clojure data
+   already in hand) sidesteps that entirely."
   [cards holder-ids n]
-  (let [ordered (sort-by :card/position > cards)]
-    (mapcat (fn [holder-id batch]
-              (map-indexed
-               (fn [i card]
-                 {:db/id (:db/id card) :card/location :hand
-                  :card/holder holder-id :card/position i})
-               batch))
-            holder-ids
-            (partition n ordered))))
+  (let [ordered (sort-by :card/position > cards)
+        ordered (cond->> ordered n (take (* n (count holder-ids))))]
+    (->> (map vector ordered (cycle holder-ids))
+         (group-by second)
+         (into {} (map (fn [[holder-id pairs]] [holder-id (mapv first pairs)]))))))
+
+(defn ^:private deal-tx
+  "Tx-data dealing every card `deal-assignment` assigns straight into
+   its holder's hand -- used by :go-fish/start, where everyone simply
+   keeps whatever they're dealt (contrast Old Maid's :old-maid/start,
+   which post-processes a deal-assignment result to also auto-discard
+   pairs before anything is asserted into a hand at all)."
+  [cards holder-ids n]
+  (mapcat (fn [[holder-id cards]]
+            (map-indexed
+             (fn [i card]
+               {:db/id (:db/id card) :card/location :hand
+                :card/holder holder-id :card/position i})
+             cards))
+          (deal-assignment cards holder-ids n)))
+
+(defn ^:private effective-draw-pile
+  "`deck`'s current :draw pile, reshuffled from :discard (minus its
+   own live top card) first if :draw is empty -- {:cards [...]
+   :reshuffle-tx [...]}, :cards reflecting whichever is actually live
+   right now (plain data, :card/position already updated if a
+   reshuffle just happened, so a caller can pick its own top card
+   straight off it without re-querying `data` -- the reshuffle tx-data
+   hasn't committed yet, the same 'return plain data a caller reasons
+   about before finalizing tx' idiom deal-assignment already uses).
+   The shared 'protect the live discard top from the reshuffle' rule
+   Crazy 8s and Rummy both need (a card matching/scoring is checked
+   against still has to exist somewhere) -- unlike generic :deck/
+   draw's own reshuffle, which reclaims the WHOLE discard pile, since
+   a plain deck browser has no 'still in play' top card to protect."
+  [deck]
+  (let [draw (pile deck :draw)]
+    (if (seq draw)
+      {:cards draw :reshuffle-tx []}
+      (let [discard (pile deck :discard)
+            top (top-card discard)
+            pool (remove (comp #{(:db/id top)} :db/id) discard)]
+        (if (seq pool)
+          (let [positions (cards/shuffle-positions (map :db/id pool))
+                ;; `pool` entries are DataScript entities (deck is
+                ;; already-committed, unlike deal-assignment's usual
+                ;; not-yet-committed plain-map input) -- assoc doesn't
+                ;; work on those directly, so build fresh plain maps.
+                shuffled (map (fn [c] {:db/id (:db/id c) :card/location :draw
+                                        :card/position (get positions (:db/id c))})
+                               pool)]
+            {:cards shuffled :reshuffle-tx shuffled})
+          {:cards [] :reshuffle-tx []})))))
 
 (defmethod
   ^{:doc "Creates a new deck instance on the current scene from a
@@ -2587,7 +2639,7 @@
 (defn ^:private go-fish-hand
   "Every card in `player-id`'s hand, from a (ds/entity-pulled) `deck`."
   [deck player-id]
-  (filter (comp #{player-id} :db/id :card/holder) (:deck/cards deck)))
+  (cards/cards-of-holder (:deck/cards deck) player-id))
 
 (defmethod
   ^{:doc "Starts a new Go Fish game on the current scene: creates a
@@ -2664,9 +2716,9 @@
       (if (and (not= target-id asker-id)
                (active? target-id)
                (or ask-anyone? (= target-id next-seat-id))
-               (seq (go-fish/cards-of-rank asker-hand rank)))
+               (seq (cards/cards-of-rank asker-hand rank)))
         (let [target-hand (go-fish-hand deck target-id)
-              matches (go-fish/cards-of-rank target-hand rank)]
+              matches (cards/cards-of-rank target-hand rank)]
           (if (seq matches)
             (let [start (next-position asker-hand)
                   transfer-tx (mapcat (fn [card i] (move-card-tx (:db/id card) :hand (+ start i) asker-id))
@@ -2718,7 +2770,7 @@
             deck-id (:db/id (:scene/go-fish-deck scene))
             deck (ds/entity data deck-id)
             hand (go-fish-hand deck player-id)
-            group (go-fish/cards-of-rank hand rank)
+            group (cards/cards-of-rank hand rank)
             n (go-fish/scoreable-count (count group) book-scoring?)]
         (if (pos? n)
           (let [to-score (take n group)
@@ -2757,6 +2809,912 @@
              [:db/retract scene-id :scene/go-fish-scores]
              [:db/retract scene-id :scene/go-fish-deck]
              [:db/add scene-id :scene/neutral-authority? false]]
+      deck-id (conj [:db/retractEntity deck-id]))))
+
+;; --- Old Maid (example game) ---
+;; A third demonstration of the generic card/deck system -- dealing the
+;; ENTIRE deck unevenly across players (deal-assignment with n nil), a
+;; blind, targetless draw always from whoever's next in the turn cycle,
+;; and turn-cycling that must skip ELIMINATED players (an empty hand),
+;; not just benched ones -- expressed entirely by handing a richer
+;; active? predicate to the existing, unmodified turn-order/valid-turn-
+;; index/next-turn-index, exactly the extension seam those functions
+;; were designed around; neither needed a single change. See
+;; ogres.app.old-maid for the pure pair-detection logic.
+
+(defn ^:private old-maid-player-active?
+  "True if roster player-id refers to a still-existing, still-active
+   (:player/active true) player who ALSO still holds at least one
+   card -- an empty hand means that player is safe/eliminated for the
+   rest of this round, and the turn cycle should skip them exactly
+   like a benched player, with no separate 'eliminate' event needed."
+  [data deck player-id]
+  (let [entity (ds/entity data player-id)]
+    (and (boolean (and entity (:player/active entity)))
+         (seq (cards/cards-of-holder (:deck/cards deck) player-id)))))
+
+(defn ^:private old-maid-turn-player
+  "The roster player entity whose turn it currently is, or nil if no
+   Old Maid game is in progress, or if every seated player has since
+   been benched/removed/eliminated -- resolves the corrected index the
+   same way memory-turn-player/go-fish's equivalent do, see
+   ogres.app.turn-order/valid-turn-index."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        players (:scene/old-maid-players scene)
+        idx (:scene/old-maid-turn-index scene)
+        deck (:scene/old-maid-deck scene)]
+    (if (seq players)
+      (let [corrected (turn-order/valid-turn-index players (partial old-maid-player-active? data deck) idx)]
+        (if corrected
+          (ds/entity data (nth players corrected)))))))
+
+(defn ^:private old-maid-authorized-for-turn?
+  "True if the local viewer speaks for the current Old Maid turn player
+   -- same player/authority? primitive Memory/Go Fish's own authorized-
+   for-turn? use, deliberately still just host-only fallback (not
+   suppressed by :scene/neutral-authority?) for the same turn-
+   continuity-safety-net reason theirs are."
+  [data]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (old-maid-turn-player data) [:player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
+(defmethod
+  ^{:doc "Starts a new Old Maid game: creates a fresh 49-card deck (the
+          traditional 52 minus 3 queens, see game-type.games.old-
+          maid/deck-definitions), adds it to :scene/decks, deals the
+          ENTIRE deck to every currently-active roster player (deal-
+          assignment with n nil -- some players getting one extra card
+          when it doesn't divide evenly), and for each resulting hand
+          immediately retracts any complete pairs it landed with (the
+          mandatory 'discard pairs before play begins' rule -- see
+          ogres.app.old-maid/pairs-to-discard) instead of ever
+          asserting them into a hand at all. Sets :scene/old-maid-
+          players/-turn-index 0, :scene/neutral-authority? true -- no
+          :scene/old-maid-scores at all, since there's nothing numeric
+          to track. Host-driven like every other setup action in this
+          app -- UI-gated, not enforced here."}
+  event-tx-fn :old-maid/start
+  [data _]
+  (let [root (ds/entity data [:db/ident :root])
+        active (->> (:root/players root)
+                    (filter :player/active)
+                    (sort-by :db/id)
+                    (mapv :db/id))
+        [deck-id deck-tx] (deck-create-tx :old-maid-52 {})
+        deck-map (first deck-tx)
+        cards (filter :card/rank deck-tx)
+        hands (deal-assignment cards active nil)
+        ;; :db/retractEntity refuses a still-unresolved temp id (unlike
+        ;; :db/add/map-form, which DOES resolve them) -- these cards
+        ;; are dealt-time pairs that should never exist at all, so
+        ;; rather than assert-then-retract them (which would fail),
+        ;; they're simply never asserted in the first place: excluded
+        ;; from both their own per-card tx-data AND the deck's own
+        ;; :deck/cards list below.
+        discard-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id (old-maid/pairs-to-discard hand)))) hands)
+        card-tx (remove (comp discard-ids :db/id) cards)
+        deck-map (update deck-map :deck/cards #(vec (remove discard-ids %)))
+        keep-tx (mapcat (fn [[holder-id hand]]
+                           (let [keep (remove (comp discard-ids :db/id) hand)]
+                             (map-indexed
+                              (fn [i card] {:db/id (:db/id card) :card/location :hand
+                                            :card/holder holder-id :card/position i})
+                              keep)))
+                         hands)]
+    (concat
+     [deck-map]
+     card-tx
+     keep-tx
+     [[:db.fn/call assoc-scene
+       :scene/decks deck-id
+       :scene/old-maid-deck deck-id
+       :scene/old-maid-players active
+       :scene/old-maid-turn-index 0
+       :scene/neutral-authority? true]])))
+
+(defmethod
+  ^{:doc "The core Old Maid turn action: `drawer-id` draws `card-id`,
+          one specific (player-CHOSEN, not random) card from whoever is
+          next in the (skip-eliminated) turn cycle after them -- 'the
+          person to your right' and 'who plays next' are the same
+          relationship once play moves in one consistent direction, so
+          this reuses turn-order/valid-turn-index directly rather than
+          inventing a separate 'neighbor' concept. The drawer picks
+          WHICH of their neighbor's cards by position (component/
+          card_hand.cljs's face-down, individually-clickable
+          placeholders, wired up in panel_old_maid.cljs) -- they still
+          never see its rank/suit beforehand, so the outcome is exactly
+          as blind as a truly random draw, but the choice of position
+          itself is the player's, not the game's. `card-id` must
+          actually belong to the resolved neighbor's hand -- a no-op
+          otherwise (a stale/manipulated click, e.g. the UI's own
+          rendered target going out of date). If the drawn card
+          completes a pair in the drawer's hand, both cards are
+          immediately retracted (ogres.app.old-maid/pairs-to-discard,
+          reused from :old-maid/start) instead of the drawn card ever
+          landing in the drawer's hand at all. The turn unconditionally
+          advances to whoever was drawn from afterward -- no hit/miss
+          branching, no extra-turn rule; Old Maid's turn logic is
+          strictly simpler than Go Fish's by design, not by omission.
+          A no-op if no other active player remains to draw from. The
+          'next' index is computed from the DRAWER's own resolved
+          position in `players` -- never from the raw stored
+          :scene/old-maid-turn-index -- because that stored index can
+          go stale relative to the actual (skip-inactive) current
+          player when a player is deactivated externally (e.g.
+          benched from the roster) between draws; basing it on the
+          drawer's own position keeps target != drawer even then."}
+  event-tx-fn :old-maid/draw
+  [data _ drawer-id card-id]
+  (if (and (old-maid-authorized-for-turn? data)
+           (= (:db/id (old-maid-turn-player data)) drawer-id))
+    (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+          players (:scene/old-maid-players scene)
+          deck-id (:db/id (:scene/old-maid-deck scene))
+          deck (ds/entity data deck-id)
+          active? (partial old-maid-player-active? data deck)
+          drawer-index (first (keep-indexed (fn [i id] (if (= id drawer-id) i)) players))
+          next-index (turn-order/valid-turn-index players active? (mod (inc drawer-index) (count players)))]
+      (if next-index
+        (let [target-id (nth players next-index)
+              target-hand (cards/cards-of-holder (:deck/cards deck) target-id)
+              drawn (some #(if (= (:db/id %) card-id) %) target-hand)]
+          (if drawn
+            (let [drawer-hand (cards/cards-of-holder (:deck/cards deck) drawer-id)
+                  discard (old-maid/pairs-to-discard (conj (vec drawer-hand) drawn))]
+              (concat
+               (if (seq discard)
+                 (map (fn [c] [:db/retractEntity (:db/id c)]) discard)
+                 (move-card-tx (:db/id drawn) :hand (next-position drawer-hand) drawer-id))
+               [[:db.fn/call assoc-scene :scene/old-maid-turn-index next-index]]))
+            []))
+        []))
+    []))
+
+(defmethod
+  ^{:doc "Ends the current Old Maid game: retracts the deck (and every
+          card in it, via :deck/cards' :db/isComponent cascade), clears
+          the three :scene/old-maid-* attributes, and clears :scene/
+          neutral-authority? back to false -- directly mirrors
+          :memory/end/:go-fish/end."}
+  event-tx-fn :old-maid/end
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        scene-id (:db/id scene)
+        deck-id (:db/id (:scene/old-maid-deck scene))]
+    (cond-> [[:db/retract scene-id :scene/old-maid-players]
+             [:db/retract scene-id :scene/old-maid-turn-index]
+             [:db/retract scene-id :scene/old-maid-deck]
+             [:db/add scene-id :scene/neutral-authority? false]]
+      deck-id (conj [:db/retractEntity deck-id]))))
+
+;; --- Crazy 8s (example game) ---
+;; A fourth demonstration of the generic card/deck system -- the first
+;; of the four to put cards face-up into a shared :card/location
+;; :discard pile that every player matches against (Go Fish uses
+;; :scored, Old Maid retracts pairs outright, Memory never discards),
+;; and the first where the unit of action is a single specific card
+;; (rank AND suit both matter) rather than a whole rank/hand. See
+;; ogres.app.crazy-eights for the pure per-card legality logic.
+
+(defn ^:private crazy-eights-player-active?
+  "True if roster player-id refers to a still-existing, still-active
+   (:player/active true) player -- plain roster-active, unlike Old
+   Maid's richer version, because emptying your hand here WINS and
+   ends the whole game rather than eliminating you into an ongoing
+   round; there's no 'skip the winner, keep playing' concept to
+   express."
+  [data player-id]
+  (let [entity (ds/entity data player-id)]
+    (boolean (and entity (:player/active entity)))))
+
+(defn ^:private crazy-eights-turn-player
+  "The roster player entity whose turn it currently is, or nil if no
+   Crazy 8s game is in progress, or if every seated player has since
+   been benched/removed -- resolves the corrected index the same way
+   go-fish-turn-player/old-maid-turn-player do, see
+   ogres.app.turn-order/valid-turn-index."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        players (:scene/crazy-eights-players scene)
+        idx (:scene/crazy-eights-turn-index scene)]
+    (if (seq players)
+      (let [corrected (turn-order/valid-turn-index players (partial crazy-eights-player-active? data) idx)]
+        (if corrected
+          (ds/entity data (nth players corrected)))))))
+
+(defn ^:private crazy-eights-authorized-for-turn?
+  "True if the local viewer speaks for the current Crazy 8s turn player
+   -- same player/authority? primitive Go Fish/Old Maid's own
+   authorized-for-turn? use, deliberately still just host-only fallback
+   (not suppressed by :scene/neutral-authority?) for the same turn-
+   continuity-safety-net reason theirs are."
+  [data]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (crazy-eights-turn-player data) [:player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
+(defmethod
+  ^{:doc "Starts a new Crazy 8s game: creates a fresh 52-card deck (the
+          standard deck with suit-less 8s, see game-type.games.crazy-
+          eights/deck-definitions), adds it to :scene/decks, deals 6
+          cards to each currently-active roster player (deal-assignment
+          with n 6 -- untouched cards simply stay at :card/location
+          :draw from deck-create-tx, no post-processing needed the way
+          Old Maid's whole-deck deal requires), then flips the topmost
+          remaining NON-8 card face up onto the discard pile as the
+          starting card -- skipping past any 8s so play never opens
+          with a suit-less card and no declared suit yet (the digital
+          equivalent of reshuffling a wild starter back in). Sets
+          :scene/crazy-eights-players/-turn-index 0/-suit (the starting
+          card's own suit) and :scene/neutral-authority? true -- no
+          :scene/crazy-eights-winner at all until someone actually
+          empties their hand. Host-driven like every other setup action
+          in this app -- UI-gated, not enforced here."}
+  event-tx-fn :crazy-eights/start
+  [data _]
+  (let [root (ds/entity data [:db/ident :root])
+        active (->> (:root/players root)
+                    (filter :player/active)
+                    (sort-by :db/id)
+                    (mapv :db/id))
+        [deck-id deck-tx] (deck-create-tx :crazy-eights-52 {})
+        deck-map (first deck-tx)
+        cards (filter :card/rank deck-tx)
+        hands (deal-assignment cards active 6)
+        dealt-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id hand))) hands)
+        hand-tx (mapcat (fn [[holder-id hand]]
+                           (map-indexed
+                            (fn [i card] {:db/id (:db/id card) :card/location :hand
+                                          :card/holder holder-id :card/position i})
+                            hand))
+                         hands)
+        remaining (remove (comp dealt-ids :db/id) cards)
+        starter (top-card (remove (comp #{:eight} :card/rank) remaining))
+        discard-tx [{:db/id (:db/id starter) :card/location :discard :card/position 0}]]
+    (concat
+     [deck-map]
+     cards
+     hand-tx
+     discard-tx
+     [[:db.fn/call assoc-scene
+       :scene/decks deck-id
+       :scene/crazy-eights-deck deck-id
+       :scene/crazy-eights-players active
+       :scene/crazy-eights-turn-index 0
+       :scene/crazy-eights-suit (:card/suit starter)
+       :scene/neutral-authority? true]])))
+
+(defmethod
+  ^{:doc "The core Crazy 8s turn action: `player-id` plays `card-id`
+          from their own hand face up onto the discard pile, legal only
+          per ogres.app.crazy-eights/playable? (checked here, server-
+          side -- the panel's disabled state is convenience, not
+          enforcement). `suit` names the suit to declare when `card-id`
+          is an 8 (a wild, always legal); ignored otherwise, since a
+          non-8's own :card/suit becomes the new thing to match against
+          instead. If this empties the player's hand, they've won --
+          :scene/crazy-eights-winner is set and the turn index is left
+          alone (the game is over, not paused); otherwise the turn
+          unconditionally advances to the next active player. A no-op
+          if it isn't `player-id`'s turn, or the card isn't theirs, or
+          isn't currently legal to play. The 'next' index is computed
+          from the PLAYER's own resolved position in `players` -- never
+          from the raw stored :scene/crazy-eights-turn-index -- for the
+          same stale-index reason :old-maid/draw's fix applies: that
+          stored index can go stale relative to the actual (skip-
+          inactive) current player when someone is benched externally
+          between turns."}
+  event-tx-fn :crazy-eights/play
+  [data _ player-id card-id suit]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
+    (if (and (nil? (:scene/crazy-eights-winner scene))
+             (crazy-eights-authorized-for-turn? data)
+             (= (:db/id (crazy-eights-turn-player data)) player-id))
+      (let [deck-id (:db/id (:scene/crazy-eights-deck scene))
+            deck (ds/entity data deck-id)
+            hand (cards/cards-of-holder (:deck/cards deck) player-id)
+            card (some #(if (= (:db/id %) card-id) %) hand)
+            discard (pile deck :discard)
+            top (top-card discard)
+            declared-suit (:scene/crazy-eights-suit scene)]
+        (if (and card (crazy-eights/playable? card top declared-suit))
+          (let [remaining-hand (remove (comp #{card-id} :db/id) hand)
+                new-suit (if (= (:card/rank card) :eight) suit (:card/suit card))
+                players (:scene/crazy-eights-players scene)
+                active? (partial crazy-eights-player-active? data)
+                player-index (first (keep-indexed (fn [i id] (if (= id player-id) i)) players))
+                next-index (turn-order/next-turn-index players active? player-index)]
+            (concat
+             (move-card-tx card-id :discard (next-position discard) nil)
+             [[:db.fn/call assoc-scene :scene/crazy-eights-suit new-suit]]
+             (if (empty? remaining-hand)
+               [[:db.fn/call assoc-scene :scene/crazy-eights-winner player-id]]
+               (if next-index
+                 [[:db.fn/call assoc-scene :scene/crazy-eights-turn-index next-index]]
+                 []))))
+          []))
+      [])))
+
+(defmethod
+  ^{:doc "Draws exactly one card into `player-id`'s hand -- legal only
+          when they currently hold NO playable card (see ogres.app.
+          crazy-eights/playable-cards; drawing is never an optional
+          escape hatch when a real play exists). Does NOT advance the
+          turn -- one click, one card, same player's turn continues
+          (they either draw again or, once able, play -- both separate
+          dispatches), the literal 'draw cards until you're able to
+          match or play an 8' rule rather than an auto-play. If the
+          draw pile is empty, reshuffles the discard pile EXCEPT its
+          live top card back into the draw pile first (effective-draw-
+          pile, shared with Rummy's own draw-from-pile action). In the
+          near-impossible case where even that leaves nothing to draw,
+          the turn passes instead of deadlocking on a player who can
+          neither play nor draw. A no-op once the game's already been
+          won."}
+  event-tx-fn :crazy-eights/draw
+  [data _ player-id]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
+    (if (and (nil? (:scene/crazy-eights-winner scene))
+             (crazy-eights-authorized-for-turn? data)
+             (= (:db/id (crazy-eights-turn-player data)) player-id))
+      (let [deck-id (:db/id (:scene/crazy-eights-deck scene))
+            deck (ds/entity data deck-id)
+            hand (cards/cards-of-holder (:deck/cards deck) player-id)
+            discard (pile deck :discard)
+            top (top-card discard)
+            declared-suit (:scene/crazy-eights-suit scene)]
+        (if (seq (crazy-eights/playable-cards hand top declared-suit))
+          []
+          (let [{:keys [cards reshuffle-tx]} (effective-draw-pile deck)]
+            (if (seq cards)
+              (let [drawn (apply max-key :card/position cards)]
+                (concat reshuffle-tx (move-card-tx (:db/id drawn) :hand (next-position hand) player-id)))
+              (let [players (:scene/crazy-eights-players scene)
+                    active? (partial crazy-eights-player-active? data)
+                    player-index (first (keep-indexed (fn [i id] (if (= id player-id) i)) players))
+                    next-index (turn-order/next-turn-index players active? player-index)]
+                (if next-index
+                  [[:db.fn/call assoc-scene :scene/crazy-eights-turn-index next-index]]
+                  []))))))
+      [])))
+
+(defmethod
+  ^{:doc "Ends the current Crazy 8s game: retracts the deck (and every
+          card in it, via :deck/cards' :db/isComponent cascade), clears
+          the :scene/crazy-eights-* attributes, and clears :scene/
+          neutral-authority? back to false -- directly mirrors
+          :old-maid/end/:go-fish/end."}
+  event-tx-fn :crazy-eights/end
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        scene-id (:db/id scene)
+        deck-id (:db/id (:scene/crazy-eights-deck scene))]
+    (cond-> [[:db/retract scene-id :scene/crazy-eights-players]
+             [:db/retract scene-id :scene/crazy-eights-turn-index]
+             [:db/retract scene-id :scene/crazy-eights-deck]
+             [:db/retract scene-id :scene/crazy-eights-suit]
+             [:db/retract scene-id :scene/crazy-eights-winner]
+             [:db/add scene-id :scene/neutral-authority? false]]
+      deck-id (conj [:db/retractEntity deck-id]))))
+
+;; --- Rummy (example game) ---
+;; A fifth demonstration of the generic card/deck system -- the first
+;; with a SHARED, table-wide :card/location :scored area any player
+;; can contribute to (not just whoever started it), and the first
+;; where the game-ending condition (a hand empties) and the winner
+;; (most scored cards) are genuinely different questions -- exactly
+;; the shape turn-order/winners was built for and has had no real
+;; consumer since Go Fish. See ogres.app.rummy for the pure set/run
+;; detection logic.
+
+(defn ^:private rummy-player-active?
+  "True if roster player-id refers to a still-existing, still-active
+   (:player/active true) player -- plain roster-active, Crazy 8s'
+   shape, not Old Maid's hand-emptiness-aware one: Rummy ends outright
+   the instant a hand empties, there's no 'skip them, keep going'
+   concept to express."
+  [data player-id]
+  (let [entity (ds/entity data player-id)]
+    (boolean (and entity (:player/active entity)))))
+
+(defn ^:private rummy-turn-player
+  "The roster player entity whose turn it currently is, or nil if no
+   Rummy game is in progress, or if every seated player has since been
+   benched/removed -- resolves the corrected index the same way every
+   prior game's turn-player fn does, see ogres.app.turn-order/valid-
+   turn-index."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        players (:scene/rummy-players scene)
+        idx (:scene/rummy-turn-index scene)]
+    (if (seq players)
+      (let [corrected (turn-order/valid-turn-index players (partial rummy-player-active? data) idx)]
+        (if corrected
+          (ds/entity data (nth players corrected)))))))
+
+(defn ^:private rummy-authorized-for-turn?
+  "True if the local viewer speaks for the current Rummy turn player --
+   same player/authority? primitive every prior game's authorized-for-
+   turn? uses, deliberately still just host-only fallback (not
+   suppressed by :scene/neutral-authority?) for the same turn-
+   continuity-safety-net reason theirs are."
+  [data]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (rummy-turn-player data) [:player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
+(defn ^:private rummy-finished?
+  "True once ANY of `players`' hands has emptied -- Rummy ends outright
+   the instant this happens, guarding every :rummy/* action exactly
+   the way Crazy 8s guards on its stored winner. Rummy has no stored
+   winner at all (see :rummy/start's doc) -- who actually WON is a
+   separate tally, computed live by panel_rummy.cljs from :card/holder
+   on every :scored card, not decided here."
+  [deck players]
+  (boolean (some (fn [id] (empty? (cards/cards-of-holder (:deck/cards deck) id))) players)))
+
+(defmethod
+  ^{:doc "Starts a new Rummy game: creates a fresh 52-card deck (the
+          standard deck, completely unmodified -- the purest reuse
+          case yet, see game-type.games.rummy), adds it to :scene/
+          decks, deals 6 cards to each currently-active roster player
+          (deal-assignment with n 6, same as Go Fish/Crazy 8s), then
+          flips the topmost remaining card face up onto the discard
+          pile as the starting card -- any rank is fine here, unlike
+          Crazy 8s' starter pick, since Rummy has no wild/suit-less
+          card to skip past. Sets :scene/rummy-players/-turn-index
+          0/-drawn? false and :scene/neutral-authority? true -- no
+          :scene/rummy-winner/-scores at all: unlike Crazy 8s' single
+          stored winner, Rummy's tally is derived live from :card/
+          holder on every :scored card (see rummy-finished?/panel_
+          rummy.cljs), since the game-ending player and the eventual
+          winner are often different people here. Host-driven like
+          every other setup action in this app -- UI-gated, not
+          enforced here."}
+  event-tx-fn :rummy/start
+  [data _]
+  (let [root (ds/entity data [:db/ident :root])
+        active (->> (:root/players root)
+                    (filter :player/active)
+                    (sort-by :db/id)
+                    (mapv :db/id))
+        [deck-id deck-tx] (deck-create-tx :standard-52 {})
+        deck-map (first deck-tx)
+        cards (filter :card/rank deck-tx)
+        hands (deal-assignment cards active 6)
+        dealt-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id hand))) hands)
+        hand-tx (mapcat (fn [[holder-id hand]]
+                           (map-indexed
+                            (fn [i card] {:db/id (:db/id card) :card/location :hand
+                                          :card/holder holder-id :card/position i})
+                            hand))
+                         hands)
+        remaining (remove (comp dealt-ids :db/id) cards)
+        starter (top-card remaining)
+        discard-tx [{:db/id (:db/id starter) :card/location :discard :card/position 0}]]
+    (concat
+     [deck-map]
+     cards
+     hand-tx
+     discard-tx
+     [[:db.fn/call assoc-scene
+       :scene/decks deck-id
+       :scene/rummy-deck deck-id
+       :scene/rummy-players active
+       :scene/rummy-turn-index 0
+       :scene/rummy-drawn? false
+       :scene/neutral-authority? true]])))
+
+(defmethod
+  ^{:doc "The first half of the core Rummy turn action: draws the top
+          of the draw pile into `player-id`'s hand -- legal only once
+          per turn (:scene/rummy-drawn? must still be false) and only
+          on their own turn. Reuses effective-draw-pile (shared with
+          Crazy 8s' :crazy-eights/draw) for 'reshuffle the discard pile
+          minus its live top card when the draw pile runs dry'. Sets
+          :scene/rummy-drawn? true -- :rummy/discard checks this
+          before allowing the mandatory end-of-turn discard, and
+          clears it again once that fires. A no-op if the game's
+          already finished, they've already drawn this turn, or
+          there's truly nothing left to draw."}
+  event-tx-fn :rummy/draw-from-pile
+  [data _ player-id]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        deck-id (:db/id (:scene/rummy-deck scene))
+        deck (ds/entity data deck-id)]
+    (if (and (not (rummy-finished? deck (:scene/rummy-players scene)))
+             (not (:scene/rummy-drawn? scene))
+             (rummy-authorized-for-turn? data)
+             (= (:db/id (rummy-turn-player data)) player-id))
+      (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
+            {:keys [cards reshuffle-tx]} (effective-draw-pile deck)]
+        (if (seq cards)
+          (let [drawn (apply max-key :card/position cards)]
+            (concat reshuffle-tx
+                    (move-card-tx (:db/id drawn) :hand (next-position hand) player-id)
+                    [[:db.fn/call assoc-scene :scene/rummy-drawn? true]]))
+          []))
+      [])))
+
+(defmethod
+  ^{:doc "The other half of the core turn action: takes the discard
+          pile's current live top card into `player-id`'s hand instead
+          of the draw pile -- same once-per-turn/turn-gating/finished
+          guards as :rummy/draw-from-pile. A no-op if the discard pile
+          is (momentarily) empty."}
+  event-tx-fn :rummy/draw-from-discard
+  [data _ player-id]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        deck-id (:db/id (:scene/rummy-deck scene))
+        deck (ds/entity data deck-id)]
+    (if (and (not (rummy-finished? deck (:scene/rummy-players scene)))
+             (not (:scene/rummy-drawn? scene))
+             (rummy-authorized-for-turn? data)
+             (= (:db/id (rummy-turn-player data)) player-id))
+      (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
+            discard (pile deck :discard)]
+        (if (seq discard)
+          (let [top (top-card discard)]
+            (concat (move-card-tx (:db/id top) :hand (next-position hand) player-id)
+                    [[:db.fn/call assoc-scene :scene/rummy-drawn? true]]))
+          []))
+      [])))
+
+(defmethod
+  ^{:doc "Lays down a scored set from `player-id`'s own hand for
+          `rank`, gated by player/authority? over that specific seat
+          (same explicit player-id-arg pattern :go-fish/score uses)
+          and NOT turn-gated -- laying down a completed set (or laying
+          off the 4th onto an existing one) is bookkeeping any
+          authorized player can do any time, the same call Go Fish
+          already made for the identical reason. How many cards move
+          depends on how many of `rank` are ALREADY scored on the
+          table (ogres.app.rummy/scoreable-set): a fresh set takes
+          everything the player holds (3 or 4 at once); once exactly 3
+          are already down, ANY player -- not just whoever scored the
+          original 3 -- laying off the 4th needs just that one card.
+          :card/holder still records who gets individual credit for
+          each card laid down -- the win condition is 'most scored
+          cards', not 'most complete sets', so who contributed which
+          specific card is what matters, not who 'owns' a shared table
+          group. A no-op if the game's finished or `player-id` doesn't
+          have an eligible set for `rank` right now."}
+  event-tx-fn :rummy/score
+  [data _ player-id rank]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
+    (if (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)
+      (let [scene (:camera/scene (:user/camera user))
+            deck-id (:db/id (:scene/rummy-deck scene))
+            deck (ds/entity data deck-id)]
+        (if (rummy-finished? deck (:scene/rummy-players scene))
+          []
+          (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
+                group (cards/cards-of-rank hand rank)
+                scored (filter (comp #{:scored} :card/location) (:deck/cards deck))
+                already-scored (count (cards/cards-of-rank scored rank))
+                n (rummy/scoreable-set (count group) already-scored)]
+            (if (pos? n)
+              (let [to-score (take n group)
+                    start (next-position scored)]
+                (mapcat (fn [card i] (move-card-tx (:db/id card) :scored (+ start i) player-id))
+                        to-score (range)))
+              []))))
+      [])))
+
+(defmethod
+  ^{:doc "Lays down a run (3+ consecutive ranks, one suit) from
+          `player-id`'s own hand -- only reachable when :rummy/runs is
+          enabled (checked here server-side, the same live-from-
+          enabled-elements pattern :go-fish/ask-anyone etc. use), and
+          only for the EXACT `card-ids` given (validated directly
+          against ogres.app.rummy/runs on the player's own hand right
+          now, not re-derived from a suit/range -- the same 'explicit
+          ids, not re-derived' idiom :crazy-eights/play already uses).
+          Same authority (not turn-gated) as :rummy/score. No lay-off-
+          the-4th equivalent for runs -- out of scope, the user's own
+          description of that rule was specific to sets. A no-op if
+          the game's finished, the element's disabled, or `card-ids`
+          doesn't exactly match one of the player's own current runs."}
+  event-tx-fn :rummy/score-run
+  [data _ player-id card-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
+    (if (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)
+      (let [scene (:camera/scene (:user/camera user))
+            enabled (:game-type/enabled-elements (:scene/game-type scene))
+            deck-id (:db/id (:scene/rummy-deck scene))
+            deck (ds/entity data deck-id)]
+        (if (and (contains? enabled :rummy/runs)
+                 (not (rummy-finished? deck (:scene/rummy-players scene))))
+          (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
+                id-set (set card-ids)
+                valid? (some #(= (set (map :db/id %)) id-set) (rummy/runs hand))]
+            (if valid?
+              (let [to-score (filter (comp id-set :db/id) hand)
+                    scored (filter (comp #{:scored} :card/location) (:deck/cards deck))
+                    start (next-position scored)]
+                (mapcat (fn [card i] (move-card-tx (:db/id card) :scored (+ start i) player-id))
+                        to-score (range)))
+              []))
+          []))
+      [])))
+
+(defmethod
+  ^{:doc "Ends `player-id`'s turn: discards `card-id` from their own
+          hand face up onto the discard pile -- legal only once
+          they've already drawn this turn (:scene/rummy-drawn? true,
+          the mandatory 'you must draw before you may discard'
+          sequencing) and it's their turn. Clears :scene/rummy-drawn?
+          back to false and advances the turn unconditionally to the
+          next active player -- resolved from the PLAYER's own
+          resolved position in `players`, never the raw stored
+          :scene/rummy-turn-index, the same stale-index-safe pattern
+          :old-maid/draw's fix and :crazy-eights/play both already
+          apply. A no-op if the game's already finished, it isn't
+          `player-id`'s turn, they haven't drawn yet, or `card-id`
+          isn't actually in their hand."}
+  event-tx-fn :rummy/discard
+  [data _ player-id card-id]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        deck-id (:db/id (:scene/rummy-deck scene))
+        deck (ds/entity data deck-id)]
+    (if (and (not (rummy-finished? deck (:scene/rummy-players scene)))
+             (:scene/rummy-drawn? scene)
+             (rummy-authorized-for-turn? data)
+             (= (:db/id (rummy-turn-player data)) player-id))
+      (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
+            card (some #(if (= (:db/id %) card-id) %) hand)]
+        (if card
+          (let [discard (pile deck :discard)
+                players (:scene/rummy-players scene)
+                active? (partial rummy-player-active? data)
+                player-index (first (keep-indexed (fn [i id] (if (= id player-id) i)) players))
+                next-index (turn-order/next-turn-index players active? player-index)]
+            (concat
+             (move-card-tx card-id :discard (next-position discard) nil)
+             [[:db.fn/call assoc-scene :scene/rummy-drawn? false]]
+             (if next-index
+               [[:db.fn/call assoc-scene :scene/rummy-turn-index next-index]]
+               [])))
+          []))
+      [])))
+
+(defmethod
+  ^{:doc "Ends the current Rummy game: retracts the deck (and every
+          card in it, via :deck/cards' :db/isComponent cascade), clears
+          the :scene/rummy-* attributes, and clears :scene/neutral-
+          authority? back to false -- directly mirrors :crazy-eights/
+          end/:old-maid/end/:go-fish/end."}
+  event-tx-fn :rummy/end
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        scene-id (:db/id scene)
+        deck-id (:db/id (:scene/rummy-deck scene))]
+    (cond-> [[:db/retract scene-id :scene/rummy-players]
+             [:db/retract scene-id :scene/rummy-turn-index]
+             [:db/retract scene-id :scene/rummy-deck]
+             [:db/retract scene-id :scene/rummy-drawn?]
+             [:db/add scene-id :scene/neutral-authority? false]]
+      deck-id (conj [:db/retractEntity deck-id]))))
+
+;; --- War (example game) ---
+;; A sixth demonstration of the generic card/deck system -- and the
+;; first with NO shared pile at all (every card belongs to exactly one
+;; player's own :draw/:won piles from deal to game-end) and NO turn
+;; order (every active player plays simultaneously, every round --
+;; ogres.app.turn-order is genuinely unused here, unlike every prior
+;; game). See ogres.app.war for the pure tie-detection logic.
+
+(defn ^:private player-cards
+  "`player-id`'s cards in `deck` currently at `location` (:draw or
+   :won -- War's two personal, per-player piles)."
+  [deck location player-id]
+  (filter (fn [c] (and (= (:card/location c) location)
+                       (= (:db/id (:card/holder c)) player-id)))
+          (:deck/cards deck)))
+
+(defn ^:private war-player-active?
+  "True if roster player-id refers to a still-existing, still-active
+   (:player/active true) player who ALSO still holds at least one
+   card, in EITHER personal pile -- Old Maid's exact 'richer active?'
+   shape (elimination-by-emptiness), just checking two locations
+   instead of one, since War has no single 'hand' to check."
+  [data deck player-id]
+  (let [entity (ds/entity data player-id)]
+    (and (boolean (and entity (:player/active entity)))
+         (or (seq (player-cards deck :draw player-id))
+             (seq (player-cards deck :won player-id))))))
+
+(defn ^:private initial-piles
+  "The current {player-id {:draw [...] :won [...]}} state for each of
+   `player-ids`, read once from `deck` (:draw ordered top-first) --
+   plain in-memory data (not tx), the same 'reason about the result
+   before finalizing tx-data' idiom deal-assignment/effective-draw-
+   pile already use, since a single :war/play-round call may need to
+   draw and reshuffle several times in a row before it can commit
+   anything."
+  [deck player-ids]
+  (into {}
+        (map (fn [pid]
+               [pid {:draw (vec (sort-by :card/position > (player-cards deck :draw pid)))
+                     :won (vec (player-cards deck :won pid))}]))
+        player-ids))
+
+(defn ^:private draw-one
+  "Pops the top card off `player-id`'s entry in `piles` (see initial-
+   piles), reshuffling their :won pile into a freshly shuffled :draw
+   first if :draw is empty -- the personal-pile analog of effective-
+   draw-pile, deliberately kept separate from it: that one reshuffles
+   a SHARED, holder-less :discard into a shared :draw; this reshuffles
+   one specific player's OWN :won into their OWN :draw, a genuinely
+   different filter, not worth forcing into one shared function for a
+   third time. Returns [drawn-card-or-nil piles'] -- drawn-card is nil
+   only if the player has truly nothing left in EITHER pile, in which
+   case piles' is unchanged and they're simply excluded from this
+   round (eliminated)."
+  [piles player-id]
+  (let [{:keys [draw won]} (get piles player-id)]
+    (cond
+      (seq draw) [(first draw) (assoc-in piles [player-id :draw] (vec (rest draw)))]
+      (seq won) (let [reshuffled (shuffle won)]
+                  [(first reshuffled) (assoc piles player-id {:draw (vec (rest reshuffled)) :won []})])
+      :else [nil piles])))
+
+(defn ^:private piles-tx
+  "Tx-data committing every card still sitting in `piles` (see
+   initial-piles/draw-one) back to its owner's :draw/:won piles --
+   NOT the cards that were drawn out of them this round (those are
+   handled separately, see :war/play-round, since where they end up
+   depends on how the round resolves)."
+  [piles]
+  (mapcat (fn [[player-id {:keys [draw won]}]]
+             (concat
+              (map-indexed (fn [i card] {:db/id (:db/id card) :card/location :draw
+                                          :card/holder player-id :card/position i})
+                           (reverse draw))
+              (map-indexed (fn [i card] {:db/id (:db/id card) :card/location :won
+                                          :card/holder player-id :card/position i})
+                           won)))
+          piles))
+
+(defmethod
+  ^{:doc "Starts a new War game: creates a fresh 52-card deck (the
+          standard deck, completely unmodified -- same reuse tier as
+          Rummy), adds it to :scene/decks, and deals the ENTIRE deck
+          to every currently-active roster player (deal-assignment
+          with n nil, Old Maid's exact call) straight into :card/
+          location :draw -- no starting flip, since War has no shared
+          discard pile at all. Sets :scene/war-players -- leaves
+          :scene/war-contenders/-last-round unset (DataScript rejects
+          storing a literal nil via map-form assertion; :war/end
+          already retracts them, and a fresh scene never had them to
+          begin with). Host-driven like
+          every other setup action in this app -- UI-gated, not
+          enforced here."}
+  event-tx-fn :war/start
+  [data _]
+  (let [root (ds/entity data [:db/ident :root])
+        active (->> (:root/players root)
+                    (filter :player/active)
+                    (sort-by :db/id)
+                    (mapv :db/id))
+        [deck-id deck-tx] (deck-create-tx :standard-52 {})
+        deck-map (first deck-tx)
+        cards (filter :card/rank deck-tx)
+        hands (deal-assignment cards active nil)
+        hand-tx (mapcat (fn [[holder-id hand]]
+                           (map-indexed
+                            (fn [i card] {:db/id (:db/id card) :card/location :draw
+                                          :card/holder holder-id :card/position i})
+                            hand))
+                         hands)]
+    (concat
+     [deck-map]
+     cards
+     hand-tx
+     [[:db.fn/call assoc-scene
+       :scene/decks deck-id
+       :scene/war-deck deck-id
+       :scene/war-players active]])))
+
+(defmethod
+  ^{:doc "The only human action in the whole game: advances War by one
+          comparison step. No per-seat authorization at all -- there's
+          nothing to authorize (nobody chooses a card), the same trust
+          -the-UI-to-gate-it precedent :*/start/:*/end already set.
+          Contenders are :scene/war-contenders if a war is already in
+          progress (a prior tie), else every currently-active player --
+          this is what makes a tie resolve ONE ESCALATION PER CALL
+          rather than looping the whole chain internally: a second
+          :war/play-round dispatch is required to continue it,
+          matching a real game of War actually feeling like several
+          rounds rather than one silent jump to the result.
+
+          Each contender draws their own top :draw card (reshuffling
+          their own :won pile into a fresh :draw first if empty, see
+          draw-one) -- a contender with NOTHING left in either pile is
+          simply dropped from contention (eliminated), no separate
+          event needed. Every card drawn moves face up to :card/
+          location :war (the shared pot), still holder-tagged so the
+          UI can show who played what. Then:
+            - a unique highest card sweeps the ENTIRE :war pile (this
+              click's cards plus everything already sitting there from
+              earlier escalations) to that player's :won pile,
+              :scene/war-contenders clears, and :scene/war-last-round
+              records the winner and how many cards they just won;
+            - 2+ tied for highest sets :scene/war-contenders to
+              exactly that tied set, leaving the pot in place for the
+              next call to continue;
+            - nobody could draw at all (every remaining contender
+              simultaneously out of cards -- fully degenerate) is a
+              no-op, left for a human to notice and End the game."}
+  event-tx-fn :war/play-round
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        players (:scene/war-players scene)
+        deck-id (:db/id (:scene/war-deck scene))
+        deck (ds/entity data deck-id)
+        active? (partial war-player-active? data deck)
+        contenders (let [c (:scene/war-contenders scene)] (if (seq c) c (filter active? players)))]
+    (if (<= (count contenders) 1)
+      []
+      (let [piles0 (initial-piles deck contenders)
+            {:keys [piles drawn]}
+            (reduce (fn [{:keys [piles drawn]} pid]
+                      (let [[card piles'] (draw-one piles pid)]
+                        {:piles piles' :drawn (if card (assoc drawn pid card) drawn)}))
+                    {:piles piles0 :drawn {}}
+                    contenders)
+            remaining-pile-tx (piles-tx piles)]
+        (if (empty? drawn)
+          []
+          (let [war-pile (pile deck :war)
+                war-start (next-position war-pile)
+                move-to-war-tx (map-indexed
+                                 (fn [i [pid card]] {:db/id (:db/id card) :card/location :war
+                                                      :card/holder pid :card/position (+ war-start i)})
+                                 drawn)
+                tied (war/tied-for-highest drawn)]
+            (if (= (count tied) 1)
+              (let [winner-id (first tied)
+                    whole-pot (concat war-pile (vals drawn))
+                    won-start (count (:won (get piles winner-id)))
+                    award-tx (map-indexed
+                              (fn [i card] {:db/id (:db/id card) :card/location :won
+                                            :card/holder winner-id :card/position (+ won-start i)})
+                              whole-pot)]
+                (concat remaining-pile-tx move-to-war-tx award-tx
+                        [[:db/retract (:db/id scene) :scene/war-contenders]
+                         [:db.fn/call assoc-scene
+                          :scene/war-last-round {:winner-id winner-id :cards-won (count whole-pot)}]]))
+              (concat remaining-pile-tx move-to-war-tx
+                      [[:db.fn/call assoc-scene :scene/war-contenders (vec tied)]]))))))))
+
+(defmethod
+  ^{:doc "Ends the current War game: retracts the deck (and every card
+          in it, via :deck/cards' :db/isComponent cascade) and clears
+          the :scene/war-* attributes. Never touches :scene/neutral-
+          authority? at all -- unlike every other example game, War
+          has no privacy concept worth the name (nobody ever chooses
+          anything, so there's nothing a hidden hand would protect)."}
+  event-tx-fn :war/end
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        scene-id (:db/id scene)
+        deck-id (:db/id (:scene/war-deck scene))]
+    (cond-> [[:db/retract scene-id :scene/war-players]
+             [:db/retract scene-id :scene/war-contenders]
+             [:db/retract scene-id :scene/war-last-round]
+             [:db/retract scene-id :scene/war-deck]]
       deck-id (conj [:db/retractEntity deck-id]))))
 
 ;; --- Board ---

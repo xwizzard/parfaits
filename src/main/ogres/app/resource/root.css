@@ -13,10 +13,16 @@
 @import url(../component/panel_tokens.css);
 @import url(../component/panel_scene.css);
 @import url(../component/panel_props.css);
+@import url(../component/card_pile.css);
 @import url(../component/panel_decks.css);
 @import url(../component/panel_roster.css);
 @import url(../component/panel_memory.css);
+@import url(../component/card_hand.css);
 @import url(../component/panel_go_fish.css);
+@import url(../component/panel_old_maid.css);
+@import url(../component/panel_crazy_eights.css);
+@import url(../component/panel_rummy.css);
+@import url(../component/panel_war.css);
 @import url(../component/panel_lobby.css);
 @import url(../component/panel_initiative.css);
 @import url(../component/panel_game_type_builder.css);

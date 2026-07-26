@@ -25,10 +25,14 @@
   "Renders the `<svg>` definition found in `icons.svg` matching the given name.
    ```
    ($ icon {:name 'arrow-right-short' :size 16})
-   ```"
-  [{:keys [name size] :or {size 22}}]
+   ```
+   `color`, when given, overrides the icon's fill (defaults to inheriting
+   the surrounding text color) -- for the rare icon whose color is
+   itself meaningful (e.g. a wild card's star), not a general theming
+   knob."
+  [{:keys [name size color] :or {size 22}}]
   ($ :svg
-    {:fill "currentColor"
+    {:fill (or color "currentColor")
      :role "presentation"
      :class "icon"
      :width size
