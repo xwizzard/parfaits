@@ -15,6 +15,7 @@
 @import url(../component/panel_props.css);
 @import url(../component/panel_decks.css);
 @import url(../component/panel_roster.css);
+@import url(../component/panel_memory.css);
 @import url(../component/panel_lobby.css);
 @import url(../component/panel_initiative.css);
 @import url(../component/panel_game_type_builder.css);

@@ -139,13 +139,18 @@
         default (first (filter (comp #{:default} :game-type/key) game-types))
         dnd5e (first (filter (comp #{:dnd5e} :game-type/key) game-types))
         gloomhaven (first (filter (comp #{:gloomhaven} :game-type/key) game-types))
+        memory (first (filter (comp #{:memory} :game-type/key) game-types))
         scene (:camera/scene (:user/camera (user conn)))]
-    (is (= (count game-types) 3)
-        "The bundled 'Default', 'D&D 5e', and 'Gloomhaven' game-types are
-         all seeded on a fresh db.")
+    (is (= (count game-types) 4)
+        "The bundled 'Default', 'D&D 5e', 'Gloomhaven', and 'Memory'
+         game-types are all seeded on a fresh db.")
     (is (= (:game-type/name default) "Default"))
     (is (= (:game-type/name dnd5e) "D&D 5e"))
     (is (= (:game-type/name gloomhaven) "Gloomhaven"))
+    (is (= (:game-type/name memory) "Memory"))
+    (is (= (:game-type/category memory) "card")
+        "Memory carries a template-picker grouping category -- the
+         other three seeded templates deliberately don't.")
     (is (contains? (:game-type/enabled-elements default) :unit/dead)
         "The seeded default enables the bare universal element set.")
     (is (not-any? #(contains? (:game-type/enabled-elements default) %)
@@ -201,9 +206,9 @@
           custom (entity @conn custom-id)]
       (is (= (set (:game-type/enabled-elements custom)) (set default-elements))
           "A newly created game-type clones its source's enabled elements.")
-      (is (= (count (:root/game-types (root conn))) 4)
+      (is (= (count (:root/game-types (root conn))) 5)
           "The new game-type is linked into :root/game-types alongside the
-           three bundled templates (Default, D&D 5e, Gloomhaven)."))))
+           four bundled templates (Default, D&D 5e, Gloomhaven, Memory)."))))
 
 (deftest test-game-type-toggle-element
   (let [conn (ds/conn-from-db (initial-data true))
@@ -301,9 +306,10 @@
            :game-type/toggle-category already has."))
 
     ;; Disabling the category leaves the grid layouts alone -- there's
-    ;; nothing to exclude when turning things off.
-    (dispatch conn :game-type/toggle-category game-type-id
-              (conj gloomhaven-ids :tool/grid-hex-pointy) false)
+    ;; nothing to exclude when turning things off. Only gloomhaven-ids
+    ;; itself is toggled here (not :tool/grid-hex-pointy, unlike the
+    ;; enable call above) -- that's the whole point of this assertion.
+    (dispatch conn :game-type/toggle-category game-type-id gloomhaven-ids false)
     (is (contains? (:game-type/enabled-elements (entity @conn game-type-id)) :tool/grid-hex-pointy)
         "Disabling never force-disables anything beyond the given ids --
          :tool/grid-hex-pointy (passed in the disable set on enable, not
@@ -769,7 +775,7 @@
   (let [conn (ds/conn-from-db (initial-data true))]
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (let [[a b] (root-players conn)]
+    (let [[a b] (seq (root-players conn))]
       (dispatch conn :player/change-color (:db/id b) (:player/color a))
       (is (not= (:player/color (entity @conn (:db/id b))) (:player/color a))
           "changing to a color another same-kind player already has is a no-op")
@@ -827,7 +833,7 @@
   (let [conn (ds/conn-from-db (initial-data true))]
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :npc)
-    (let [[a b] (root-players conn)]
+    (let [[a b] (seq (root-players conn))]
       (dispatch conn :player/remove (:db/id a))
       (is (nil? (:db/id (entity @conn (:db/id a)))) "the removed player entity is gone")
       (is (= (into #{} (map :db/id) (root-players conn)) #{(:db/id b)})
@@ -999,8 +1005,23 @@
       (is (nil? (:object/shared? (entity @conn id)))
           "clearing retracts the flag rather than storing false"))))
 
+(defn ^:private seed-props-image!
+  "Test helper -- uploads a single fake prop image under `hash`, the
+   same real precondition :props/create/:props/create-many always have
+   in actual UI usage (a prop is only ever placed from an already-
+   uploaded gallery entry; :props/create-many's contract is identical to
+   :props/create's, it just wasn't exercised with a fresh hash by any
+   test until this one). Mirrors how test-objects-assign-alt-image
+   already seeds 'abc' via :token-images/create-many before referencing
+   it."
+  [conn hash]
+  (dispatch conn :props-images/create-many
+            [[{:hash hash :name hash :size 1 :width 1 :height 1}
+              {:hash hash :name hash :size 1 :width 1 :height 1}]]))
+
 (deftest test-props-create-many-stack-layout
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-hash")
     (dispatch conn :props/create-many (Vec2. 5 5) "card-hash" 3)
     (let [props (scene-props conn)]
       (is (= (count props) 3))
@@ -1012,6 +1033,7 @@
 
 (deftest test-props-create-many-grid-layout
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-hash")
     (dispatch conn :props/create-many (Vec2. 0 0) "card-hash" 4
               {:layout :grid :columns 2 :spacing 10})
     (let [points (into #{} (map :object/point) (scene-props conn))]
@@ -1020,6 +1042,8 @@
 
 (deftest test-props-create-many-mint-time-options
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-back")
+    (seed-props-image! conn "card-front")
     (dispatch conn :props/create-many (Vec2. 0 0) "card-back" 1
               {:hidden? true :shared? true :alt-hash "card-front"})
     (let [prop (first (scene-props conn))]
@@ -1029,6 +1053,7 @@
 
 (deftest test-props-create-pile
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-back")
     (dispatch conn :props/create-pile (Vec2. 0 0) "card-back" 4 "pile-1")
     (let [vars (map :object/variables (scene-props conn))]
       (is (= (into #{} (map :pile/id) vars) #{"pile-1"}))
@@ -1036,6 +1061,7 @@
 
 (deftest test-props-draw-from-pile-moves-top-and-unpiles
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-back")
     (dispatch conn :props/create-pile (Vec2. 0 0) "card-back" 3 "pile-1")
     (let [top-id (:db/id (props/top-of-pile (scene-props conn)))
           target (Vec2. 40 40)]
@@ -1051,6 +1077,7 @@
 
 (deftest test-props-draw-from-pile-in-place-when-no-target
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-back")
     (dispatch conn :props/create-pile (Vec2. 7 7) "card-back" 2 "pile-1")
     (let [top-id (:db/id (props/top-of-pile (scene-props conn)))]
       (dispatch conn :props/draw-from-pile "pile-1" nil)
@@ -1065,6 +1092,7 @@
 
 (deftest test-props-discard-to-pile-restacks-onto-existing-point
   (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "card-back")
     (dispatch conn :props/create-pile (Vec2. 3 3) "card-back" 2 "pile-1")
     (dispatch conn :props/create-many (Vec2. 99 99) "card-back" 1) ; a loose, un-piled prop
     (let [loose-id (:db/id (first (filter #(nil? (:pile/id (:object/variables %)))
@@ -1090,3 +1118,269 @@
           "an unrelated connected guest -- not the host, no owner/
            controller assigned at all -- may still toggle it purely
            because :object/shared? is true"))))
+
+;; --- Memory (example game) ---
+(defn ^:private scene-memory [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private memory-cards [conn]
+  (filter (comp :memory/value :object/variables) (scene-props conn)))
+
+(deftest test-memory-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [scene (scene-memory conn)
+          cards (memory-cards conn)
+          active-ids (into #{} (map :db/id) (root-players conn))]
+      (is (= (count (:scene/memory-players scene)) 3))
+      (is (= (set (:scene/memory-players scene)) active-ids)
+          "the turn cycle is exactly the currently-active roster players")
+      (is (= (:scene/memory-turn-index scene) 0))
+      (is (= (:scene/memory-scores scene) {}))
+      (is (= (count cards) 44))
+      (is (every? :object/hidden cards) "every card deals face-down")
+      (is (every? :object/shared? cards) "every card is a public toggle")
+      (is (= (frequencies (map (comp :memory/value :object/variables) cards))
+             (into {} (map (fn [v] [v 2])) (range 22)))
+          "22 values, exactly 2 copies each"))))
+
+(deftest test-memory-flip-turn-enforcement
+  (let [conn (ds/conn-from-db (initial-data false))
+        guest-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid guest-uuid}])
+    (add-conn! conn guest-uuid)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [turn-players (:scene/memory-players (scene-memory conn))
+          second-player-id (second turn-players)]
+      (dispatch conn :player/set-controller second-player-id [:user/uuid guest-uuid])
+      (let [card-id (:db/id (first (memory-cards conn)))]
+        (dispatch conn :memory/flip card-id)
+        (is (:object/hidden (entity @conn card-id))
+            "index 0's turn (unassigned -> host-only) -- this guest,
+             mapped only to index 1, may not flip yet")
+        ;; fast-forward to the 2nd player's turn for testing purposes
+        (transact! conn [{:db/id (:db/id (scene-memory conn)) :scene/memory-turn-index 1}])
+        (dispatch conn :memory/flip card-id)
+        (is (not (:object/hidden (entity @conn card-id)))
+            "index 1's turn -- this guest, as that player's controller,
+             may flip")))))
+
+(deftest test-memory-flip-refuses-third-card
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [[a b c] (take 3 (memory-cards conn))]
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      (dispatch conn :memory/flip (:db/id c))
+      (is (:object/hidden (entity @conn (:db/id c)))
+          "a 3rd flip is refused while 2 cards are already face-up and
+           awaiting :memory/resolve"))))
+
+(deftest test-memory-flip-clears-user-dragging
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [card-id (:db/id (first (memory-cards conn)))]
+      ;; a real onDragStart always precedes the click that triggers a
+      ;; flip (use-drag-listener's onDragEnd zero-delta "click" case is
+      ;; still a full drag-kit gesture) -- so :user/dragging is always
+      ;; populated by the time :memory/flip runs.
+      (dispatch conn :drag/start card-id)
+      (is (seq (:user/dragging (user conn))) "sanity check")
+      (dispatch conn :memory/flip card-id)
+      (is (empty? (:user/dragging (user conn)))
+          "a click-triggered flip must clear :user/dragging just like
+           :objects/select does -- otherwise this peer's own stale
+           entry (invisible to them locally, since :db/ident :user is
+           peer-relative) permanently locks this card out of every
+           OTHER peer's draggable registration, since
+           scene_objects.cljs's dragging lock check reads every
+           connection's :user/dragging except the viewer's own"))))
+
+(deftest test-memory-resolve-match
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
+          [a b] (first (vals by-value))
+          turn-id (first (:scene/memory-players (scene-memory conn)))]
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      (dispatch conn :memory/resolve)
+      (is (nil? (:db/id (entity @conn (:db/id a)))) "matched cards are retracted")
+      (is (nil? (:db/id (entity @conn (:db/id b)))))
+      (is (= (:scene/memory-scores (scene-memory conn)) {turn-id 1})
+          "the current-turn player's tally increments")
+      (is (= (:scene/memory-turn-index (scene-memory conn)) 0)
+          "matching players go again -- turn index unchanged"))))
+
+(deftest test-memory-resolve-mismatch
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
+          [va vb] (take 2 (keys by-value))
+          a (first (by-value va))
+          b (first (by-value vb))]
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      (dispatch conn :memory/resolve)
+      (is (:object/hidden (entity @conn (:db/id a)))
+          "mismatched cards are re-hidden, not removed")
+      (is (:object/hidden (entity @conn (:db/id b))))
+      (is (= (:scene/memory-scores (scene-memory conn)) {})
+          "no score change on a mismatch")
+      (is (= (:scene/memory-turn-index (scene-memory conn)) 1)
+          "turn advances to the next player"))))
+
+(deftest test-memory-resolve-noop-unless-two-face-up
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (dispatch conn :memory/resolve)
+    (is (= (count (memory-cards conn)) 44)
+        "no-op when nothing is face-up yet")))
+
+(deftest test-memory-end
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (dispatch conn :memory/end)
+    (let [scene (scene-memory conn)]
+      (is (empty? (memory-cards conn)) "every remaining card is retracted")
+      (is (nil? (:scene/memory-players scene)))
+      (is (nil? (:scene/memory-turn-index scene)))
+      (is (nil? (:scene/memory-scores scene))))))
+
+;; --- Memory: mid-game roster reactivity ---
+;; :scene/memory-players stays a frozen seating order from :memory/start,
+;; but "whose turn is it" is resolved live against current :player/active
+;; state (ogres.app.memory/valid-turn-index) -- these confirm a bench/
+;; remove mid-game takes effect immediately, without a page reload or a
+;; separate correction event.
+(deftest test-memory-flip-skips-benched-turn-player
+  (let [conn (ds/conn-from-db (initial-data false))
+        guest-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid guest-uuid}])
+    (add-conn! conn guest-uuid)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [[first-id second-id] (:scene/memory-players (scene-memory conn))]
+      (dispatch conn :player/set-controller second-id [:user/uuid guest-uuid])
+      (dispatch conn :player/set-active first-id false)
+      (let [card-id (:db/id (first (memory-cards conn)))]
+        (dispatch conn :memory/flip card-id)
+        (is (not (:object/hidden (entity @conn card-id)))
+            "the stored index still points at index 0, but that player
+             is now benched -- the turn cycle skips forward to index 1's
+             controller (this guest) live, with no separate event")))))
+
+(deftest test-memory-resolve-mismatch-skips-benched-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [second-id (second (:scene/memory-players (scene-memory conn)))]
+      (dispatch conn :player/set-active second-id false)
+      (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
+            [va vb] (take 2 (keys by-value))
+            a (first (by-value va))
+            b (first (by-value vb))]
+        (dispatch conn :memory/flip (:db/id a))
+        (dispatch conn :memory/flip (:db/id b))
+        (dispatch conn :memory/resolve)
+        (is (= (:scene/memory-turn-index (scene-memory conn)) 2)
+            "index 1's player is benched -- the stored index skips
+             straight to index 2 instead of landing on a benched seat")))))
+
+(deftest test-memory-resolve-mismatch-skips-removed-player
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [second-id (second (:scene/memory-players (scene-memory conn)))]
+      (dispatch conn :player/remove second-id)
+      (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
+            [va vb] (take 2 (keys by-value))
+            a (first (by-value va))
+            b (first (by-value vb))]
+        (dispatch conn :memory/flip (:db/id a))
+        (dispatch conn :memory/flip (:db/id b))
+        (dispatch conn :memory/resolve)
+        (is (= (:scene/memory-turn-index (scene-memory conn)) 2)
+            "index 1's player was removed entirely -- treated the same
+             as benched, the stored index skips to index 2")))))
+
+(deftest test-memory-turn-player-nil-when-all-benched
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (let [only-id (first (:scene/memory-players (scene-memory conn)))]
+      (dispatch conn :player/set-active only-id false)
+      (let [card-id (:db/id (first (memory-cards conn)))]
+        (dispatch conn :memory/flip card-id)
+        (is (not (:object/hidden (entity @conn card-id)))
+            "every seated player benched at once -- memory-turn-player
+             degrades to nil rather than throwing, and
+             authorized-for-turn?'s existing turn-continuity fallback
+             (the same one already used for an unassigned turn player)
+             still lets the host act rather than soft-locking the
+             game")))))
+
+;; --- Neutral authority (impartial dealer) mode ---
+(deftest test-scene-toggle-neutral-authority
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (is (:scene/neutral-authority? (scene-memory conn)))
+    (dispatch conn :scene/toggle-neutral-authority false)
+    (is (false? (:scene/neutral-authority? (scene-memory conn))))))
+
+(deftest test-objects-toggle-hidden-host-rejected-in-neutral-scene
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (let [id (:db/id (scene-token conn))]
+      (dispatch conn :objects/toggle-hidden id)
+      (is (not (:object/hidden (entity @conn id)))
+          "on a neutral-authority scene, the host gets no automatic
+           default authority either -- an unowned/unassigned object is
+           authorized for no one until explicitly owned/controlled or
+           :object/shared?"))))
+
+(deftest test-objects-toggle-hidden-host-allowed-once-neutral-authority-off
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :token/create (Vec2. 0 0) nil)
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (dispatch conn :scene/toggle-neutral-authority false)
+    (let [id (:db/id (scene-token conn))]
+      (dispatch conn :objects/toggle-hidden id)
+      (is (:object/hidden (entity @conn id))
+          "reverting to the default (non-neutral) scene restores the
+           host's ordinary fallback authority"))))
+
+(deftest test-memory-start-sets-neutral-authority
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (is (:scene/neutral-authority? (scene-memory conn))
+        "Memory needs impartiality by default -- the host is often also
+         a competing player")))
+
+(deftest test-memory-end-clears-neutral-authority
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :memory/start)
+    (dispatch conn :memory/end)
+    (is (false? (:scene/neutral-authority? (scene-memory conn)))
+        "leaves no residue for whatever gets set up on this scene next")))

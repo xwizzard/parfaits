@@ -7,8 +7,10 @@
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.matrix :as matrix]
+            [ogres.app.memory :as memory]
             [ogres.app.player :as player]
             [ogres.app.props :as props]
+            [ogres.app.provider.state :as state]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
@@ -681,6 +683,22 @@
   [[:db.fn/call assoc-scene :scene/dark-mode enabled]])
 
 (defmethod
+  ^{:doc "Updates whether the current scene is in 'neutral authority'
+          (impartial dealer) mode -- when true, the host no longer gets
+          automatic default authority over unowned/unassigned hidden
+          objects (see authorized-to-hide?'s doc); only explicit
+          :object/owner/:player/controller assignments or
+          :object/shared? still grant it. False (the default, matching
+          every scene created before this existed) is today's ordinary
+          host-omniscient behavior, appropriate for a GM running a game
+          like D&D. :memory/start turns this on automatically; this
+          event is the general-purpose manual toggle for any other
+          scenario (Scene panel, host-only)."}
+  event-tx-fn :scene/toggle-neutral-authority
+  [_ _ enabled]
+  [[:db.fn/call assoc-scene :scene/neutral-authority? enabled]])
+
+(defmethod
   ^{:doc "Updates whether or not align to grid is enabled on the current scene."}
   event-tx-fn :scene/toggle-grid-align
   [_ _ enabled]
@@ -779,13 +797,25 @@
    top of that -- ANY connected participant may flip it (a 'public
    toggle' shared table object, e.g. a physical playing card any player
    may flip on their turn), regardless of owner/controller. Absent or
-   false, behavior is exactly as before this flag existed."
+   false, behavior is exactly as before this flag existed.
+
+   The host's own default authority is itself conditional on the
+   current scene's :scene/neutral-authority? -- when true (an
+   'impartial dealer' scene, e.g. a Memory game in progress, see
+   :memory/start), the host gets NO automatic fallback either, so an
+   unowned/unassigned object is authorized for NO ONE until explicitly
+   owned/controlled or flagged :object/shared?. This is what keeps a
+   host who's also playing from having an automatic, unfair advantage
+   over hidden game state -- 'the host retains control of the room,
+   not X-ray vision over gameplay.'"
   [data entity]
   (or (:object/shared? entity)
       (let [user (ds/entity data [:db/ident :user])
+            scene (:camera/scene (:user/camera user))
+            default (and (:user/host user) (not (:scene/neutral-authority? scene)))
             connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
             controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])]
-        (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid))))
+        (player/authority? (:user/uuid user) default connected controller-uuid))))
 
 (defmethod
   ^{:doc "Hide or reveal the given object. The host may always do this
@@ -1232,7 +1262,7 @@
           about how the value was chosen."}
   event-tx-fn :initiative/change-rank
   [_ _ id rank]
-  (let [parsed (.parseFloat js/window rank)]
+  (let [parsed (js/parseFloat rank)]
     (cond
       (or (nil? rank) (= rank ""))
       [[:db/retract id :initiative/rank]]
@@ -2079,6 +2109,23 @@
        [:db/add scene-id :scene/props -1]]
       [])))
 
+(defn ^:private image-calibration
+  "The saved scale/rotation/anchor calibration for the image with the
+   given :image/hash -- {:width :height :cell-px :rotation :anchor},
+   all nil if that hash has never been referenced before. Deliberately
+   checks existence via a raw index scan first rather than calling
+   (ds/entity data [:image/hash hash]) directly and trusting a nil
+   result: DataScript's entity throws for a lookup ref with no matching
+   datoms at all, rather than returning nil, so calling it speculatively
+   on a hash that might not exist yet (e.g. :props/create-many/
+   :memory/start's freshly-generated, never-uploaded data: URI card
+   faces) would crash instead of gracefully falling back to defaults."
+  [data hash]
+  (if (seq (ds/datoms data :avet :image/hash hash))
+    (select-keys (ds/entity data [:image/hash hash])
+                 [:image/width :image/height :image/cell-px :image/rotation :image/anchor])
+    {}))
+
 (defmethod
   ^{:doc "Creates `n` new, fully independent props in the current scene
           from a single image `hash`, in one transaction -- the
@@ -2121,7 +2168,7 @@
           :user/camera} (ds/entity data [:db/ident :user])
          {width :image/width height :image/height cell-px :image/cell-px
           rotation :image/rotation anchor :image/anchor}
-         (ds/entity data [:image/hash hash])
+         (image-calibration data hash)
          scale (if cell-px (/ grid-size cell-px) 1)
          rotation (or rotation 0)
          align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
@@ -2213,6 +2260,236 @@
               {:pile/id pile-id :pile/position (props/next-pile-position members)}]]
       (:object/point (first members))
       (conj [:db/add prop-id :object/point (:object/point (first members))]))))
+
+;; --- Memory (example game) ---
+;; A concrete, playable demonstration of the generic prop-copy/shared-
+;; toggle mechanism above -- not part of the generic engine, the same
+;; way D&D's d20 initiative roll and Gloomhaven's ability-deck rules are
+;; game-specific layers on top of the generic turn-order/card systems.
+;; See ogres.app.memory for the pure dealing/turn/scoring logic.
+
+(defn ^:private memory-cards
+  "Every prop on the current scene that belongs to the current Memory
+   game -- i.e. carries a :memory/value in its :object/variables map.
+   There's no separate 'session id': this is a single-game-per-scene v1."
+  [data]
+  (filter (comp :memory/value :object/variables) (scene-props data)))
+
+(defn ^:private memory-face-up
+  "The subset of memory-cards that are currently revealed -- 0, 1, or 2
+   at any time (:memory/flip refuses a 3rd until :memory/resolve clears
+   the board back to 0 or 2->0)."
+  [data]
+  (remove :object/hidden (memory-cards data)))
+
+(defn ^:private memory-player-active?
+  "True if roster player-id refers to a still-existing, still-active
+   (:player/active true) player -- used to let the Memory turn cycle
+   skip over anyone benched or removed mid-game, see
+   ogres.app.memory/valid-turn-index."
+  [data player-id]
+  (let [entity (ds/entity data player-id)]
+    (boolean (and entity (:player/active entity)))))
+
+(defn ^:private memory-turn-player
+  "The roster player entity whose turn it currently is, or nil if no
+   Memory game is in progress on the current scene, or if every seated
+   player has since been benched/removed. Resolves the CORRECTED index
+   (skipping forward past anyone no longer active) rather than trusting
+   the raw stored index directly, so a mid-game bench/remove/reactivate
+   takes effect immediately without needing its own event."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+        players (:scene/memory-players scene)
+        idx (:scene/memory-turn-index scene)]
+    (if (seq players)
+      (let [corrected (memory/valid-turn-index players (partial memory-player-active? data) idx)]
+        (if corrected
+          (ds/entity data (nth players corrected)))))))
+
+(defn ^:private authorized-for-turn?
+  "True if the local viewer speaks for the current Memory turn player --
+   the same player/authority? primitive :objects/toggle-hidden's
+   authorized-to-hide? already uses for object ownership, just pointed
+   at 'whose turn is it' instead of 'who owns this object'. No game in
+   progress (or an unassigned turn player) falls back to host-only,
+   the same default authority? always uses."
+  [data]
+  (let [user (ds/entity data [:db/ident :user])
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (memory-turn-player data) [:player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
+(defmethod
+  ^{:doc "Starts a new Memory game on the current scene: deals 22
+          matching pairs (44 cards total, see ogres.app.memory/deal) as
+          face-down, shared props in a grid at the current camera point,
+          and initializes the turn cycle from whichever roster players
+          are currently active (:player/active true, :db/id order) --
+          the roster's own active/benched toggle is the 'who's playing'
+          selector, no separate picker needed. Host-driven like every
+          other setup action in this app -- UI-gated, not enforced here.
+          Also switches the scene into :scene/neutral-authority? mode
+          (see authorized-to-hide?/:scene/toggle-neutral-authority) --
+          the host doesn't automatically see face-down cards' values
+          either, since they're often a competing player too."}
+  event-tx-fn :memory/start
+  [data _]
+  (let [root (ds/entity data [:db/ident :root])
+        {point :camera/point
+         {scene-id :db/id} :camera/scene}
+        (:user/camera (ds/entity data [:db/ident :user]))
+        active (->> (:root/players root)
+                    (filter :player/active)
+                    (sort-by :db/id)
+                    (mapv :db/id))
+        ;; Card faces are a fixed 200x280 native size (see
+        ;; memory/value-image-hash/provider.state's card-back-svg) with
+        ;; no :image/cell-px calibration to auto-shrink them (unlike a
+        ;; normal uploaded prop) -- :card-scale/:card-spacing explicitly
+        ;; size and space them so the dealt grid doesn't overlap itself
+        ;; (grid-size, 70, is a token-cell unit and far too small for a
+        ;; 200x280 image at scale 1).
+        card-scale 0.4
+        card-spacing 120
+        cards (memory/deal 22 8 card-spacing)
+        values (into #{} (map :memory/value) cards)]
+    (into
+     (into
+      [[:db.fn/call assoc-scene
+        :scene/memory-players active
+        :scene/memory-turn-index 0
+        :scene/memory-scores {}
+        ;; Memory needs impartiality by default -- the host is often
+        ;; also a competing player, so they must not automatically see
+        ;; face-down cards' true values (see authorized-to-hide?'s
+        ;; :scene/neutral-authority? handling). :memory/end clears this
+        ;; back to false.
+        :scene/neutral-authority? true]]
+      ;; Each of the 22 distinct value-face images must be asserted as
+      ;; its own real entity (identified by its own :image/hash) BEFORE
+      ;; any card can reference it via a [:image/hash ...] lookup ref --
+      ;; unlike a map-form entity's own :db/id, a lookup ref used as the
+      ;; VALUE of a ref-typed attribute (:prop/image below) does NOT
+      ;; auto-vivify a new entity if nothing has ever asserted that
+      ;; identity; it requires the referenced entity to already exist.
+      ;; A fresh, ID-LESS map (no explicit :db/id) is what actually
+      ;; creates-or-merges by unique identity in DataScript -- using a
+      ;; lookup ref itself AS :db/id only resolves against an entity
+      ;; that already exists, the same "must pre-exist" requirement as
+      ;; using it in a ref attribute's value position; this matches
+      ;; provider/state.cljs's seed-props-images/seed-game-types, which
+      ;; likewise never assert an explicit :db/id for their upserts.
+      ;; The shared card-back (:prop/image-alt) doesn't need this --
+      ;; it's already a real entity via that same seed, at boot.
+      (map
+       (fn [value]
+         {:image/hash (memory/value-image-hash value)
+          :image/name (str "Memory " value)
+          :image/size 0
+          :image/width 200
+          :image/height 280})
+       values))
+     (mapcat
+      (fn [[id card]]
+        (let [value (:memory/value card)]
+          [[:db/add id :object/type :prop/prop]
+           [:db/add id :object/point (vec/add point (:point card))]
+           [:db/add id :object/scale card-scale]
+           [:db/add id :prop/image [:image/hash (memory/value-image-hash value)]]
+           [:db/add id :prop/image-alt [:image/hash state/card-back-hash]]
+           [:db/add id :object/hidden true]
+           [:db/add id :object/shared? true]
+           [:db/add id :object/variables {:memory/value value}]
+           [:db/add scene-id :scene/props id]]))
+      (sequence (indexed) cards)))))
+
+(defmethod
+  ^{:doc "Flips the given Memory card face-up -- a direct :object/hidden
+          write, not a call through the generic :objects/toggle-hidden,
+          since the turn-check (authorized-for-turn?) IS this action's
+          authorization (every Memory card is already :object/shared?
+          true, so the generic authority check would pass for anyone
+          regardless of turn -- this is what actually enforces 'players
+          take turns'). A no-op if: the viewer doesn't speak for the
+          current turn player, `card-id` isn't a Memory card, it's
+          already face-up, or 2 cards are already face-up and awaiting
+          :memory/resolve.
+
+          Always retracts the local user's :user/dragging first, same
+          as :objects/select -- this is dispatched from a zero-delta
+          drag-kit gesture (use-drag-listener's onDragEnd 'click' case),
+          which still fires a real onDragStart (:drag/start card-id)
+          beforehand. Without this cleanup, :user/dragging would keep
+          referencing card-id forever (nothing else ever retracts it
+          for a click that isn't a genuine drag), and since :db/ident
+          :user is peer-relative -- each peer's OWN conn entity is the
+          only one tagged :db/ident :user locally -- that stale entry
+          is invisible to the flipping viewer's own dragging filter but
+          NOT to every other connected peer's (scene_objects.cljs's
+          user-drag-xf), permanently locking this exact card out of
+          drag-kit's draggable registration for everyone else."}
+  event-tx-fn :memory/flip
+  [data _ card-id]
+  (let [card (ds/entity data card-id)]
+    (into [[:db/retract [:db/ident :user] :user/dragging]]
+          (if (and (authorized-for-turn? data)
+                   (:memory/value (:object/variables card))
+                   (:object/hidden card)
+                   (< (count (memory-face-up data)) 2))
+            [[:db/add card-id :object/hidden false]]))))
+
+(defmethod
+  ^{:doc "Resolves the current turn once exactly 2 Memory cards are
+          face-up (a no-op otherwise) -- same turn-authorization as
+          :memory/flip. A match retracts both cards and increments the
+          current turn player's tally in :scene/memory-scores, with the
+          turn index UNCHANGED (matching players go again, same as a
+          real game of Memory). A mismatch flips both back face-down
+          and advances :scene/memory-turn-index to the next player,
+          wrapping around (ogres.app.memory/next-turn-index)."}
+  event-tx-fn :memory/resolve
+  [data _]
+  (let [face-up (memory-face-up data)]
+    (if (and (authorized-for-turn? data) (= (count face-up) 2))
+      (let [[a b] face-up
+            scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+            turn-id (:db/id (memory-turn-player data))
+            match? (= (:memory/value (:object/variables a))
+                      (:memory/value (:object/variables b)))]
+        (if match?
+          (let [scores (or (:scene/memory-scores scene) {})]
+            [[:db/retractEntity (:db/id a)]
+             [:db/retractEntity (:db/id b)]
+             [:db.fn/call assoc-scene :scene/memory-scores (update scores turn-id (fnil inc 0))]])
+          (let [idx (:scene/memory-turn-index scene)
+                players (:scene/memory-players scene)
+                active? (partial memory-player-active? data)
+                next-idx (or (memory/next-turn-index players active? idx) idx)]
+            [[:db/add (:db/id a) :object/hidden true]
+             [:db/add (:db/id b) :object/hidden true]
+             [:db.fn/call assoc-scene :scene/memory-turn-index next-idx]])))
+      [])))
+
+(defmethod
+  ^{:doc "Ends the current Memory game: retracts every remaining
+          :memory/value-tagged card, clears the three :scene/memory-*
+          attributes, and clears :scene/neutral-authority? back to
+          false. Works whether the game finished naturally (no cards
+          left) or is being aborted mid-round -- the host-only 'End
+          Game' button is the only place this is dispatched from."}
+  event-tx-fn :memory/end
+  [data _]
+  (let [scene-id (:db/id (:camera/scene (:user/camera (ds/entity data [:db/ident :user]))))]
+    (into
+     [[:db/retract scene-id :scene/memory-players]
+      [:db/retract scene-id :scene/memory-turn-index]
+      [:db/retract scene-id :scene/memory-scores]
+      ;; Clears the impartial-dealer mode :memory/start turned on --
+      ;; leaves no residue for whatever gets set up on this scene next.
+      [:db/add scene-id :scene/neutral-authority? false]]
+     (map (fn [c] [:db/retractEntity (:db/id c)]))
+     (memory-cards data))))
 
 ;; --- Board ---
 

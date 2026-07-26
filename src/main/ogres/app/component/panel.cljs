@@ -5,6 +5,7 @@
             [ogres.app.component.panel-game-type-builder :as game-type-builder]
             [ogres.app.component.panel-initiative :as initiative]
             [ogres.app.component.panel-lobby :as lobby]
+            [ogres.app.component.panel-memory :as memory]
             [ogres.app.component.panel-roster :as roster]
             [ogres.app.component.panel-scene :as scene]
             [ogres.app.component.panel-tokens :as tokens]
@@ -63,6 +64,7 @@
    :props      {:icon "rock" :label "Prop images" :size 26}
    :decks      {:icon "suit-spade-fill" :label "Decks"}
    :roster     {:icon "person-circle" :label "Players"}
+   :memory     {:icon "card-front" :label "Memory"}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -74,6 +76,7 @@
    :props      {:form props/panel :footer props/actions}
    :decks      {:form decks/panel :footer decks/actions}
    :roster     {:form roster/panel :footer roster/actions}
+   :memory     {:form memory/panel :footer memory/actions}
    :game-type-builder {:form game-type-builder/panel}})
 
 (defn ^:private visible-tabs
@@ -93,18 +96,27 @@
    likewise requires :tool/cards -- the generic card/deck system is opt-in
    the same way, not enabled by any seeded template yet. The Players
    (roster) tab is baseline like Tokens/Props -- no gating element,
-   host-only (roster management is a GM/setup concern, same as Scene)."
+   host-only (roster management is a GM/setup concern, same as Scene).
+   The Memory tab -- the example game built on top of the generic prop-
+   copy/shared-toggle mechanism -- is gated the same way Decks is,
+   behind its own :memory/game element (see
+   game-type/games/memory.cljs), true for the seeded 'Memory' template
+   and any custom template that enables it. Unlike Roster it's visible
+   to guests as well: seeing turn order and scores, and flipping cards
+   on your own turn, is exactly what every connected participant needs,
+   not just the host."
   [host mode enabled-elements]
-  (let [cards? (contains? enabled-elements :tool/cards)]
+  (let [cards?  (contains? enabled-elements :tool/cards)
+        memory? (contains? enabled-elements :memory/game)]
     (cond
-      (not host) [:tokens :initiative :lobby]
+      (not host) (cond-> [:tokens :initiative :lobby] memory? (conj :memory))
       (= mode :builder) [:game-type-builder :data]
       (= mode :play)
-      (into (cond-> [:tokens :roster :props] cards? (conj :decks))
+      (into (cond-> [:tokens :roster :props] cards? (conj :decks) memory? (conj :memory))
             (if (contains? enabled-elements :unit/initiative)
               [:initiative :lobby]
               [:lobby]))
-      :else (cond-> [:scene :props :tokens :roster] cards? (conj :decks)))))
+      :else (cond-> [:scene :props :tokens :roster] cards? (conj :decks) memory? (conj :memory)))))
 
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)

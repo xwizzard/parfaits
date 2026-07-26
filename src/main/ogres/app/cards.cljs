@@ -50,4 +50,4 @@
    triggered early by a flagged card, not just an empty pile) has a clean
    seam to swap into instead of rewriting :deck/draw's transaction logic."
   [draw-cards discard-cards]
-  (and (empty? draw-cards) (seq discard-cards)))
+  (boolean (and (empty? draw-cards) (seq discard-cards))))

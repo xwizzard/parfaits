@@ -33,6 +33,7 @@
          [:scene/show-grid :default true]
          [:scene/grid-align :default false]
          [:scene/dark-mode :default false]
+         [:scene/neutral-authority? :default false]
          [:scene/show-object-outlines :default true]
          [:scene/lighting :default :revealed]
          [:scene/token-scale :default {}]
@@ -479,6 +480,16 @@
                  :on-change #(dispatch :scene/toggle-dark-mode (.. % -target -checked))})
               ($ icon {:name "check" :size 20})
               "Use dark grid"))))
+      ($ :fieldset.fieldset
+        ($ :legend "Visibility")
+        ($ :.input-group
+          ($ :label.checkbox
+            ($ :input
+              {:type "checkbox"
+               :checked (:scene/neutral-authority? scene)
+               :on-change #(dispatch :scene/toggle-neutral-authority (.. % -target -checked))})
+            ($ icon {:name "check" :size 20})
+            "Impartial dealer (host doesn't auto-see hidden objects)")))
       (if-not no-grid?
         ($ :fieldset.fieldset.fieldset--radio
           ($ :legend "Grid vs. board")

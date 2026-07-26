@@ -1,0 +1,47 @@
+.memory-turn-order,
+.memory-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-turn-item,
+.memory-score-item {
+  align-items: center;
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.memory-score-item {
+  justify-content: space-between;
+}
+
+.memory-turn-item[data-current="true"] {
+  border-color: var(--color-prime-500);
+  box-shadow: 0 0 0 1px var(--color-prime-500);
+}
+
+.memory-turn-item[data-active="false"] {
+  opacity: 0.5;
+}
+
+.memory-turn-color {
+  background-color: var(--color-context, var(--color-blues-900));
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 16px;
+  width: 16px;
+}
+
+.memory-turn-name {
+  flex: 1;
+}
+
+.memory-turn-score {
+  color: var(--color-blues-700);
+  font-weight: bold;
+}

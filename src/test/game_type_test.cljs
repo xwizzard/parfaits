@@ -5,6 +5,7 @@
             [ogres.app.game-type.core-elements :as core]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
             [ogres.app.game-type.games.gloomhaven :as gloomhaven]
+            [ogres.app.game-type.games.memory :as memory]
             [ogres.app.game-type.widgets :as widgets]))
 
 (deftest test-measurement-cells-registry-entry
@@ -112,18 +113,26 @@
 (deftest test-registry-merge-has-no-id-collisions
   (let [core-ids (set (keys core/elements))
         dnd5e-ids (set (keys dnd5e/elements))
-        gloomhaven-ids (set (keys gloomhaven/elements))]
-    (is (empty? (set/intersection core-ids dnd5e-ids))
-        "core and dnd5e contribute disjoint element ids.")
-    (is (empty? (set/intersection core-ids gloomhaven-ids))
-        "core and gloomhaven contribute disjoint element ids.")
-    (is (empty? (set/intersection dnd5e-ids gloomhaven-ids))
-        "dnd5e and gloomhaven contribute disjoint element ids -- two game
-         modules can be compiled in together without ever colliding.")
-    (is (= (count game-type/elements)
-           (+ (count core-ids) (count dnd5e-ids) (count gloomhaven-ids)))
-        "The merged registry has exactly as many entries as its three
+        gloomhaven-ids (set (keys gloomhaven/elements))
+        memory-ids (set (keys memory/elements))
+        sources [core-ids dnd5e-ids gloomhaven-ids memory-ids]]
+    (is (every? empty? (for [a sources b sources :when (not= a b)] (set/intersection a b)))
+        "every pair of sources contributes disjoint element ids -- any
+         combination of game modules can be compiled in together
+         without ever colliding.")
+    (is (= (count game-type/elements) (apply + (map count sources)))
+        "The merged registry has exactly as many entries as its four
          sources combined -- nothing silently overwritten.")))
+
+(deftest test-memory-registry-entry
+  (is (= (get-in game-type/elements [:memory/game :label]) "Memory"))
+  (is (string? (get-in game-type/elements [:memory/game :icon])))
+  (is (contains? game-type/memory-enabled-elements :memory/game)
+      "the seeded Memory template actually enables its own element")
+  (is (not (contains? game-type/memory-enabled-elements :unit/initiative))
+      "Memory has its own turn-order UI (panel_memory.cljs) -- the
+       generic Turn Order tab is deliberately excluded to avoid a
+       second, redundant 'whose turn is it' panel"))
 
 (deftest test-initiative-panel-lookup-path
   (let [element (:dnd5e/hp-tracker game-type/elements)]

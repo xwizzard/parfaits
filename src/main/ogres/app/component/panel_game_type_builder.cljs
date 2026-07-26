@@ -17,6 +17,7 @@
   [{:root/game-types
     [:db/id
      :game-type/name
+     [:game-type/category :default nil]
      [:game-type/enabled-elements :default #{}]
      [:game-type/icon-overrides :default {}]]}
    {:root/user
@@ -242,6 +243,23 @@
            (catch :default e
              (js/console.error "Failed to import game type:" e)))))))
 
+(defui ^:private template-row [{:keys [game-type active removable? dispatch]}]
+  (let [checked (= (:db/id game-type) (:db/id active))]
+    ($ :.game-type-builder-template
+      ($ :label.radio
+        ($ :input
+          {:type "radio"
+           :name "game-type-editing"
+           :checked checked
+           :on-change #(dispatch :user/edit-game-type (:db/id game-type))})
+        (:game-type/name game-type))
+      (if removable?
+        ($ :button.game-type-builder-remove
+          {:type "button"
+           :aria-label (str "Remove " (:game-type/name game-type))
+           :on-click #(dispatch :game-type/remove (:db/id game-type))}
+          ($ icon {:name "trash3-fill" :size 16}))))))
+
 (defui panel []
   (let [dispatch (hooks/use-dispatch)
         result   (hooks/use-query query [:db/ident :root])
@@ -257,23 +275,22 @@
       ($ :header ($ :h2 "Game builder"))
       ($ :fieldset.fieldset
         ($ :legend "Templates")
-        ($ :.input-group
-          (for [gt game-types
-                :let [checked (= (:db/id gt) (:db/id active))]]
-            ($ :.game-type-builder-template {:key (:db/id gt)}
-              ($ :label.radio
-                ($ :input
-                  {:type "radio"
-                   :name "game-type-editing"
-                   :checked checked
-                   :on-change #(dispatch :user/edit-game-type (:db/id gt))})
-                (:game-type/name gt))
-              (if removable?
-                ($ :button.game-type-builder-remove
-                  {:type "button"
-                   :aria-label (str "Remove " (:game-type/name gt))
-                   :on-click #(dispatch :game-type/remove (:db/id gt))}
-                  ($ icon {:name "trash3-fill" :size 16}))))))
+        (let [by-category (group-by :game-type/category game-types)
+              ungrouped (get by-category nil)
+              categories (sort (remove nil? (keys by-category)))]
+          ($ :<>
+            ($ :.input-group
+              (for [gt ungrouped]
+                ($ template-row {:key (:db/id gt) :game-type gt :active active
+                                  :removable? removable? :dispatch dispatch})))
+            (for [category categories
+                  :let [templates (get by-category category)]]
+              ($ :.game-type-builder-template-group {:key category}
+                ($ :.game-type-builder-template-group-label (game-type/game-label category))
+                ($ :.input-group
+                  (for [gt templates]
+                    ($ template-row {:key (:db/id gt) :game-type gt :active active
+                                      :removable? removable? :dispatch dispatch})))))))
         ($ :.input-group
           ($ :button.button.button-neutral
             {:type "button"

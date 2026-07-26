@@ -73,20 +73,60 @@
                        (:user/dragging user))))))
 
 (defn ^:private object-authority?
-  "Whether the local viewer has visibility authority over `entity` -- the
-   host by default, or its assigned player's connected controller once
-   assigned (see ogres.app.player/authority?). An entity flagged
-   :object/shared? true is an explicit opt-in escape hatch on top of
-   that -- ANY connected participant has authority over it regardless
-   of owner/controller (e.g. a physical playing card any player may
-   flip on their turn); absent/false, behavior is exactly as before
-   this flag existed. Mirrors events.cljs's authorized-to-hide?, which
-   this must always agree with -- who may flip the switch and who's
-   exempted from the hidden-filter are the same question."
+  "Whether the local viewer has visibility authority over `entity` while
+   it's hidden -- i.e. whether resolve-hidden shows them the real
+   content instead of the placeholder -- the host by default, or its
+   assigned player's connected controller once assigned (see
+   ogres.app.player/authority?).
+
+   Deliberately does NOT consider :object/shared? here, even though
+   authorized-to-hide? (events.cljs) and this file's own action-hide
+   disabled-checks DO treat :object/shared? as an authorization
+   escape hatch -- those two concerns are different questions.
+   :object/shared? means 'anyone connected may TOGGLE this object's
+   hidden state' (e.g. any player may flip a physical card on their
+   turn), NOT 'anyone may see its real content while it's still
+   hidden.' Folding shared? in here would mean a still-face-down
+   Memory card renders its true value to every viewer immediately
+   (since (or authorized? (not hidden)) would already be true before
+   anyone ever flips it) -- defeating the entire 'face-down until
+   flipped' mechanic. Once an object IS flipped (:object/hidden false),
+   resolve-hidden's OTHER clause already shows it to everyone
+   regardless of authority, so :object/shared? still fully achieves
+   'a public reveal, visible to everyone the instant any authorized
+   participant flips it' -- it just doesn't grant early/automatic
+   visibility before that flip happens."
+  [viewer-uuid host? connected-uuids entity]
+  (player/authority? viewer-uuid host? connected-uuids
+                      (get-in entity [:object/owner :player/controller :user/uuid])))
+
+(defn ^:private interactable?
+  "Whether the local viewer may select/interact with `entity` despite it
+   normally being locked-for-players -- :object/shared? true (ANY
+   connected participant may interact with a shared object, e.g. to
+   reach its hide/reveal control -- selecting it is a prerequisite for
+   that) OR object-authority? (the object's owner/controlling player).
+   Deliberately broader than object-authority? alone: that function
+   excludes :object/shared? on purpose (see its own docstring --
+   visibility-while-hidden and selectability are different questions),
+   but selection-lock is the one place both authorization paths
+   converge, since flipping something first requires selecting it."
   [viewer-uuid host? connected-uuids entity]
   (or (:object/shared? entity)
-      (player/authority? viewer-uuid host? connected-uuids
-                          (get-in entity [:object/owner :player/controller :user/uuid]))))
+      (object-authority? viewer-uuid host? connected-uuids entity)))
+
+(defn ^:private memory-card-hidden?
+  "True if `entity` is a still-face-down Memory card (carries a
+   :memory/value in :object/variables AND :object/hidden is true) --
+   used to flag scene-object DOM nodes with :data-memory-hidden so a
+   plain click can flip the card directly instead of just selecting
+   it (see use-drag-listener's onDragEnd). Reads correctly for every
+   viewer regardless of authority, since resolve-hidden only ever
+   swaps the rendered image key -- it leaves :object/hidden and
+   :object/variables themselves untouched."
+  [entity]
+  (boolean (and (:memory/value (:object/variables entity))
+                (:object/hidden entity))))
 
 (defn ^:private resolve-hidden
   "Resolves how a token/prop entity should render given whether the
@@ -901,10 +941,11 @@
                    delta (Vec2. (.. data -delta -x) (.. data -delta -y))
                    shift (.-shiftKey event)]
                (if (= delta vec/zero)
-                 (if (= ident "selected")
-                   (let [id (.. event -target (closest "[data-id]") -dataset -id)]
-                     (dispatch :objects/select (js/Number id) shift))
-                   (dispatch :objects/select ident shift))
+                 (let [^js node (.. event -target (closest "[data-id]"))
+                       id (if (= ident "selected") (js/Number (.. node -dataset -id)) ident)]
+                   (if (= "true" (.. node -dataset -memoryHidden))
+                     (dispatch :memory/flip id)
+                     (dispatch :objects/select id shift)))
                  (if (= ident "selected")
                    (dispatch :objects/translate-selected delta)
                    (dispatch :objects/translate ident delta))))) [dispatch])})))
@@ -969,6 +1010,7 @@
         [[:scene/grid-align :default false]
          [:scene/grid-type :default :square]
          [:scene/show-object-outlines :default true]
+         [:scene/neutral-authority? :default false]
          {:scene/game-type
           [[:game-type/enabled-elements :default #{}]]}
          {:scene/tokens
@@ -1066,15 +1108,15 @@
    of their own :object/locked value -- notes and props are session-
    transient decoration only the host arranges, and board pieces are the
    map/board itself, set up in advance by the host. The one exception:
-   an entity a non-host viewer has authority over (see
-   object-authority? -- :object/shared? true, or being the exclusive
-   assigned controller) is NOT locked for them -- selecting is a
-   prerequisite for using the hide/reveal control at all, so an
-   authorized guest who can flip a card must also be able to pick it up
-   in the first place (e.g. a physical on-table card any player may
-   move and flip on their turn). Board pieces/notes never have
-   :object/owner/:object/shared? set by anything today, so this is a
-   no-op for them -- this only actually changes behavior for props."
+   an entity a non-host viewer is interactable? with (see interactable?
+   -- :object/shared? true, or being the exclusive assigned controller)
+   is NOT locked for them -- selecting is a prerequisite for using the
+   hide/reveal control at all, so a guest who can flip a card must also
+   be able to pick it up in the first place (e.g. a physical on-table
+   card any player may move and flip on their turn). Board pieces/notes
+   never have :object/owner/:object/shared? set by anything today, so
+   this is a no-op for them -- this only actually changes behavior for
+   props."
   #{:note/note :prop/prop :board/piece})
 
 (defui objects []
@@ -1090,6 +1132,7 @@
            {outline? :scene/show-object-outlines
             align? :scene/grid-align
             grid-type :scene/grid-type
+            neutral? :scene/neutral-authority?
             game-type-entity :scene/game-type
             shapes :scene/shapes
             tokens :scene/tokens
@@ -1105,6 +1148,19 @@
         selected (into #{} (map :db/id) selected)
         dragging (into {} user-drag-xf conns)
         connected-uuids (into #{} (map :user/uuid) conns)
+        ;; The default authority a viewer gets over an unowned/
+        ;; unassigned object -- ordinarily just "am I the host," but
+        ;; suppressed on a scene in :scene/neutral-authority? mode (an
+        ;; impartial-dealer scene, e.g. a Memory game in progress) so
+        ;; the host doesn't automatically see hidden gameplay state
+        ;; they haven't been explicitly given authority over. Used ONLY
+        ;; for the two gameplay-visibility call sites below
+        ;; (tokens-xf/props' resolve-hidden) -- editing-privilege checks
+        ;; (Owner, Lock, Layer-shift, Remove) and board/shape/note
+        ;; visibility (`visible?` below) stay on the raw `host` value,
+        ;; since "the host retains control of the room" regardless of
+        ;; this mode.
+        default-authority (and host (not neutral?))
         bound-xf
         (comp (filter (comp selected :db/id))
               (map geom/object-bounding-rect)
@@ -1112,9 +1168,9 @@
         forward? #(= (:object/layer-shift %) :forward)
         back? #(= (:object/layer-shift %) :back)
         visible? (fn [entity] (or host (not (:object/hidden entity))))
-        sorted-tokens (sort compare-tokens (sequence (tokens-xf uuid host connected-uuids) tokens))
+        sorted-tokens (sort compare-tokens (sequence (tokens-xf uuid default-authority connected-uuids) tokens))
         resolved-props
-        (into [] (keep #(resolve-hidden % (object-authority? uuid host connected-uuids %)
+        (into [] (keep #(resolve-hidden % (object-authority? uuid default-authority connected-uuids %)
                                          :prop/image :prop/image-alt))
               props)
         board-entities (sort compare-objects board)
@@ -1161,7 +1217,7 @@
                          (contains? dragging id)
                          (and (not host)
                               (contains? locked-for-players-types (:object/type entity))
-                              (not (object-authority? uuid host connected-uuids entity))))
+                              (not (interactable? uuid host connected-uuids entity))))
                 node (uix/create-ref)
                 user (dragging id)
                 rect (geom/object-bounding-rect entity)
@@ -1192,7 +1248,8 @@
                                :data-locked (boolean lock)
                                :data-color (:user/color user)
                                :data-type (name (keyword (namespace (:object/type entity))))
-                               :data-id id}
+                               :data-id id
+                               :data-memory-hidden (memory-card-hidden? entity)}
                               ($ object {:entity entity :grid-type grid-type})
                               (if-let [portal (deref portal)]
                                 ($ object-hint
@@ -1226,7 +1283,7 @@
                               (some
                                (fn [entity]
                                  (and (contains? locked-for-players-types (:object/type entity))
-                                      (not (object-authority? uuid host connected-uuids entity))))
+                                      (not (interactable? uuid host connected-uuids entity))))
                                select)))]
           ($ drag-local-fn {:id "selected" :disabled locked}
             (fn [^js/Object drag]
@@ -1261,7 +1318,8 @@
                                      :data-drag-remote (some? user)
                                      :data-drag-local (.-isDragging drag)
                                      :data-color (:user/color user)
-                                     :data-id id}
+                                     :data-id id
+                                     :data-memory-hidden (memory-card-hidden? entity)}
                                     ($ object {:entity entity :grid-type grid-type})
                                     (if-let [portal (deref portal)]
                                       ($ object-hint
@@ -1288,4 +1346,5 @@
                           {:data select
                            :host host
                            :viewer-uuid uuid
-                           :connected-uuids connected-uuids})))))))))))))
+                           :connected-uuids connected-uuids
+                           :default-authority default-authority})))))))))))))

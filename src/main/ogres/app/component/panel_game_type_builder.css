@@ -8,6 +8,22 @@
   }
 }
 
+/* A template-picker category group (e.g. "Card", currently just
+   containing "Memory") -- a plain labeled cluster in an otherwise flat
+   single-select radio list, not a collapsible/multi-select tree like
+   the element editor's categories below, so it reuses that mechanism's
+   indentation step without any of its <details>/checkbox machinery. */
+.game-type-builder-template-group {
+  margin-left: 14px;
+  margin-top: 4px;
+}
+
+.game-type-builder-template-group-label {
+  color: var(--color-black-500);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
 .game-type-builder-remove {
   align-items: center;
   background: none;

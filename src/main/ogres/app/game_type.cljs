@@ -12,10 +12,11 @@
             [ogres.app.game-type.core-decks :as core-decks]
             [ogres.app.game-type.core-elements :as core]
             [ogres.app.game-type.games.dnd5e :as dnd5e]
-            [ogres.app.game-type.games.gloomhaven :as gloomhaven]))
+            [ogres.app.game-type.games.gloomhaven :as gloomhaven]
+            [ogres.app.game-type.games.memory :as memory]))
 
 (def elements
-  (merge core/elements dnd5e/elements gloomhaven/elements))
+  (merge core/elements dnd5e/elements gloomhaven/elements memory/elements))
 
 (def deck-definitions
   "Every registered card-deck template, keyed by its own id (e.g.
@@ -119,6 +120,20 @@
   (into default-enabled-elements
         (concat [:tool/measurement-cells :unit/size]
                 (keys gloomhaven/elements))))
+
+(def memory-enabled-elements
+  "The seeded 'Memory' game-type's starting set. Deliberately close to
+   the bare default -- Memory has no use for the shared tactical-map
+   primitives other templates opt into (measurement/masking/shapes/
+   size/light/aura -- it's a fixed grid of face-down cards, not a
+   token-based map) beyond the baseline grid/token flags every
+   template starts with. Explicitly drops :unit/initiative, on by
+   default for every other template: Memory has its own turn-order UI
+   (panel_memory.cljs, driven by :scene/memory-*), and showing the
+   generic Turn Order tab alongside it would just be a second,
+   redundant 'whose turn is it' panel with nothing in it (Memory cards
+   aren't tokens and never populate the initiative tracker)."
+  (into (disj default-enabled-elements :unit/initiative) (keys memory/elements)))
 
 (defn grid-tool-id
   "The :tool/grid-* element id for a :scene/grid-type value, e.g.
