@@ -1214,6 +1214,20 @@
     (transact! conn [{:db/id (:db/id card-b) :card/position (inc max-pos)}
                       {:db/id (:db/id card-a) :card/position (+ max-pos 2)}])))
 
+(defn ^:private force-attack-deck-top-effect!
+  "Test helper: like force-attack-deck-top!, but matches a card by
+   kind+effect+amount exactly, for a deterministic draw of a specific
+   special-effect card."
+  [conn deck kind effect amount]
+  (let [draw (filter (comp #{:draw} :card/location) (:deck/cards deck))
+        card (first (filter (fn [c] (and (= (:card/rank c) kind)
+                                          (= (:card/effect c) effect)
+                                          (= (:card/effect-amount c) amount)))
+                             draw))
+        max-pos (apply max (map :card/position draw))]
+    (transact! conn [{:db/id (:db/id card) :card/position (inc max-pos)}])
+    (:db/id card)))
+
 (deftest test-attack-deck-create-personal-and-monster
   (let [conn (ds/conn-from-db (initial-data true))]
     (set-enabled-elements! conn #{:gloomhaven/attack-deck})
@@ -1535,6 +1549,162 @@
       (is (= (count (scene-attack-decks conn)) 1)
           "a connected player may create/act on the deck for the seat they
            themselves control, even though they aren't the host"))))
+
+(deftest test-attack-deck-add-effect-cards
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-effect-cards deck-id :plus-1 :push 2 3)
+      (let [deck (entity @conn deck-id)
+            matching (filter (fn [c] (and (= (:card/rank c) :plus-1)
+                                           (= (:card/effect c) :push)
+                                           (= (:card/effect-amount c) 2)))
+                              (:deck/cards deck))]
+        (is (= (count (:deck/cards deck)) 23))
+        (is (= (count matching) 3))
+        (is (every? (comp #{:draw} :card/location) matching))))))
+
+(deftest test-attack-deck-add-effect-cards-no-amount-for-flag-effect
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-effect-cards deck-id :plus-0 :stun 999 1)
+      (let [deck (entity @conn deck-id)
+            card (first (filter (fn [c] (and (= (:card/rank c) :plus-0) (= (:card/effect c) :stun)))
+                                 (:deck/cards deck)))]
+        (is (some? card))
+        (is (nil? (:card/effect-amount card))
+            "STUN has no amount -- the given 999 is ignored, not stored")))))
+
+(deftest test-attack-deck-add-effect-cards-unrecognized-effect-noop
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-effect-cards deck-id :plus-1 :not-a-real-effect nil 1)
+      (is (= (count (:deck/cards (entity @conn deck-id))) 20) "unrecognized effect -- a no-op"))))
+
+(deftest test-attack-deck-remove-effect-cards
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-effect-cards deck-id :plus-1 :push 2 3)
+      (dispatch conn :attack-deck/remove-effect-cards deck-id :plus-1 :push 2 2)
+      (let [deck (entity @conn deck-id)
+            matching (filter (fn [c] (and (= (:card/rank c) :plus-1)
+                                           (= (:card/effect c) :push)
+                                           (= (:card/effect-amount c) 2)))
+                              (:deck/cards deck))]
+        (is (= (count matching) 1) "removed 2 of the 3, 1 remains")
+        (is (= (count (:deck/cards deck)) 21))))))
+
+(deftest test-attack-deck-remove-cards-skips-effect-cards
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-effect-cards deck-id :plus-1 :push 2 1)
+      ;; 6 total :plus-1-ranked cards now (5 plain + 1 effect). Ask to
+      ;; remove 10 -- far more than the 5 plain ones -- and confirm the
+      ;; effect card is never touched by a plain composition edit.
+      (dispatch conn :attack-deck/remove-cards deck-id :plus-1 10)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (filter (fn [c] (and (= (:card/rank c) :plus-1) (nil? (:card/effect c))))
+                              (:deck/cards deck)))
+               0)
+            "all 5 plain +1s removed")
+        (is (= (count (filter (fn [c] (and (= (:card/rank c) :plus-1) (= (:card/effect c) :push)))
+                              (:deck/cards deck)))
+               1)
+            "the effect card survives untouched, even though remove-cards
+             asked for far more than the plain cards available")))))
+
+(deftest test-attack-deck-replace-card-skips-effect-cards
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/remove-cards deck-id :minus-1 5)
+      (dispatch conn :attack-deck/add-effect-cards deck-id :minus-1 :muddle nil 1)
+      (dispatch conn :attack-deck/replace-card deck-id :minus-1 :plus-2)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (:deck/cards deck)) 16)
+            "20 - 5 plain -1s + 1 effect card, unaffected by replace-card")
+        (is (= (count (filter (fn [c] (and (= (:card/rank c) :minus-1) (= (:card/effect c) :muddle)))
+                              (:deck/cards deck)))
+               1)
+            "the effect card survives -- replace-card only matches PLAIN
+             cards for from-kind, so with none left it correctly no-ops")))))
+
+(deftest test-attack-deck-draw-carries-effect
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-effect-cards deck-id :plus-1 :push 2 1)
+      (force-attack-deck-top-effect! conn (entity @conn deck-id) :plus-1 :push 2)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (let [draw (first (scene-attack-draws conn))]
+        (is (= (:draw/kind draw) :plus-1))
+        (is (= (:draw/effect draw) :push))
+        (is (= (:draw/effect-amount draw) 2))))))
+
+(deftest test-attack-deck-draw-advantage-carries-discarded-effect
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/remove-cards deck-id :minus-1 5)
+      (dispatch conn :attack-deck/add-effect-cards deck-id :minus-1 :stun nil 1)
+      (force-attack-deck-top-two! conn (entity @conn deck-id) :minus-1 :plus-2)
+      (dispatch conn :attack-deck/draw deck-id :advantage)
+      (let [draw (first (scene-attack-draws conn))]
+        (is (= (:draw/kind draw) :plus-2))
+        (is (= (:draw/discarded-kind draw) :minus-1))
+        (is (= (:draw/discarded-effect draw) :stun)
+            "the discarded card's attached effect is captured too, even
+             though it wasn't the one applied")))))
+
+(deftest test-attack-deck-bless-cap
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-bless deck-id 10)
+      (is (= (count (filter (comp #{:bless} :card/rank) (:deck/cards (entity @conn deck-id)))) 10))
+      (dispatch conn :attack-deck/add-bless deck-id 1)
+      (is (= (count (filter (comp #{:bless} :card/rank) (:deck/cards (entity @conn deck-id)))) 10)
+          "the 11th BLESS is rejected outright -- capped at 10 in this one deck"))))
+
+(deftest test-attack-deck-curse-cap
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-curse deck-id 8)
+      (dispatch conn :attack-deck/add-curse deck-id 3)
+      (is (= (count (filter (comp #{:curse} :card/rank) (:deck/cards (entity @conn deck-id)))) 8)
+          "adding 3 more on top of 8 would exceed 10 -- the whole dispatch
+           is rejected, not partially applied down to exactly 10"))))
+
+(deftest test-attack-deck-toggle-shuffle-icons
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/toggle-shuffle-icons false)
+      (force-attack-deck-top! conn (entity @conn deck-id) :null)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (is (not (:deck/needs-reshuffle? (entity @conn deck-id)))
+          "the reshuffle-icon rule is off -- drawing Null never flags the deck")
+      (dispatch conn :attack-deck/toggle-shuffle-icons true)
+      (force-attack-deck-top! conn (entity @conn deck-id) :times-2)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (is (:deck/needs-reshuffle? (entity @conn deck-id))
+          "turned back on -- drawing 2x now flags the deck again"))))
 
 ;; --- Prop variables, copies, and physical piles ---
 (defn ^:private scene-props [conn]

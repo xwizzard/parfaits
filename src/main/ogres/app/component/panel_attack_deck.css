@@ -92,6 +92,51 @@
   margin-top: 8px;
 }
 
+.attack-deck-row-last-drawn {
+  color: var(--color-black-500);
+  font-size: 12px;
+}
+
+.attack-deck-effect-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.attack-deck-effect-item {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.attack-deck-effect-item-label {
+  flex: 1;
+  font-size: 12px;
+}
+
+.attack-deck-effect-form {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attack-deck-effect-amount,
+.attack-deck-effect-count {
+  width: 56px;
+}
+
+.attack-deck-shuffle-icons-toggle {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 4px;
+  margin-left: auto;
+  width: auto;
+}
+
 .attack-deck-new-controls {
   display: flex;
   flex-wrap: wrap;

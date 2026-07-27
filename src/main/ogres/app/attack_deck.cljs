@@ -80,3 +80,40 @@
    `value`, ties favoring `kind-a`, same tie-break rule as `better`."
   [kind-a kind-b]
   (if (< (value kind-b) (value kind-a)) kind-b kind-a))
+
+(def effect-kinds
+  "Attack-modifier-card attached effects (p.10-11's 'special effects of
+   the attack') -- a small, fixed vocabulary covering what real class
+   perks actually add (confirmed against a real class's perk list via
+   gloomhavensecretariat's brute.json during the follow-up research
+   pass): push/pull/pierce/shield/heal take a numeric amount, the rest
+   are a plain flag. Deliberately distinct from the token :token-badge
+   status-effect vocabulary (game_type/games/gloomhaven.cljs) -- this
+   describes what ONE drawn card does for ONE attack, not an ongoing
+   per-token condition, even though several names overlap conceptually
+   (stun/disarm/muddle/immobilize/poison/wound). Only ever attached to
+   one of the 7 plain standard-composition kinds -- BLESS/CURSE stay
+   effect-free, already their own one-shot mechanic (see add-bless/
+   add-curse)."
+  {:push        {:label "Push"        :amount? true}
+   :pull        {:label "Pull"        :amount? true}
+   :pierce      {:label "Pierce"      :amount? true}
+   :shield      {:label "Shield"      :amount? true}
+   :heal        {:label "Heal"        :amount? true}
+   :stun        {:label "Stun"        :amount? false}
+   :disarm      {:label "Disarm"      :amount? false}
+   :muddle      {:label "Muddle"      :amount? false}
+   :immobilize  {:label "Immobilize"  :amount? false}
+   :poison      {:label "Poison"      :amount? false}
+   :wound       {:label "Wound"       :amount? false}
+   :invisible   {:label "Invisible"   :amount? false}
+   :strengthen  {:label "Strengthen"  :amount? false}
+   :add-target  {:label "Add Target"  :amount? false}})
+
+(defn effect-label
+  "Display text for an attached effect -- \"Push 2\", \"Stun\" -- nil for
+   no effect at all. No amount is ever shown for a flag-only effect, even
+   if one was somehow stored alongside it."
+  [effect amount]
+  (if-let [{:keys [label amount?]} (get effect-kinds effect)]
+    (if (and amount? amount) (str label " " amount) label)))

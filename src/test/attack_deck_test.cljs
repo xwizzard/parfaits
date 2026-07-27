@@ -67,3 +67,17 @@
   (testing "ties favor whichever was drawn first (the first argument)"
     (is (= (attack-deck/worse :plus-0 :plus-0) :plus-0))
     (is (= (attack-deck/worse :times-2 :bless) :times-2))))
+
+(deftest test-effect-label
+  (testing "amount-taking effects show the number"
+    (is (= (attack-deck/effect-label :push 2) "Push 2"))
+    (is (= (attack-deck/effect-label :pierce 3) "Pierce 3"))
+    (is (= (attack-deck/effect-label :shield 1) "Shield 1")))
+  (testing "flag-only effects never show a number, even if one was given"
+    (is (= (attack-deck/effect-label :stun nil) "Stun"))
+    (is (= (attack-deck/effect-label :stun 5) "Stun"))
+    (is (= (attack-deck/effect-label :disarm nil) "Disarm"))
+    (is (= (attack-deck/effect-label :add-target nil) "Add Target")))
+  (testing "no effect at all is nil, not an empty string"
+    (is (nil? (attack-deck/effect-label nil nil)))
+    (is (nil? (attack-deck/effect-label :not-a-real-effect 1)))))

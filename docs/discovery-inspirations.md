@@ -10,21 +10,45 @@ item to a real plan once it's actually being scoped.
 Survey conducted 2026-07-21 across 8 parallel research passes. Source
 directories referenced below are all under `~/Documents/Inspirations/`.
 
+Follow-up deep dive conducted 2026-07-27 (3 parallel research passes, after
+the attack modifier deck framework shipped — see `ogres.app.attack-deck`)
+into the projects already listed below plus a rulebook re-read on classes/
+perks/items; see "Attack modifier deck framework — follow-up findings"
+under Gloomhaven-specific mechanics for the new material. That pass also
+surfaced one new project not previously indexed: `Lurkars/XhavenAssistant`
+(see Source directory index) — not yet actually surveyed in depth, flagged
+for a dedicated pass of its own.
+
 ## Prioritized candidates (highest value first)
 
-1. **Monster ability-deck system** (Gloomhaven's core mechanic — see
-   `gloomycompanion` below). Nothing in parfaits models this yet. Data model
-   is clean and portable; looks tractable as a new game-type element/slot.
-2. **Monster stat-by-level table** (see `haven-keeper` below). Also entirely
-   absent from `gloomhaven.cljs` today, and the reference data shape is
+1. **Player ability-hand management** (2-cards-per-round selection, hand/
+   discard/destroyed/on-board tracking, short/long rest cycle — see
+   `gloomhaven-deck`'s follow-up entry below). The single biggest
+   completely-unmodeled CORE player mechanic left in Gloomhaven — attack
+   modifier decks cover damage variance, but nothing tracks a player's
+   actual turn actions yet. Pure state machine, no copyrighted card
+   content needed, same shape of scope decision the attack-deck framework
+   already made successfully.
+2. **Deck-add-with-attached-special-effect cards** for the attack modifier
+   deck framework (PUSH/PIERCE/STUN/DISARM/MUDDLE/etc., not just a plain
+   ±N — see the rulebook follow-up below). The majority of real Gloomhaven
+   perks need this; the current `add-cards`/`remove-cards`/`replace-card`
+   primitives only cover the plain-numeric minority. A natural, scoped
+   extension of a framework that already exists, not a new subsystem.
+3. **Monster ability-deck system** (Gloomhaven's core monster-side mechanic
+   — see `gloomycompanion` below). Still nothing in parfaits models this.
+   Data model is clean and portable; looks tractable as a new game-type
+   element/slot.
+4. **Monster stat-by-level table** (see `haven-keeper` below). Also still
+   entirely absent from `gloomhaven.cljs`, and the reference data shape is
    close to ready-to-port.
-3. **Gloomhaven condition badge set** — slots into the existing generalized
+5. **Gloomhaven condition badge set** — slots into the existing generalized
    `:token-badge` vocabulary (`scene.cljs`) with no new mechanism needed,
    just new data.
-4. **Hex-ring vision** (exact N-hex-ring fog/sight boundary instead of a
+6. **Hex-ring vision** (exact N-hex-ring fog/sight boundary instead of a
    circular radius) — relevant if Gloomhaven-style limited vision is ever
    wanted; see FoundryVTT's `hexploration` below.
-5. Smaller initiative/turn-order enhancements (grouped NPC rolls, richer
+7. Smaller initiative/turn-order enhancements (grouped NPC rolls, richer
    tiebreak chains, timed-effect counters) — see the Initiative section.
 
 Everything else below is lower-priority / informational — either validates a
@@ -301,6 +325,108 @@ addition — no new mechanism required, just new data plus maybe two
 `:expires-on-turn?`/`:stacks?` metadata flags per badge if that level of
 behavior is wanted later.
 
+### Attack modifier deck framework — follow-up findings (2026-07-27)
+
+After shipping `ogres.app.attack-deck` (personal + monster decks,
+Advantage/Disadvantage, BLESS/CURSE, generic add/remove/replace deck-edit
+primitives — deliberately not modeling official class perk *content*), a
+follow-up pass re-read the rulebook on classes/perks/items and dug deeper
+into `gloomycompanion`, `haven-keeper`, `gloomhavensecretariat`, `ghs-
+server`, `frosthaven-previouslyon`, and `gloomhaven-deck`.
+
+**Rulebook, perks/items in full (p.5, 7-8, 36, 43-45):**
+- Leveling grants exactly 3 things: one new ability card, an optional
+  perk checkbox, and a fixed (non-perk-driven) HP increase per the
+  class's own printed table. Hand size is fixed per class and never
+  changes from leveling or anything else found in this rulebook.
+- The perk vocabulary is bigger than what's implemented: plain deck
+  count-edits and swaps (what `add-cards`/`remove-cards`/`replace-card`
+  already cover) are actually the MINORITY of a real class's perk list.
+  The majority add a card carrying an attached special effect (PUSH/
+  PIERCE/STUN/DISARM/MUDDLE/ADD TARGET/Shield, etc.) — the current
+  primitives have no card shape for an attached effect, only a bare
+  `kind` keyword. A rare few perks aren't deck edits at all (a standing
+  rule change — confirmed to exist via FAQ text, exact class/wording not
+  found in this rulebook).
+- Items add deck cards too (the `-1`-per-item mechanic already glimpsed
+  before), but **scenario-scoped**: removed at the end of the scenario,
+  unlike perk-added cards, which are permanent. The shipped framework
+  has no expiring/temporary card concept — every `add-cards` today is
+  permanent.
+- Retirement grants a permanent, cross-character bonus perk to every
+  future character that player creates — real persistent state with no
+  current analog (ties into the broader campaign-persistence gap below).
+
+**gloomycompanion correction and small ideas** (`logic.js:583-584`):
+the code's own comment cites the rule as a **per-deck cap of 10 curse/10
+bless cards**, not the shared-pool-across-decks reading used when the
+framework was built — worth reconciling, and easy to add
+(`add-bless`/`add-curse` refusing past 10) if wanted. Also: a global
+`do_shuffles` toggle to disable the Null/2x reshuffle-icon mechanic
+entirely — a plausible optional-rule toggle. Deck composition (6/5/5/
+1/1/1/1) was independently re-confirmed byte-for-byte.
+
+**gloomhavensecretariat, the big correction:** `Perks.ts`'s own perk
+shape (`{type: add|remove|replace|custom, count, cards:
+[{count, attackModifier}]}`) is a near-exact match to what was already
+built — good validation. But `data/gh/character/brute.json` shows a real
+class's perk CHECKLIST is tiny (11 entries, pure `{type, count, kind}`
+structs, zero flavor text) — much smaller than the earlier "big content
+lift, avoid it" assumption. The actual large/copyright-sensitive content
+is the *ability cards* (`data/gh/character/deck/brute.json`, 1409 lines),
+not the perk checklists. **Worth revisiting the earlier scope decision**
+specifically for perk checklists (not ability cards) if a leveling
+feature is ever built. Also notable: `AttackModifierManager.
+applyCharacterPerks` recomputes a deck's full composition from a
+`perks[]` "times-checked" array on every change, rather than mutating
+the live deck directly (what the shipped framework does) — the safer
+architecture if perks become togglable/uncheckable later, since nothing
+can double-apply or leak. `AttackModifierDeck` also persists a
+"currently revealed card(s)" display separate from history — the shipped
+framework only has a scrolling history log, no persistent "last drawn"
+panel; small, high-value UX gap. `rolling: boolean` (the mechanic
+explicitly cut from scope) turns out to be common in expansion content
+(Crimson Scales/GH2E) though rare in base Gloomhaven — a natural
+fast-follow if expansion support is ever wanted.
+
+**gloomhaven-deck's ability-hand state machine** (`js/abilities.js`,
+now the #1 priority above): `abilitiesChosen`/`twoAbilitiesSelected`
+(capped at 2 per round)/`cardsInHand`/`cardsDiscarded`/`cardsDestroyed`/
+`cardsOnBoard`, with short rest (lose one random discarded card) and long
+rest (player's choice, plus un-playing equipped gear) both funneling
+through one `rest()`. Clean, self-contained, no copyrighted content
+needed — the biggest remaining core player mechanic with nothing built
+for it yet.
+
+**haven-keeper, additional findings:** attack values are actually THREE
+additive layers in the real rules — innate level-based monster stats +
+a drawn ability card's own modifier + the attack-modifier-deck draw
+(only the third is what's built) — relevant context if monster ability
+decks are ever built, so the two aren't conflated. `Summon` (player-
+owned summoned ally figures, distinct from monsters) is a real gap in
+parfaits' token model with no current analog. `AoeHexRow` (a compact
+row-based encoding for printed AOE hex diagrams) is a better starting
+data shape than `gloom`'s flat boolean grid, if AOE templates are ever
+tackled — though neither project actually projects a template onto a
+live board/rotates it onto real scene hexes; that part would still be
+built from scratch either way.
+
+**ghs-server, a genuinely new idea:** `Permissions.java` models a much
+more granular authorization scheme than parfaits' binary owner-or-host
+`player/authority?` — independent grants per connection for specific
+characters/monsters/scenario/round/attack-modifiers/loot-deck/party,
+letting a host hand out narrow capabilities instead of all-or-nothing
+seat control. Concrete and well-scoped as a future idea; not urgent.
+
+**Newly indexed, not yet surveyed:** `Lurkars/XhavenAssistant` — a
+Flutter app literally named "X-haven Assistant" (Gloomhaven + Frosthaven
++ Forgotten Circles + JOTL + Crimson Scales in one app per its README),
+almost certainly the origin of this project's own "x-haven" naming
+convention. Has a command-pattern `modifier_deck_state.dart`/
+`draw_modifier_card_command.dart`. Worth a dedicated survey pass of its
+own given it's the one project explicitly covering the whole family, not
+just Gloomhaven.
+
 ### Scenario/campaign unlock tracking (lower priority, bigger lift)
 
 `gloomhavensecretariat`'s `ScenarioData.ts` models scenario unlocks as
@@ -341,6 +467,7 @@ For re-exploring later. All paths relative to `~/Documents/Inspirations/`.
 | `gloomhavensecretary`, `Lurkars/gloomhavensecretariat` | Full digital companion (scenario unlocks, condition classification, monster entities) |
 | `Lurkars/frosthaven-previouslyon` | "Where did we leave off" story-resume tool |
 | `Lurkars/ghs-server` | Backend for gloomhavensecretariat (JSON-blob-over-Postgres) |
+| `Lurkars/XhavenAssistant` | Flutter "X-haven Assistant" covering Gloomhaven/Frosthaven/JOTL/Crimson Scales/Forgotten Circles in one app -- newly indexed 2026-07-27, not yet surveyed in depth |
 | `GloomhavenHelper` | Binary only, no source — nothing inspectable |
 | `gloomhaven-full-stack` | README + screenshots only, no source ever committed |
 | `images` | weserv/images (C++/libvips resize proxy) — already mined for parfaits' self-hosted `/thumbnail` route, see `src/main/ogres/server/core.clj` |

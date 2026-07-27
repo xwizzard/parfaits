@@ -1651,8 +1651,14 @@
             ;; `discard` entries are DataScript entities, not plain maps --
             ;; assoc doesn't work on those directly (see effective-draw-
             ;; pile's own identical note above), so build fresh plain maps.
-            reshuffled (map (fn [c] {:db/id (:db/id c) :card/rank (:card/rank c)
-                                      :card/position (get positions (:db/id c))})
+            ;; Carries :card/effect/:card/effect-amount through too, same
+            ;; as :card/rank -- otherwise a card reshuffled and drawn back
+            ;; out within this same operation would silently lose its
+            ;; attached effect.
+            reshuffled (map (fn [c] (cond-> {:db/id (:db/id c) :card/rank (:card/rank c)
+                                              :card/position (get positions (:db/id c))}
+                                       (:card/effect c) (assoc :card/effect (:card/effect c))
+                                       (:card/effect-amount c) (assoc :card/effect-amount (:card/effect-amount c))))
                              discard)]
         (recur (sort-by :card/position > reshuffled) [] picked (into reshuffle-tx tx)))
 
@@ -1702,6 +1708,14 @@
                 card-tx
                 [[:db.fn/call assoc-scene :scene/attack-decks deck-id]])))))
 
+(defn ^:private attack-deck-shuffle-icons-enabled?
+  "Whether the standard Null/2x reshuffle-icon rule is active on the
+   current scene (:scene/attack-deck-shuffle-icons?, absent/true = the
+   standard rule) -- see :attack-deck/toggle-shuffle-icons."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
+    (not (false? (:scene/attack-deck-shuffle-icons? scene)))))
+
 (defmethod
   ^{:doc "Draws from `deck-id`'s attack modifier deck -- 1 card normally,
           2 under :advantage/:disadvantage (`mode`), keeping the better
@@ -1713,13 +1727,18 @@
           kind -- including the 'other' card under Advantage/Disadvantage,
           which is drawn too, just not applied -- moves to discard. Sets
           :deck/needs-reshuffle? true if EITHER drawn card was :null/
-          :times-2 (see attack-deck/shuffle-triggering?) -- the flag
-          :attack-deck/reshuffle-flagged later sweeps at round end. Every
-          draw appends one immutable :scene/attack-draws entry, the same
-          'one action, one history entity' shape :dice/roll's own :scene/
-          dice-rolls uses. A no-op if the deck is truly empty (draw and
-          discard both exhausted) or the viewer lacks attack-deck-
-          authorized? over it."}
+          :times-2 (see attack-deck/shuffle-triggering?) AND the
+          reshuffle-icon rule is currently enabled (attack-deck-shuffle-
+          icons-enabled?) -- the flag :attack-deck/reshuffle-flagged later
+          sweeps at round end. Every draw appends one immutable :scene/
+          attack-draws entry, the same 'one action, one history entity'
+          shape :dice/roll's own :scene/dice-rolls uses -- carrying
+          through :card/effect/:card/effect-amount (see :attack-deck/
+          add-effect-cards) as :draw/effect(-amount), and the same for
+          the discarded alternative under Advantage/Disadvantage, as
+          :draw/discarded-effect(-amount). A no-op if the deck is truly
+          empty (draw and discard both exhausted) or the viewer lacks
+          attack-deck-authorized? over it."}
   event-tx-fn :attack-deck/draw
   [data _ deck-id mode]
   (let [user (ds/entity data [:db/ident :user])
@@ -1734,7 +1753,8 @@
           (let [paired? (= (count picked) 2)
                 kept (if paired? (attack-deck-pick mode picked) (first picked))
                 other (if paired? (first (remove #{kept} picked)))
-                flagged? (some (comp attack-deck/shuffle-triggering? :card/rank) picked)
+                flagged? (and (attack-deck-shuffle-icons-enabled? data)
+                              (some (comp attack-deck/shuffle-triggering? :card/rank) picked))
                 reshuffled? (seq reshuffle-tx)
                 base (if reshuffled? 0 (next-position (pile deck :discard)))
                 discardable (remove (comp attack-deck/removed-on-draw? :card/rank) picked)
@@ -1752,17 +1772,55 @@
                                  :draw/kind (:card/rank kept)
                                  :draw/at (.now js/Date)}
                           mode (assoc :draw/mode mode)
-                          other (assoc :draw/discarded-kind (:card/rank other)))]
+                          (:card/effect kept) (assoc :draw/effect (:card/effect kept))
+                          (:card/effect-amount kept) (assoc :draw/effect-amount (:card/effect-amount kept))
+                          other (assoc :draw/discarded-kind (:card/rank other))
+                          (:card/effect other) (assoc :draw/discarded-effect (:card/effect other))
+                          (:card/effect-amount other) (assoc :draw/discarded-effect-amount (:card/effect-amount other)))]
             (concat reshuffle-tx move-tx
                     (if flagged? [{:db/id deck-id :deck/needs-reshuffle? true}])
                     [draw-tx]
                     [[:db.fn/call assoc-scene :scene/attack-draws draw-id]])))))))
 
 (defmethod
+  ^{:doc "Updates whether drawing a Null/2x card flags a deck for
+          reshuffle at all (:scene/attack-deck-shuffle-icons?, absent/
+          true = the standard rule is active) -- an optional-rule
+          toggle, the same shape :scene/toggle-neutral-authority already
+          uses for its own scene-wide rule flag. When turned off,
+          :attack-deck/draw never sets :deck/needs-reshuffle?, so
+          :attack-deck/reshuffle-flagged naturally has nothing left to
+          sweep."}
+  event-tx-fn :attack-deck/toggle-shuffle-icons
+  [_ _ enabled]
+  [[:db.fn/call assoc-scene :scene/attack-deck-shuffle-icons? enabled]])
+
+(defn ^:private attack-deck-new-cards-tx
+  "Tx-data adding `n` fresh cards of `kind` (optionally carrying
+   `effect`/`amount`, both nil for a plain card) to `deck`'s draw pile,
+   reshuffling the whole draw pile's positions afterward so the new
+   cards land somewhere random rather than always on top -- the shared
+   card-construction helper both :attack-deck/add-cards and :attack-
+   deck/add-effect-cards build on."
+  [deck kind n effect amount]
+  (let [existing-ids (map :db/id (pile deck :draw))
+        new-ids (mapv - (range 1 (inc n)))
+        all-ids (into (vec existing-ids) new-ids)
+        positions (cards/shuffle-positions all-ids)
+        new-cards (for [id new-ids]
+                    (cond-> {:db/id id :card/rank kind :card/location :draw :card/position (get positions id)}
+                      effect (assoc :card/effect effect)
+                      amount (assoc :card/effect-amount amount)))
+        reposition (for [id existing-ids] {:db/id id :card/position (get positions id)})]
+    (concat new-cards reposition [{:db/id (:db/id deck) :deck/cards new-ids}])))
+
+(defmethod
   ^{:doc "Adds `n` fresh copies of `kind` to `deck-id`'s draw pile,
           reshuffling the draw pile's positions afterward so the new
           cards land somewhere random rather than always on top -- the
-          generic perk/item deck-edit primitive ('add two +1 cards')."}
+          generic perk/item deck-edit primitive ('add two +1 cards').
+          Always a PLAIN card (no attached effect) -- see :attack-deck/
+          add-effect-cards for cards carrying one."}
   event-tx-fn :attack-deck/add-cards
   [data _ deck-id kind n]
   (let [user (ds/entity data [:db/ident :user])
@@ -1770,21 +1828,37 @@
         owner-id (:db/id (:deck/owner deck))]
     (if (or (<= n 0) (not (attack-deck-authorized? data user owner-id)))
       []
-      (let [existing-ids (map :db/id (pile deck :draw))
-            new-ids (mapv - (range 1 (inc n)))
-            all-ids (into (vec existing-ids) new-ids)
-            positions (cards/shuffle-positions all-ids)
-            new-cards (for [id new-ids]
-                        {:db/id id :card/rank kind :card/location :draw :card/position (get positions id)})
-            reposition (for [id existing-ids] {:db/id id :card/position (get positions id)})]
-        (concat new-cards reposition [{:db/id deck-id :deck/cards new-ids}])))))
+      (attack-deck-new-cards-tx deck kind n nil nil))))
 
 (defmethod
-  ^{:doc "Removes up to `n` copies of `kind` from `deck-id` (searched
-          across both draw and discard, since these decks have no hand
-          concept) -- the generic perk/item deck-edit primitive ('remove
-          two -1 cards'). Removes as many matching cards as actually
-          exist, up to `n` -- not an error if fewer are found."}
+  ^{:doc "Adds `n` fresh copies of `kind` carrying an attached `effect`
+          (one of ogres.app.attack-deck/effect-kinds, e.g. :push with
+          `amount` 2) to deck-id's draw pile -- the generic perk/item
+          deck-edit primitive for the majority of real class perks,
+          which add a card that does more than a plain ±N ('add three
+          PUSH 1 cards', 'add one STUN card'). `amount` is only stored
+          for effects whose :amount? is true, ignored otherwise. A no-op
+          if `effect` isn't a recognized kind."}
+  event-tx-fn :attack-deck/add-effect-cards
+  [data _ deck-id kind effect amount n]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))
+        effect-def (get attack-deck/effect-kinds effect)]
+    (if (or (<= n 0) (nil? effect-def) (not (attack-deck-authorized? data user owner-id)))
+      []
+      (attack-deck-new-cards-tx deck kind n effect (if (:amount? effect-def) amount)))))
+
+(defmethod
+  ^{:doc "Removes up to `n` PLAIN copies of `kind` from `deck-id`
+          (searched across both draw and discard, since these decks have
+          no hand concept) -- the generic perk/item deck-edit primitive
+          ('remove two -1 cards'). Only matches cards with no attached
+          :card/effect -- an effect card sharing the same base kind is
+          never accidentally consumed by a plain composition edit;
+          removing one requires the explicit :attack-deck/remove-effect-
+          cards. Removes as many matching cards as actually exist, up to
+          `n` -- not an error if fewer are found."}
   event-tx-fn :attack-deck/remove-cards
   [data _ deck-id kind n]
   (let [user (ds/entity data [:db/ident :user])
@@ -1792,7 +1866,26 @@
         owner-id (:db/id (:deck/owner deck))]
     (if-not (attack-deck-authorized? data user owner-id)
       []
-      (let [targets (take n (filter (comp #{kind} :card/rank) (:deck/cards deck)))]
+      (let [targets (take n (filter (fn [c] (and (= (:card/rank c) kind) (nil? (:card/effect c))))
+                                     (:deck/cards deck)))]
+        (mapv (fn [c] [:db/retractEntity (:db/id c)]) targets)))))
+
+(defmethod
+  ^{:doc "Removes up to `n` cards matching `kind`, `effect`, AND `amount`
+          exactly from `deck-id` (searched across both draw and discard)
+          -- the effect-card counterpart to :attack-deck/remove-cards.
+          Removes as many matching cards as actually exist, up to `n`."}
+  event-tx-fn :attack-deck/remove-effect-cards
+  [data _ deck-id kind effect amount n]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))]
+    (if-not (attack-deck-authorized? data user owner-id)
+      []
+      (let [targets (take n (filter (fn [c] (and (= (:card/rank c) kind)
+                                                  (= (:card/effect c) effect)
+                                                  (= (:card/effect-amount c) amount)))
+                                     (:deck/cards deck)))]
         (mapv (fn [c] [:db/retractEntity (:db/id c)]) targets)))))
 
 (defmethod
@@ -1803,24 +1896,40 @@
   event-tx-fn :attack-deck/replace-card
   [data _ deck-id from-kind to-kind]
   (let [deck (ds/entity data deck-id)]
-    (if (empty? (filter (comp #{from-kind} :card/rank) (:deck/cards deck)))
+    (if (empty? (filter (fn [c] (and (= (:card/rank c) from-kind) (nil? (:card/effect c))))
+                         (:deck/cards deck)))
       []
       [[:db.fn/call event-tx-fn :attack-deck/remove-cards deck-id from-kind 1]
        [:db.fn/call event-tx-fn :attack-deck/add-cards deck-id to-kind 1]])))
 
+(defn ^:private attack-deck-kind-count
+  [deck kind]
+  (count (filter (comp #{kind} :card/rank) (:deck/cards deck))))
+
 (defmethod
   ^{:doc "Adds `n` BLESS cards to `deck-id` -- shorthand for :attack-deck/
-          add-cards with :bless."}
+          add-cards with :bless, capped at 10 BLESS cards total in this
+          one deck (gloomycompanion's own code comment reads the rule
+          this way: a per-deck cap, not a pool shared across every deck
+          on the scene). The whole dispatch is rejected outright, never
+          partially applied, if `n` would push this deck's own BLESS
+          count past 10."}
   event-tx-fn :attack-deck/add-bless
-  [_ _ deck-id n]
-  [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :bless n]])
+  [data _ deck-id n]
+  (let [deck (ds/entity data deck-id)]
+    (if (> (+ (attack-deck-kind-count deck :bless) n) 10)
+      []
+      [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :bless n]])))
 
 (defmethod
   ^{:doc "Adds `n` CURSE cards to `deck-id` -- shorthand for :attack-deck/
-          add-cards with :curse."}
+          add-cards with :curse, same per-deck cap of 10 as add-bless."}
   event-tx-fn :attack-deck/add-curse
-  [_ _ deck-id n]
-  [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :curse n]])
+  [data _ deck-id n]
+  (let [deck (ds/entity data deck-id)]
+    (if (> (+ (attack-deck-kind-count deck :curse) n) 10)
+      []
+      [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :curse n]])))
 
 (defmethod
   ^{:doc "Reshuffles the whole of `deck-id` (draw + discard together) into
