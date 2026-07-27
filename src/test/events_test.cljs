@@ -3834,8 +3834,15 @@
         ;; Give p1 a concrete, non-empty :won pile (relocated from sink,
         ;; which already absorbed p1's original leftovers) -- :draw
         ;; stays genuinely empty, forcing a reshuffle on their next
-        ;; draw.
-        (let [p1-won (take 3 (war-pile (entity @conn minigame-id) sink :won))]
+        ;; draw. Excludes rank :two so whichever card the post-reshuffle
+        ;; draw happens to pop can never tie p2's own fixed :two --
+        ;; otherwise both cards would correctly stay parked at :card/
+        ;; location :war awaiting a follow-up round (see :war/play-
+        ;; round's own tied-for-highest handling), which this test's
+        ;; conservation/no-:war-leftover assertions don't account for,
+        ;; an intermittent (deal-order-dependent) flake this excludes
+        ;; entirely rather than asserting around.
+        (let [p1-won (take 3 (remove (comp #{:two} :card/rank) (war-pile (entity @conn minigame-id) sink :won)))]
           (transact! conn
             (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won :card/holder p1 :card/position i})
                          p1-won)))
