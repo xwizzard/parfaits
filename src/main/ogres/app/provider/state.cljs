@@ -17,6 +17,8 @@
    :card/holder          {:db/valueType :db.type/ref}
    :db/ident             {:db/unique :db.unique/identity}
    :deck/cards           {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :deck/owner           {:db/valueType :db.type/ref}
+   :draw/deck            {:db/valueType :db.type/ref}
    :game-type/key        {:db/unique :db.unique/identity}
    :image/hash           {:db/unique :db.unique/identity}
    :image/thumbnail      {:db/valueType :db.type/ref :db/isComponent true}
@@ -38,6 +40,8 @@
    :root/token-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/props-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/user            {:db/valueType :db.type/ref :db/isComponent true}
+   :scene/attack-decks   {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/attack-draws   {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/crazy-eights-deck {:db/valueType :db.type/ref}
    :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}

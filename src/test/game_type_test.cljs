@@ -117,6 +117,14 @@
       "A module not listed excludes nothing beyond its grid preference
        (if any) -- D&D 5e's category checkbox has no extra exclusions."))
 
+(deftest test-attack-deck-registry-entry
+  (is (= (get-in gloomhaven/elements [:gloomhaven/attack-deck :label]) "Attack Modifier Decks"))
+  (is (string? (get-in gloomhaven/elements [:gloomhaven/attack-deck :icon])))
+  (is (contains? game-type/gloomhaven-enabled-elements :gloomhaven/attack-deck)
+      "the seeded Gloomhaven template actually enables its own attack
+       modifier deck system, same as every other element gloomhaven.cljs
+       contributes"))
+
 (deftest test-sanitize-icon-overrides
   (is (= (game-type/sanitize-icon-overrides
           {:unit/light {:icon/url "https://example.com/a.svg"}

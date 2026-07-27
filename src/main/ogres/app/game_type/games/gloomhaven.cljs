@@ -54,4 +54,15 @@
      :render
      (fn [props]
        ($ widgets/status-checklist (assoc props :vocabulary status-effects)))}
-    :token-badge {:vocabulary status-effects}}})
+    :token-badge {:vocabulary status-effects}}
+
+   ;; Gates the Attack Modifier Decks panel/tab -- each player's own
+   ;; personal 20-card deck plus one shared monster deck, drawn from
+   ;; instead of rolling a die (see ogres.app.attack-deck and events.cljs's
+   ;; :attack-deck/* methods). Named around the mechanic, not this module,
+   ;; so a future Frosthaven module could register its own element reusing
+   ;; the same pure logic/events/schema -- the same way multiple card
+   ;; games already share ogres.app.cards.
+   :gloomhaven/attack-deck
+   {:label "Attack Modifier Decks"
+    :icon  "suit-spade-fill"}})

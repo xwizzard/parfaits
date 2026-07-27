@@ -2,6 +2,7 @@
   (:require [datascript.core :as ds]
             [clojure.set :refer [union difference]]
             [clojure.string :refer [trim]]
+            [ogres.app.attack-deck :as attack-deck]
             [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size hex-radius]]
             [ogres.app.crazy-eights :as crazy-eights]
@@ -1574,6 +1575,311 @@
           cleanup, same as removing any other owned collection in this
           schema)."}
   event-tx-fn :deck/remove
+  [_ _ deck-id]
+  [[:db/retractEntity deck-id]])
+
+;; --- Attack Modifier Decks ---
+;; The Gloomhaven-family ("x-haven") attack modifier deck mechanic -- see
+;; ogres.app.attack-deck for the pure kind-vocabulary/comparison logic.
+;; Each player has their own personal 20-card deck (:deck/owner a roster
+;; player); monsters share exactly one deck (:deck/owner nil). A whole new
+;; event family, NOT built on the generic :deck/* methods above -- the
+;; round-boundary flagged-card reshuffle rule and the draw-2-keep-better/
+;; worse shape of Advantage/Disadvantage are different enough control flow
+;; that forcing reuse would fight the existing code rather than share it
+;; -- but it still reuses this namespace's own `pile`/`top-card`/
+;; `next-position`/`move-card-tx` helpers and ogres.app.cards/
+;; shuffle-positions directly, and reuses the existing :card/rank/
+;; :card/location/:card/position schema wholesale: a card's :card/rank
+;; simply holds one of attack-deck's 9 kind keywords instead of a playing-
+;; card rank, the same re-skinning precedent Old Maid's own queen card
+;; already established.
+
+(defn ^:private attack-deck-authorized?
+  "Whether `user` may draw from or edit `deck-id`'s deck. A personal deck
+   (owner-id non-nil) requires player/authority? over that specific
+   roster player -- the same explicit-target-id-plus-authority-check
+   shape :dice/roll's own owner check uses. The shared monster deck
+   (owner-id nil) requires the host -- unlike a neutral dice roll (which
+   anyone may make), running the monsters' turn is a GM action."
+  [data user owner-id]
+  (if owner-id
+    (let [connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+          controller-uuid (get-in (ds/entity data owner-id) [:player/controller :user/uuid])]
+      (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid))
+    (:user/host user)))
+
+(defn ^:private attack-deck-composition-tx
+  "Tx-data (paired with the fresh cards' own :db/ids) for a freshly-dealt
+   standard-composition set of cards, shuffled -- the seed both
+   :attack-deck/create and :attack-deck/reset use."
+  []
+  (let [kinds (mapcat (fn [[kind n]] (repeat n kind)) attack-deck/standard-composition)
+        n (count kinds)
+        ids (mapv - (range 1 (inc n)))
+        positions (cards/shuffle-positions ids)]
+    [ids
+     (map (fn [kind id] {:db/id id :card/rank kind :card/location :draw :card/position (get positions id)})
+          kinds ids)]))
+
+(defn ^:private pop-cards
+  "Pops up to `n` cards off the top of `deck`'s current draw pile,
+   reshuffling the discard pile back in (following the same reactive
+   'draw pile empty, discard has cards to reclaim' rule ogres.app.cards/
+   needs-reshuffle? already captures) as many times as needed in between
+   -- {:picked [...entities, draw order...] :reshuffle-tx [...]}. Fewer
+   than `n` picked only means the deck is truly out of cards altogether
+   (draw and discard both empty). `:reshuffle-tx` is the tx-data
+   realizing whichever reshuffle(s) actually happened, meant to be
+   included ahead of whatever tx-data moves/retracts the picked cards."
+  [deck n]
+  (loop [draw (sort-by :card/position > (pile deck :draw))
+         discard (pile deck :discard)
+         picked []
+         reshuffle-tx []]
+    (cond
+      (= (count picked) n)
+      {:picked picked :reshuffle-tx reshuffle-tx}
+
+      (seq draw)
+      (recur (rest draw) discard (conj picked (first draw)) reshuffle-tx)
+
+      (seq discard)
+      (let [ids (map :db/id discard)
+            positions (cards/shuffle-positions ids)
+            tx (for [id ids] {:db/id id :card/location :draw :card/position (get positions id)})
+            ;; `discard` entries are DataScript entities, not plain maps --
+            ;; assoc doesn't work on those directly (see effective-draw-
+            ;; pile's own identical note above), so build fresh plain maps.
+            reshuffled (map (fn [c] {:db/id (:db/id c) :card/rank (:card/rank c)
+                                      :card/position (get positions (:db/id c))})
+                             discard)]
+        (recur (sort-by :card/position > reshuffled) [] picked (into reshuffle-tx tx)))
+
+      :else
+      {:picked picked :reshuffle-tx reshuffle-tx})))
+
+(defn ^:private attack-deck-pick
+  "Which of two just-drawn cards `mode` keeps -- the numerically better
+   one for :advantage, the worse for :disadvantage (see ogres.app.attack-
+   deck/better and /worse), ties favoring `a` (whichever was drawn
+   first)."
+  [mode [a b]]
+  (let [ka (:card/rank a) kb (:card/rank b)]
+    (case mode
+      :advantage (if (= (attack-deck/better ka kb) ka) a b)
+      :disadvantage (if (= (attack-deck/worse ka kb) ka) a b))))
+
+(defmethod
+  ^{:doc "Creates a new attack modifier deck on the current scene, seeded
+          from ogres.app.attack-deck/standard-composition and shuffled.
+          `owner-id` nil creates the shared 'Monsters' deck (host-only,
+          see attack-deck-authorized?); otherwise a personal deck for
+          that roster player (that player, or the host, may create it).
+          A no-op if a deck for that same owner (nil included) already
+          exists on the scene -- exactly one deck per player, exactly
+          one monster deck. Also a no-op if :gloomhaven/attack-deck isn't
+          actually enabled on the scene's own game-type (checked here
+          server-side, not just gated in the UI, since any connected
+          participant may dispatch this) -- the same enabled-elements
+          check every ported mini-game's own /start requires for its own
+          :X/game element (see :old-maid/start)."}
+  event-tx-fn :attack-deck/create
+  [data _ owner-id]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        existing (:scene/attack-decks scene)]
+    (if (or (not (contains? enabled :gloomhaven/attack-deck))
+            (not (attack-deck-authorized? data user owner-id))
+            (some (fn [d] (= (:db/id (:deck/owner d)) owner-id)) existing))
+      []
+      (let [label (if owner-id (:player/name (ds/entity data owner-id)) "Monsters")
+            [ids card-tx] (attack-deck-composition-tx)
+            deck-id (dec (apply min ids))]
+        (concat [(cond-> {:db/id deck-id :deck/name label :deck/cards ids}
+                   owner-id (assoc :deck/owner owner-id))]
+                card-tx
+                [[:db.fn/call assoc-scene :scene/attack-decks deck-id]])))))
+
+(defmethod
+  ^{:doc "Draws from `deck-id`'s attack modifier deck -- 1 card normally,
+          2 under :advantage/:disadvantage (`mode`), keeping the better
+          or worse per attack-deck-pick, ties favoring whichever was
+          drawn first. Reshuffles reactively (see pop-cards) if the draw
+          pile runs out partway through, even mid-Advantage/Disadvantage.
+          A drawn BLESS/CURSE card is retracted outright rather than
+          discarded (ogres.app.attack-deck/removed-on-draw?); every other
+          kind -- including the 'other' card under Advantage/Disadvantage,
+          which is drawn too, just not applied -- moves to discard. Sets
+          :deck/needs-reshuffle? true if EITHER drawn card was :null/
+          :times-2 (see attack-deck/shuffle-triggering?) -- the flag
+          :attack-deck/reshuffle-flagged later sweeps at round end. Every
+          draw appends one immutable :scene/attack-draws entry, the same
+          'one action, one history entity' shape :dice/roll's own :scene/
+          dice-rolls uses. A no-op if the deck is truly empty (draw and
+          discard both exhausted) or the viewer lacks attack-deck-
+          authorized? over it."}
+  event-tx-fn :attack-deck/draw
+  [data _ deck-id mode]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))]
+    (if-not (attack-deck-authorized? data user owner-id)
+      []
+      (let [n (if mode 2 1)
+            {:keys [picked reshuffle-tx]} (pop-cards deck n)]
+        (if (empty? picked)
+          []
+          (let [paired? (= (count picked) 2)
+                kept (if paired? (attack-deck-pick mode picked) (first picked))
+                other (if paired? (first (remove #{kept} picked)))
+                flagged? (some (comp attack-deck/shuffle-triggering? :card/rank) picked)
+                reshuffled? (seq reshuffle-tx)
+                base (if reshuffled? 0 (next-position (pile deck :discard)))
+                discardable (remove (comp attack-deck/removed-on-draw? :card/rank) picked)
+                positions (zipmap discardable (range base (+ base (count discardable))))
+                move-tx
+                (mapcat
+                 (fn [c]
+                   (if (attack-deck/removed-on-draw? (:card/rank c))
+                     [[:db/retractEntity (:db/id c)]]
+                     (move-card-tx (:db/id c) :discard (get positions c) nil)))
+                 picked)
+                draw-id -1000
+                draw-tx (cond-> {:db/id draw-id
+                                 :draw/deck deck-id
+                                 :draw/kind (:card/rank kept)
+                                 :draw/at (.now js/Date)}
+                          mode (assoc :draw/mode mode)
+                          other (assoc :draw/discarded-kind (:card/rank other)))]
+            (concat reshuffle-tx move-tx
+                    (if flagged? [{:db/id deck-id :deck/needs-reshuffle? true}])
+                    [draw-tx]
+                    [[:db.fn/call assoc-scene :scene/attack-draws draw-id]])))))))
+
+(defmethod
+  ^{:doc "Adds `n` fresh copies of `kind` to `deck-id`'s draw pile,
+          reshuffling the draw pile's positions afterward so the new
+          cards land somewhere random rather than always on top -- the
+          generic perk/item deck-edit primitive ('add two +1 cards')."}
+  event-tx-fn :attack-deck/add-cards
+  [data _ deck-id kind n]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))]
+    (if (or (<= n 0) (not (attack-deck-authorized? data user owner-id)))
+      []
+      (let [existing-ids (map :db/id (pile deck :draw))
+            new-ids (mapv - (range 1 (inc n)))
+            all-ids (into (vec existing-ids) new-ids)
+            positions (cards/shuffle-positions all-ids)
+            new-cards (for [id new-ids]
+                        {:db/id id :card/rank kind :card/location :draw :card/position (get positions id)})
+            reposition (for [id existing-ids] {:db/id id :card/position (get positions id)})]
+        (concat new-cards reposition [{:db/id deck-id :deck/cards new-ids}])))))
+
+(defmethod
+  ^{:doc "Removes up to `n` copies of `kind` from `deck-id` (searched
+          across both draw and discard, since these decks have no hand
+          concept) -- the generic perk/item deck-edit primitive ('remove
+          two -1 cards'). Removes as many matching cards as actually
+          exist, up to `n` -- not an error if fewer are found."}
+  event-tx-fn :attack-deck/remove-cards
+  [data _ deck-id kind n]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))]
+    (if-not (attack-deck-authorized? data user owner-id)
+      []
+      (let [targets (take n (filter (comp #{kind} :card/rank) (:deck/cards deck)))]
+        (mapv (fn [c] [:db/retractEntity (:db/id c)]) targets)))))
+
+(defmethod
+  ^{:doc "Removes one `from-kind` card and adds one `to-kind` card in its
+          place -- the generic perk/item deck-edit primitive ('replace
+          one -2 card with one -1 card'). A no-op if `deck-id` has no
+          `from-kind` card to remove."}
+  event-tx-fn :attack-deck/replace-card
+  [data _ deck-id from-kind to-kind]
+  (let [deck (ds/entity data deck-id)]
+    (if (empty? (filter (comp #{from-kind} :card/rank) (:deck/cards deck)))
+      []
+      [[:db.fn/call event-tx-fn :attack-deck/remove-cards deck-id from-kind 1]
+       [:db.fn/call event-tx-fn :attack-deck/add-cards deck-id to-kind 1]])))
+
+(defmethod
+  ^{:doc "Adds `n` BLESS cards to `deck-id` -- shorthand for :attack-deck/
+          add-cards with :bless."}
+  event-tx-fn :attack-deck/add-bless
+  [_ _ deck-id n]
+  [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :bless n]])
+
+(defmethod
+  ^{:doc "Adds `n` CURSE cards to `deck-id` -- shorthand for :attack-deck/
+          add-cards with :curse."}
+  event-tx-fn :attack-deck/add-curse
+  [_ _ deck-id n]
+  [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :curse n]])
+
+(defmethod
+  ^{:doc "Reshuffles the whole of `deck-id` (draw + discard together) into
+          a freshly-shuffled draw pile and clears :deck/needs-reshuffle?
+          -- a manual 'reshuffle now' action, and what :attack-deck/
+          reshuffle-flagged calls per flagged deck."}
+  event-tx-fn :attack-deck/reshuffle
+  [data _ deck-id]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))]
+    (if-not (attack-deck-authorized? data user owner-id)
+      []
+      (let [ids (map :db/id (:deck/cards deck))
+            positions (cards/shuffle-positions ids)]
+        (conj (vec (for [id ids] {:db/id id :card/location :draw :card/position (get positions id)}))
+              {:db/id deck-id :deck/needs-reshuffle? false})))))
+
+(defmethod
+  ^{:doc "Host-only: reshuffles every attack modifier deck on the current
+          scene currently flagged :deck/needs-reshuffle? (see :attack-
+          deck/draw) in one sweep -- the manual 'end of round' action
+          substituting for automatically hooking the generic :initiative/
+          next event, which would otherwise need to know this specific
+          game module exists."}
+  event-tx-fn :attack-deck/reshuffle-flagged
+  [data _]
+  (let [user (ds/entity data [:db/ident :user])]
+    (if-not (:user/host user)
+      []
+      (let [scene (:camera/scene (:user/camera user))
+            flagged (filter :deck/needs-reshuffle? (:scene/attack-decks scene))]
+        (apply concat
+               (for [deck flagged]
+                 [[:db.fn/call event-tx-fn :attack-deck/reshuffle (:db/id deck)]]))))))
+
+(defmethod
+  ^{:doc "Resets `deck-id` all the way back to a fresh
+          ogres.app.attack-deck/standard-composition, discarding every
+          perk/item edit made to it -- a 'start the campaign over' action,
+          unlike :attack-deck/reshuffle (which keeps the current
+          composition, just re-pools it)."}
+  event-tx-fn :attack-deck/reset
+  [data _ deck-id]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)
+        owner-id (:db/id (:deck/owner deck))]
+    (if-not (attack-deck-authorized? data user owner-id)
+      []
+      (let [old-ids (map :db/id (:deck/cards deck))
+            [new-ids card-tx] (attack-deck-composition-tx)]
+        (concat (map (fn [id] [:db/retractEntity id]) old-ids)
+                card-tx
+                [{:db/id deck-id :deck/cards new-ids :deck/needs-reshuffle? false}])))))
+
+(defmethod
+  ^{:doc "Removes the given attack modifier deck and all its cards
+          (isComponent cleanup, same as :deck/remove)."}
+  event-tx-fn :attack-deck/remove
   [_ _ deck-id]
   [[:db/retractEntity deck-id]])
 

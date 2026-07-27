@@ -1,5 +1,6 @@
 (ns ogres.app.component.panel
   (:require [ogres.app.component :refer [icon]]
+            [ogres.app.component.panel-attack-deck :as attack-deck]
             [ogres.app.component.panel-crazy-eights :as crazy-eights]
             [ogres.app.component.panel-data :as data]
             [ogres.app.component.panel-decks :as decks]
@@ -77,6 +78,7 @@
    :crazy-eights {:icon "magic" :label "Crazy 8s"}
    :rummy      {:icon "suit-diamond-fill" :label "Rummy"}
    :war        {:icon "fist" :label "War"}
+   :attack-deck {:icon "suit-spade-fill" :label "Attack Decks"}
    :game-type-builder {:icon "sliders" :label "Game builder"}})
 
 (def ^:private components
@@ -95,6 +97,7 @@
    :crazy-eights {:form crazy-eights/panel :footer crazy-eights/actions}
    :rummy      {:form rummy/panel :footer rummy/actions}
    :war        {:form war/panel :footer war/actions}
+   :attack-deck {:form attack-deck/panel :footer attack-deck/actions}
    :game-type-builder {:form game-type-builder/panel}})
 
 (defn ^:private visible-tabs
@@ -132,10 +135,16 @@
    rolling dice is a play-time action, not a scenario-construction one;
    D&D 5e's own advantage/disadvantage/per-player controls layer onto
    this SAME tab (see component/panel_dice.cljs), gated on its own
-   :dnd5e/dice-roller element rather than getting a tab of their own."
+   :dnd5e/dice-roller element rather than getting a tab of their own.
+   The Attack Decks tab, gated on :gloomhaven/attack-deck, is visible in
+   BOTH Setup and Play (unlike Dice) -- creating a personal deck for
+   each player and applying perk/item composition edits is naturally a
+   setup-time activity too, not a play-only one -- and guest-visible
+   same as every other opt-in tab."
   [host mode enabled-elements]
   (let [cards?       (contains? enabled-elements :tool/cards)
         dice?        (contains? enabled-elements :tool/dice)
+        attack-deck? (contains? enabled-elements :gloomhaven/attack-deck)
         memory?      (contains? enabled-elements :memory/game)
         go-fish?     (contains? enabled-elements :go-fish/game)
         old-maid?    (contains? enabled-elements :old-maid/game)
@@ -144,20 +153,21 @@
         war?         (contains? enabled-elements :war/game)]
     (cond
       (not host) (cond-> [:tokens :initiative :lobby]
-                   dice? (conj :dice)
+                   dice? (conj :dice) attack-deck? (conj :attack-deck)
                    memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
                    crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war))
       (= mode :builder) [:game-type-builder :data]
       (= mode :play)
       (into (cond-> [:tokens :roster :props]
-              cards? (conj :decks) dice? (conj :dice)
+              cards? (conj :decks) dice? (conj :dice) attack-deck? (conj :attack-deck)
               memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
               crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war))
             (if (contains? enabled-elements :unit/initiative)
               [:initiative :lobby]
               [:lobby]))
       :else (cond-> [:scene :props :tokens :roster]
-              cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
+              cards? (conj :decks) attack-deck? (conj :attack-deck)
+              memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
               crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war)))))
 
 (defui ^:memo panel []

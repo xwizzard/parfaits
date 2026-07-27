@@ -1,0 +1,144 @@
+.attack-deck-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.attack-deck-row {
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+
+.attack-deck-row-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.attack-deck-row-name {
+  flex: 1;
+  font-weight: 600;
+}
+
+.attack-deck-row-name[data-color]::before {
+  background-color: var(--color-context, var(--color-blues-900));
+  border-radius: 50%;
+  content: "";
+  display: inline-block;
+  height: 8px;
+  margin-right: 6px;
+  width: 8px;
+}
+
+.attack-deck-row-flag {
+  color: var(--color-negative-500, #b23b3b);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.attack-deck-row-counts {
+  color: var(--color-black-500);
+  font-size: 12px;
+}
+
+.attack-deck-mode-row {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  margin-bottom: 8px;
+
+  label.radio {
+    flex: 1;
+    width: auto;
+  }
+}
+
+.attack-deck-composition-form {
+  margin-top: 6px;
+}
+
+.attack-deck-composition-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.attack-deck-composition-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.attack-deck-composition-label {
+  flex: 0 0 auto;
+  width: 32px;
+}
+
+.attack-deck-composition-delta {
+  width: 64px;
+}
+
+.attack-deck-composition-special {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.attack-deck-new-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.attack-deck-draw-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.attack-deck-draw-item {
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.attack-deck-draw-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.attack-deck-draw-owner {
+  flex: 1;
+  font-weight: 600;
+}
+
+.attack-deck-draw-mode {
+  color: var(--color-blues-700);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.attack-deck-draw-kind {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.attack-deck-draw-discarded {
+  color: var(--color-black-500);
+  font-size: 12px;
+}

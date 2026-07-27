@@ -121,19 +121,24 @@
    D&D-only): Gloomhaven's own turn order comes from drawn initiative
    cards, not a d20 roll, so this template just leaves the base
    manually-assigned order as-is rather than pretending the d20 mechanic
-   fits. The generic card/deck system now exists (:tool/cards, see
+   fits. The generic card/deck system also exists (:tool/cards, see
    core-elements.cljs, core-decks.cljs, and events.cljs's :deck/*
-   methods) -- proven here by a Standard 52-card deck available to any
-   game-type -- but this template doesn't enable it by default yet:
-   Gloomhaven's own monster ability-deck *content* (and its
-   reshuffle-on-a-flagged-card rule, layered on the
-   `ogres.app.cards/needs-reshuffle?` seam) is still out of scope for this
-   pass. Catan-style clockwise seating or Root's nested sub-turn groups
-   remain open turn-order ideas too. Each could plug into the exact same
-   :initiative-panel/:initiative-actions mechanism D&D's module already
-   proves out -- demonstrating that two real games legitimately want
-   different subsets of the same shared primitives, decided here in
-   data, with no core file caring which."
+   methods) -- proven by a Standard 52-card deck available to any
+   game-type -- but this template doesn't enable it: Gloomhaven's own
+   monster ABILITY-deck *content* (a different mechanic -- see the
+   discovery-inspirations.md survey) is still out of scope. Its ATTACK
+   MODIFIER deck system, by contrast, IS included below (every element
+   gloomhaven.cljs contributes, including :gloomhaven/attack-deck --
+   see ogres.app.attack-deck and events.cljs's :attack-deck/* methods --
+   each player's own personal deck plus one shared monster deck, drawn
+   from instead of rolling a die, with its own dedicated event family
+   rather than reusing :deck/* -- see :attack-deck/draw's own docstring
+   for why). Catan-style clockwise seating or Root's nested sub-turn
+   groups remain open turn-order ideas too. Each could plug into the
+   exact same :initiative-panel/:initiative-actions mechanism D&D's
+   module already proves out -- demonstrating that two real games
+   legitimately want different subsets of the same shared primitives,
+   decided here in data, with no core file caring which."
   (into default-enabled-elements
         (concat [:tool/measurement-cells :unit/size]
                 (keys gloomhaven/elements))))

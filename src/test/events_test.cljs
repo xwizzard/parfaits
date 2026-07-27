@@ -1183,6 +1183,359 @@
     (dispatch conn :dice/clear)
     (is (empty? (scene-dice-rolls conn)) "every roll entity is retracted")))
 
+;; --- Attack Modifier Decks (Gloomhaven-family "x-haven") ---
+(defn ^:private scene-attack-decks [conn]
+  (:scene/attack-decks (current-scene conn)))
+
+(defn ^:private scene-attack-draws [conn]
+  (:scene/attack-draws (current-scene conn)))
+
+(defn ^:private force-attack-deck-top!
+  "Test helper: relocates one :draw-pile card of `kind` in `deck` to the
+   highest :card/position (i.e. 'top of the pile') so the next draw is
+   deterministic."
+  [conn deck kind]
+  (let [draw (filter (comp #{:draw} :card/location) (:deck/cards deck))
+        card (first (filter (comp #{kind} :card/rank) draw))
+        max-pos (apply max (map :card/position draw))]
+    (transact! conn [{:db/id (:db/id card) :card/position (inc max-pos)}])
+    (:db/id card)))
+
+(defn ^:private force-attack-deck-top-two!
+  "Test helper: positions two DISTINCT :draw-pile cards (`kind-a` then
+   `kind-b`, kind-a on top) as the top two of `deck`'s draw pile, for
+   deterministic Advantage/Disadvantage tests."
+  [conn deck kind-a kind-b]
+  (let [draw (filter (comp #{:draw} :card/location) (:deck/cards deck))
+        card-a (first (filter (comp #{kind-a} :card/rank) draw))
+        remaining (remove (comp #{(:db/id card-a)} :db/id) draw)
+        card-b (first (filter (comp #{kind-b} :card/rank) remaining))
+        max-pos (apply max (map :card/position draw))]
+    (transact! conn [{:db/id (:db/id card-b) :card/position (inc max-pos)}
+                      {:db/id (:db/id card-a) :card/position (+ max-pos 2)}])))
+
+(deftest test-attack-deck-create-personal-and-monster
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :attack-deck/create player-id)
+      (dispatch conn :attack-deck/create nil)
+      (let [decks (scene-attack-decks conn)
+            personal (first (filter (comp #{player-id} :db/id :deck/owner) decks))
+            monster (first (filter (comp nil? :deck/owner) decks))]
+        (is (= (count decks) 2))
+        (is (= (count (:deck/cards personal)) 20) "a fresh standard 20-card deck")
+        (is (= (:deck/name personal) (:player/name (first (root-players conn)))))
+        (is (= (:deck/name monster) "Monsters"))
+        (is (every? (comp #{:draw} :card/location) (:deck/cards personal))
+            "every card starts in the draw pile")))))
+
+(deftest test-attack-deck-create-no-op-when-owner-already-has-one
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (dispatch conn :attack-deck/create nil)
+    (is (= (count (scene-attack-decks conn)) 1) "only one monster deck ever exists")
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :attack-deck/create player-id)
+      (dispatch conn :attack-deck/create player-id)
+      (is (= (count (scene-attack-decks conn)) 2) "only one personal deck per player"))))
+
+(deftest test-attack-deck-create-noop-without-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :attack-deck/create nil)
+    (is (empty? (scene-attack-decks conn))
+        ":gloomhaven/attack-deck isn't enabled -- the whole dispatch no-ops")))
+
+(deftest test-attack-deck-draw-neutral
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top! conn (entity @conn deck-id) :plus-1)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (let [deck (entity @conn deck-id)
+            draw (first (scene-attack-draws conn))]
+        (is (= (count (scene-attack-draws conn)) 1))
+        (is (= (:draw/kind draw) :plus-1))
+        (is (nil? (:draw/mode draw)))
+        (is (nil? (:draw/discarded-kind draw)))
+        (is (= (count (filter (comp #{:draw} :card/location) (:deck/cards deck))) 19))
+        (is (= (count (filter (comp #{:discard} :card/location) (:deck/cards deck))) 1)
+            "a plain numbered card moves to discard, it isn't removed")))))
+
+(deftest test-attack-deck-draw-bless-removed-not-discarded
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-bless deck-id 1)
+      (force-attack-deck-top! conn (entity @conn deck-id) :bless)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (let [deck (entity @conn deck-id)
+            draw (first (scene-attack-draws conn))]
+        (is (= (:draw/kind draw) :bless))
+        (is (= (count (:deck/cards deck)) 20)
+            "BLESS is removed from the deck entirely when drawn, not discarded --
+             back down to the original 20 (21 after add-bless, minus 1 drawn)")
+        (is (empty? (filter (comp #{:discard} :card/location) (:deck/cards deck)))
+            "nothing landed in discard")))))
+
+(deftest test-attack-deck-draw-flips-needs-reshuffle
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top! conn (entity @conn deck-id) :times-2)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (is (:deck/needs-reshuffle? (entity @conn deck-id))
+          "drawing the 2x card flags the deck for an end-of-round reshuffle"))))
+
+(deftest test-attack-deck-draw-plain-card-leaves-needs-reshuffle-false
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top! conn (entity @conn deck-id) :plus-0)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (is (not (:deck/needs-reshuffle? (entity @conn deck-id)))))))
+
+(deftest test-attack-deck-draw-reactive-reshuffle-when-draw-pile-empty
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))
+          deck (entity @conn deck-id)]
+      (transact! conn (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position i})
+                                    (:deck/cards deck)))
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (let [after (entity @conn deck-id)]
+        (is (= (count (scene-attack-draws conn)) 1)
+            "the empty draw pile reshuffled from discard reactively, mid-draw")
+        (is (= (count (filter (comp #{:draw} :card/location) (:deck/cards after))) 19))
+        (is (= (count (filter (comp #{:discard} :card/location) (:deck/cards after))) 1))))))
+
+(deftest test-attack-deck-draw-empty-deck-noop
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (doseq [kind [:minus-2 :minus-1 :plus-0 :plus-1 :plus-2 :null :times-2]]
+        (dispatch conn :attack-deck/remove-cards deck-id kind 10))
+      (is (empty? (:deck/cards (entity @conn deck-id))) "deck fully emptied")
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (is (empty? (scene-attack-draws conn)) "nothing to draw, nothing recorded"))))
+
+(deftest test-attack-deck-advantage-keeps-better
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top-two! conn (entity @conn deck-id) :minus-1 :plus-2)
+      (dispatch conn :attack-deck/draw deck-id :advantage)
+      (let [draw (first (scene-attack-draws conn))
+            deck (entity @conn deck-id)]
+        (is (= (:draw/mode draw) :advantage))
+        (is (= (:draw/kind draw) :plus-2) "the numerically better of the two drawn cards")
+        (is (= (:draw/discarded-kind draw) :minus-1))
+        (is (= (count (filter (comp #{:discard} :card/location) (:deck/cards deck))) 2)
+            "both drawn cards move to discard -- the 'losing' one isn't retracted")))))
+
+(deftest test-attack-deck-disadvantage-keeps-worse
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top-two! conn (entity @conn deck-id) :plus-2 :minus-1)
+      (dispatch conn :attack-deck/draw deck-id :disadvantage)
+      (let [draw (first (scene-attack-draws conn))]
+        (is (= (:draw/mode draw) :disadvantage))
+        (is (= (:draw/kind draw) :minus-1) "the numerically worse of the two drawn cards")
+        (is (= (:draw/discarded-kind draw) :plus-2))))))
+
+(deftest test-attack-deck-advantage-flags-reshuffle-on-either-card
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top-two! conn (entity @conn deck-id) :null :plus-1)
+      (dispatch conn :attack-deck/draw deck-id :advantage)
+      (let [draw (first (scene-attack-draws conn))]
+        (is (= (:draw/kind draw) :plus-1) "Null always loses the comparison, plus-1 is kept")
+        (is (:deck/needs-reshuffle? (entity @conn deck-id))
+            "the discarded card was Null -- still flags the deck, not just the applied one")))))
+
+(deftest test-attack-deck-add-cards
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-cards deck-id :plus-1 2)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (:deck/cards deck)) 22))
+        (is (= (count (filter (comp #{:plus-1} :card/rank) (:deck/cards deck))) 7)
+            "5 standard + 2 added")
+        (is (every? (comp #{:draw} :card/location) (:deck/cards deck))
+            "new cards join the draw pile")))))
+
+(deftest test-attack-deck-remove-cards
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/remove-cards deck-id :minus-1 2)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (:deck/cards deck)) 18))
+        (is (= (count (filter (comp #{:minus-1} :card/rank) (:deck/cards deck))) 3)
+            "5 standard minus 2 removed"))
+      (dispatch conn :attack-deck/remove-cards deck-id :minus-2 10)
+      (is (= (count (filter (comp #{:minus-2} :card/rank) (:deck/cards (entity @conn deck-id)))) 0)
+          "removing more than exist just removes as many as are actually there"))))
+
+(deftest test-attack-deck-replace-card
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/replace-card deck-id :minus-2 :minus-1)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (:deck/cards deck)) 20) "one swapped for one, total unchanged")
+        (is (= (count (filter (comp #{:minus-2} :card/rank) (:deck/cards deck))) 0))
+        (is (= (count (filter (comp #{:minus-1} :card/rank) (:deck/cards deck))) 6)))
+      (dispatch conn :attack-deck/replace-card deck-id :minus-2 :plus-1)
+      (is (= (count (:deck/cards (entity @conn deck-id))) 20)
+          "no -2 cards left to replace -- a no-op, not an error"))))
+
+(deftest test-attack-deck-add-bless-and-curse
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-bless deck-id 1)
+      (dispatch conn :attack-deck/add-curse deck-id 2)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (:deck/cards deck)) 23))
+        (is (= (count (filter (comp #{:bless} :card/rank) (:deck/cards deck))) 1))
+        (is (= (count (filter (comp #{:curse} :card/rank) (:deck/cards deck))) 2))))))
+
+(deftest test-attack-deck-reshuffle
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (force-attack-deck-top! conn (entity @conn deck-id) :null)
+      (dispatch conn :attack-deck/draw deck-id nil)
+      (is (:deck/needs-reshuffle? (entity @conn deck-id)))
+      (dispatch conn :attack-deck/reshuffle deck-id)
+      (let [deck (entity @conn deck-id)]
+        (is (not (:deck/needs-reshuffle? deck)))
+        (is (= (count (filter (comp #{:draw} :card/location) (:deck/cards deck))) 20)
+            "everything is back in the draw pile")))))
+
+(deftest test-attack-deck-reshuffle-flagged-only-sweeps-flagged-decks
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :attack-deck/create player-id)
+      (let [decks (scene-attack-decks conn)
+            monster-id (:db/id (first (filter (comp nil? :deck/owner) decks)))
+            player-deck-id (:db/id (first (filter (comp some? :deck/owner) decks)))]
+        (force-attack-deck-top! conn (entity @conn monster-id) :times-2)
+        (dispatch conn :attack-deck/draw monster-id nil)
+        (dispatch conn :attack-deck/reshuffle-flagged)
+        (is (not (:deck/needs-reshuffle? (entity @conn monster-id))))
+        (is (empty? (filter (comp #{:discard} :card/location) (:deck/cards (entity @conn player-deck-id))))
+            "the untouched player deck was never drawn from -- nothing to reshuffle")))))
+
+(deftest test-attack-deck-reshuffle-flagged-host-only
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn my-uuid)
+      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      ;; a self-controlled PERSONAL deck, unlike the monster deck, is
+      ;; something this non-host guest may create/draw from -- the point
+      ;; of this test is that :attack-deck/reshuffle-flagged is host-only
+      ;; regardless, even over a deck the guest otherwise has full
+      ;; authority over.
+      (dispatch conn :attack-deck/create player-id)
+      (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+        (force-attack-deck-top! conn (entity @conn deck-id) :null)
+        (dispatch conn :attack-deck/draw deck-id nil)
+        (dispatch conn :attack-deck/reshuffle-flagged)
+        (is (:deck/needs-reshuffle? (entity @conn deck-id))
+            "a non-host guest may not sweep the scene's decks, even one they
+             themselves fully control")))))
+
+(deftest test-attack-deck-reset
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))]
+      (dispatch conn :attack-deck/add-cards deck-id :plus-1 3)
+      (is (= (count (:deck/cards (entity @conn deck-id))) 23))
+      (dispatch conn :attack-deck/reset deck-id)
+      (let [deck (entity @conn deck-id)]
+        (is (= (count (:deck/cards deck)) 20) "back to a fresh 20-card standard composition")
+        (is (every? (comp #{:draw} :card/location) (:deck/cards deck)))
+        (is (not (:deck/needs-reshuffle? deck)))))))
+
+(deftest test-attack-deck-remove
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :attack-deck/create nil)
+    (let [deck-id (:db/id (first (scene-attack-decks conn)))
+          card-id (:db/id (first (:deck/cards (entity @conn deck-id))))]
+      (dispatch conn :attack-deck/remove deck-id)
+      (is (nil? (:db/id (entity @conn deck-id))))
+      (is (nil? (:card/location (entity @conn card-id))) "its cards were retracted too")
+      (is (empty? (scene-attack-decks conn))))))
+
+(deftest test-attack-deck-draw-owner-rejected-without-authority
+  (let [conn (ds/conn-from-db (initial-data true))
+        guest-uuid (random-uuid)]
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn guest-uuid)
+      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (dispatch conn :attack-deck/create player-id)
+      (is (empty? (scene-attack-decks conn))
+          "the host has no authority over a connected, assigned controller's seat --
+           the whole dispatch no-ops, mirroring :dice/roll's own unauthorized-owner
+           rejection"))))
+
+(deftest test-attack-deck-monster-deck-host-only
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (add-conn! conn my-uuid)
+    (dispatch conn :attack-deck/create nil)
+    (is (empty? (scene-attack-decks conn))
+        "a non-host connected guest may not create/act on the shared monster deck")))
+
+(deftest test-attack-deck-personal-deck-self-controlled-accepted
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn my-uuid)
+      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (dispatch conn :attack-deck/create player-id)
+      (is (= (count (scene-attack-decks conn)) 1)
+          "a connected player may create/act on the deck for the seat they
+           themselves control, even though they aren't the host"))))
+
 ;; --- Prop variables, copies, and physical piles ---
 (defn ^:private scene-props [conn]
   (:scene/props (:camera/scene (:user/camera (user conn)))))
