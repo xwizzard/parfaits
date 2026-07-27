@@ -104,6 +104,16 @@
     (let [{{hash :hash bounds :bounds} :data} message]
       (publish :image/change-thumbnail hash bounds))
 
+    ;; A non-host connection can't safely mint the ~50 entities a new
+    ;; mini-game session (deck + cards + seats) requires -- there's no
+    ;; cross-peer entity-id partitioning scheme, so two peers creating
+    ;; entities at once can collide. Relayed to the host exactly like
+    ;; :image/change-thumbnail-request above: republished locally here
+    ;; so the HOST is the one to actually dispatch and mint entities.
+    :minigame/create-request
+    (let [{{kind :kind participant-ids :participant-ids} :data} message]
+      (publish :minigame/create kind participant-ids))
+
     :cursor/moved
     (let [{src :src {[x y] :coord} :data} message]
       (publish :cursor/moved src x y))))
@@ -268,6 +278,38 @@
                {:name :image/change-thumbnail-request
                 :hash hash
                 :bounds bounds}})))) [conn on-send-text]))
+
+    ;; A non-host connection's request to create a new mini-game session
+    ;; -- forwarded to the host, who alone actually dispatches (see the
+    ;; :minigame/create-request case in on-receive-text's :event method,
+    ;; and the :minigame/create subscription below).
+    (hooks/use-subscribe :minigame/create-request
+      (uix/use-callback
+       (fn [kind participant-ids]
+         (let [session (ds/entity @conn [:db/ident :session])]
+           (if-let [host (-> session :session/host :user/uuid)]
+             (on-send-text
+              {:type :event
+               :dst host
+               :data
+               {:name :minigame/create-request
+                :kind kind
+                :participant-ids participant-ids}})))) [conn on-send-text]))
+
+    ;; The host's own handling of a relayed session-creation request --
+    ;; dispatches the game-specific start event that actually mints the
+    ;; session's entities. One case per ported game.
+    (hooks/use-subscribe :minigame/create
+      (uix/use-callback
+       (fn [kind participant-ids]
+         (case kind
+           :old-maid (dispatch :old-maid/start participant-ids)
+           :memory (dispatch :memory/start participant-ids)
+           :go-fish (dispatch :go-fish/start participant-ids)
+           :crazy-eights (dispatch :crazy-eights/start participant-ids)
+           :rummy (dispatch :rummy/start participant-ids)
+           :war (dispatch :war/start participant-ids)
+           nil)) [dispatch]))
 
     ;; Subscribe to DataScript transactions and broadcast the transaction data
     ;; to the other connections in the session.

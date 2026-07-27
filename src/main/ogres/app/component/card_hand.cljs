@@ -20,13 +20,26 @@
             [ogres.app.player :as player]
             [uix.core :refer [defui $]]))
 
+(defn hand-authorized-with?
+  "Whether the local viewer (`uuid`) may see the real hand of a seat
+   whose effective controller is `controller-uuid` -- `default-
+   authority` is the caller's own choice of fallback for an
+   unassigned/disconnected controller (see player/authority?). The
+   uuid-taking sibling of hand-authorized? below, for a caller (e.g.
+   a mini-game session's own per-seat :seat/controller override, see
+   events.cljs's minigame-controller-uuid) that resolves controller
+   authority from somewhere other than the roster player's own
+   :player/controller directly."
+  [uuid default-authority connected controller-uuid]
+  (player/authority? uuid default-authority connected controller-uuid))
+
 (defn hand-authorized?
   "Whether `entity` (a roster player, pulled with {:player/controller
    [:user/uuid]}) is one the local viewer may see the real hand of --
    `default-authority` is the caller's own choice of fallback for an
    unassigned/disconnected-controller seat (see player/authority?)."
   [uuid default-authority connected entity]
-  (player/authority? uuid default-authority connected (get-in entity [:player/controller :user/uuid])))
+  (hand-authorized-with? uuid default-authority connected (get-in entity [:player/controller :user/uuid])))
 
 (defui ^:private hand-card [{:keys [card on-click playable?]}]
   ($ :.card-hand-card

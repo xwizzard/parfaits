@@ -22,6 +22,9 @@
    :image/thumbnail      {:db/valueType :db.type/ref :db/isComponent true}
    :initiative/played    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :initiative/turn      {:db/valueType :db.type/ref}
+   :minigame/deck        {:db/valueType :db.type/ref :db/isComponent true}
+   :minigame/props       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :minigame/seats       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :object/owner         {:db/valueType :db.type/ref}
    :player/controller    {:db/valueType :db.type/ref}
    :prop/image           {:db/valueType :db.type/ref}
@@ -40,6 +43,7 @@
    :scene/game-type      {:db/valueType :db.type/ref}
    :scene/go-fish-deck   {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   :scene/minigames      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/old-maid-deck  {:db/valueType :db.type/ref}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
@@ -48,6 +52,8 @@
    :scene/props          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/rummy-deck     {:db/valueType :db.type/ref}
    :scene/war-deck       {:db/valueType :db.type/ref}
+   :seat/controller      {:db/valueType :db.type/ref}
+   :seat/player          {:db/valueType :db.type/ref}
    :session/conns        {:db/valueType :db.type/ref :db.cardinality :db.cardinality/many :db/isComponent true}
    :session/host         {:db/valueType :db.type/ref}
    :token/image          {:db/valueType :db.type/ref}
@@ -57,6 +63,7 @@
    :user/dragging        {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :user/game-type-editing {:db/valueType :db.type/ref}
    :user/image           {:db/valueType :db.type/ref}
+   :user/minigame-viewing {:db/valueType :db.type/ref}
    :user/uuid            {:db/unique :db.unique/identity}})
 
 (def ^:private seed-game-types

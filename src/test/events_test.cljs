@@ -1,5 +1,6 @@
 (ns events-test
-  (:require [cljs.test :refer-macros [deftest is testing]]
+  (:require [clojure.set :as set]
+            [cljs.test :refer-macros [deftest is testing]]
             [datascript.core :as ds :refer [transact! entity]]
             [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size half-size hex-radius]]
@@ -17,6 +18,57 @@
 
 (defn user [conn]
   (entity @conn [:db/ident :user]))
+
+(defn ^:private current-scene [conn]
+  (:camera/scene (:user/camera (user conn))))
+
+(defn ^:private set-enabled-elements!
+  "Test helper: replaces the active scene's game-type's own
+   :game-type/enabled-elements wholesale (a schema-free, single-value
+   attribute -- map-form transact! replaces it, doesn't merge) so a
+   test can exercise a specific combination of rule toggles, or (as
+   every ported mini-game's own /start now requires) simply enable
+   its own :X/game element, without switching to a seeded template at
+   all."
+  [conn elements]
+  (let [game-type-id (:db/id (:scene/game-type (current-scene conn)))]
+    (transact! conn [{:db/id game-type-id :game-type/enabled-elements (set elements)}])))
+
+;; --- Mini-game sessions ---
+(defn ^:private clear-cards-to-draw!
+  "Test helper: relocates EVERY card in `deck` back to the draw pile,
+   holder cleared -- run right after a mini-game session's own /start
+   so tests can deal out an exact, deterministic hand instead of
+   risking contamination from whatever the random initial deal
+   produced. `deck` is a mini-game session's own :minigame/deck --
+   deliberately NOT part of the scene's :scene/decks (see minigame-
+   create-tx), unlike the generic Decks-panel tests' own current-deck."
+  [conn deck]
+  (let [cards (:deck/cards deck)]
+    (transact! conn (mapcat (fn [c i] [{:db/id (:db/id c) :card/location :draw :card/position i}
+                                        [:db/retract (:db/id c) :card/holder]])
+                             cards (range)))))
+
+(defn ^:private force-deck-top-of-draw!
+  "Test helper: relocates one :draw-pile card of `rank` in `deck` to the
+   highest :card/position (i.e. 'top of the pile') so the next draw is
+   deterministic -- returns that card's :db/id. The session-scoped
+   equivalent of force-top-of-draw! below."
+  [conn deck rank]
+  (let [draw (filter (comp #{:draw} :card/location) (:deck/cards deck))
+        card (first (filter (comp #{rank} :card/rank) draw))
+        max-pos (apply max (map :card/position draw))]
+    (transact! conn [{:db/id (:db/id card) :card/position (inc max-pos)}])
+    (:db/id card)))
+
+(defn ^:private minigame-viewing-id
+  "The :db/id of whichever session the dispatching connection just
+   started -- every ported game's own /start sets the creator's own
+   :user/minigame-viewing to the new session (see events.cljs's
+   minigame-attach-tx), so this is a reliable way to grab THAT
+   session's id even when more than one exists on the scene."
+  [conn]
+  (:db/id (:user/minigame-viewing (user conn))))
 
 (deftest test-panel
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -1175,240 +1227,345 @@
            because :object/shared? is true"))))
 
 ;; --- Memory (example game) ---
+;; The second game ported onto the generic mini-game session
+;; scaffolding (see events.cljs's 'Mini-game sessions' section) -- a
+;; session-scoped prototype for letting several independent, arbitrary-
+;; subset-of-the-roster tables run nested inside one scene at once.
 (defn ^:private scene-memory [conn]
   (:camera/scene (:user/camera (user conn))))
 
-(defn ^:private memory-cards [conn]
-  (filter (comp :memory/value :object/variables) (scene-props conn)))
+(defn ^:private memory-sessions [conn]
+  (filter (comp #{:memory} :minigame/kind) (:scene/minigames (scene-memory conn))))
+
+(defn ^:private memory-session [conn]
+  (first (memory-sessions conn)))
+
+(defn ^:private memory-cards [minigame]
+  (:minigame/props minigame))
+
+(defn ^:private memory-players
+  [minigame]
+  (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats minigame))))
 
 (deftest test-memory-start
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [scene (scene-memory conn)
-          cards (memory-cards conn)
-          active-ids (into #{} (map :db/id) (root-players conn))]
-      (is (= (count (:scene/memory-players scene)) 3))
-      (is (= (set (:scene/memory-players scene)) active-ids)
-          "the turn cycle is exactly the currently-active roster players")
-      (is (= (:scene/memory-turn-index scene) 0))
-      (is (= (:scene/memory-scores scene) {}))
-      (is (= (count cards) 44))
-      (is (every? :object/hidden cards) "every card deals face-down")
-      (is (every? :object/shared? cards) "every card is a public toggle")
-      (is (= (frequencies (map (comp :memory/value :object/variables) cards))
-             (into {} (map (fn [v] [v 2])) (range 22)))
-          "22 values, exactly 2 copies each"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame (memory-session conn)
+            cards (memory-cards minigame)
+            players (memory-players minigame)]
+        (is (= (count players) 3))
+        (is (= (set players) (set ids))
+            "the turn cycle is exactly the participants given to
+             :memory/start")
+        (is (= (:minigame/turn-index minigame) 0))
+        (is (= (:minigame/label minigame) "Memory 1"))
+        (is (nil? (:minigame/scores minigame)))
+        (is (empty? (:scene/decks (scene-memory conn)))
+            "Memory has no deck at all -- nothing lands in :scene/decks")
+        (is (= (count cards) 44))
+        (is (every? :object/hidden cards) "every card deals face-down")
+        (is (every? :object/shared? cards) "every card is a public toggle")
+        (is (= (frequencies (map (comp :memory/value :object/variables) cards))
+               (into {} (map (fn [v] [v 2])) (range 22)))
+            "22 values, exactly 2 copies each")))))
+
+(deftest test-memory-start-rejected-without-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (is (empty? (memory-sessions conn))
+          "rejected -- :memory/start checks :memory/game is actually
+           enabled on the scene's own game-type"))))
 
 (deftest test-memory-flip-turn-enforcement
   (let [conn (ds/conn-from-db (initial-data false))
         guest-uuid (random-uuid)]
     (transact! conn [{:db/id [:db/ident :user] :user/uuid guest-uuid}])
     (add-conn! conn guest-uuid)
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [turn-players (:scene/memory-players (scene-memory conn))
-          second-player-id (second turn-players)]
-      (dispatch conn :player/set-controller second-player-id [:user/uuid guest-uuid])
-      (let [card-id (:db/id (first (memory-cards conn)))]
-        (dispatch conn :memory/flip card-id)
-        (is (:object/hidden (entity @conn card-id))
-            "index 0's turn (unassigned -> host-only) -- this guest,
-             mapped only to index 1, may not flip yet")
-        ;; fast-forward to the 2nd player's turn for testing purposes
-        (transact! conn [{:db/id (:db/id (scene-memory conn)) :scene/memory-turn-index 1}])
-        (dispatch conn :memory/flip card-id)
-        (is (not (:object/hidden (entity @conn card-id)))
-            "index 1's turn -- this guest, as that player's controller,
-             may flip")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            second-player-id (second (memory-players (entity @conn minigame-id)))]
+        (dispatch conn :player/set-controller second-player-id [:user/uuid guest-uuid])
+        (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
+          (dispatch conn :memory/flip card-id)
+          (is (:object/hidden (entity @conn card-id))
+              "index 0's turn (unassigned -> host-only) -- this guest,
+               mapped only to index 1, may not flip yet")
+          ;; fast-forward to the 2nd player's turn for testing purposes
+          (transact! conn [{:db/id minigame-id :minigame/turn-index 1}])
+          (dispatch conn :memory/flip card-id)
+          (is (not (:object/hidden (entity @conn card-id)))
+              "index 1's turn -- this guest, as that player's controller,
+               may flip"))))))
 
 (deftest test-memory-flip-refuses-third-card
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [[a b c] (take 3 (memory-cards conn))]
-      (dispatch conn :memory/flip (:db/id a))
-      (dispatch conn :memory/flip (:db/id b))
-      (dispatch conn :memory/flip (:db/id c))
-      (is (:object/hidden (entity @conn (:db/id c)))
-          "a 3rd flip is refused while 2 cards are already face-up and
-           awaiting :memory/resolve"))))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [[a b c] (take 3 (memory-cards (memory-session conn)))]
+        (dispatch conn :memory/flip (:db/id a))
+        (dispatch conn :memory/flip (:db/id b))
+        (dispatch conn :memory/flip (:db/id c))
+        (is (:object/hidden (entity @conn (:db/id c)))
+            "a 3rd flip is refused while 2 cards are already face-up and
+             awaiting :memory/resolve")))))
 
 (deftest test-memory-flip-clears-user-dragging
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [card-id (:db/id (first (memory-cards conn)))]
-      ;; a real onDragStart always precedes the click that triggers a
-      ;; flip (use-drag-listener's onDragEnd zero-delta "click" case is
-      ;; still a full drag-kit gesture) -- so :user/dragging is always
-      ;; populated by the time :memory/flip runs.
-      (dispatch conn :drag/start card-id)
-      (is (seq (:user/dragging (user conn))) "sanity check")
-      (dispatch conn :memory/flip card-id)
-      (is (empty? (:user/dragging (user conn)))
-          "a click-triggered flip must clear :user/dragging just like
-           :objects/select does -- otherwise this peer's own stale
-           entry (invisible to them locally, since :db/ident :user is
-           peer-relative) permanently locks this card out of every
-           OTHER peer's draggable registration, since
-           scene_objects.cljs's dragging lock check reads every
-           connection's :user/dragging except the viewer's own"))))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [card-id (:db/id (first (memory-cards (memory-session conn))))]
+        ;; a real onDragStart always precedes the click that triggers a
+        ;; flip (use-drag-listener's onDragEnd zero-delta "click" case is
+        ;; still a full drag-kit gesture) -- so :user/dragging is always
+        ;; populated by the time :memory/flip runs.
+        (dispatch conn :drag/start card-id)
+        (is (seq (:user/dragging (user conn))) "sanity check")
+        (dispatch conn :memory/flip card-id)
+        (is (empty? (:user/dragging (user conn)))
+            "a click-triggered flip must clear :user/dragging just like
+             :objects/select does -- otherwise this peer's own stale
+             entry (invisible to them locally, since :db/ident :user is
+             peer-relative) permanently locks this card out of every
+             OTHER peer's draggable registration, since
+             scene_objects.cljs's dragging lock check reads every
+             connection's :user/dragging except the viewer's own")))))
 
 (deftest test-memory-resolve-match
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
-          [a b] (first (vals by-value))
-          turn-id (first (:scene/memory-players (scene-memory conn)))]
-      (dispatch conn :memory/flip (:db/id a))
-      (dispatch conn :memory/flip (:db/id b))
-      (dispatch conn :memory/resolve)
-      (is (nil? (:db/id (entity @conn (:db/id a)))) "matched cards are retracted")
-      (is (nil? (:db/id (entity @conn (:db/id b)))))
-      (is (= (:scene/memory-scores (scene-memory conn)) {turn-id 1})
-          "the current-turn player's tally increments")
-      (is (= (:scene/memory-turn-index (scene-memory conn)) 0)
-          "matching players go again -- turn index unchanged"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
+            [a b] (first (vals by-value))
+            turn-id (first (memory-players (entity @conn minigame-id)))]
+        (dispatch conn :memory/flip (:db/id a))
+        (dispatch conn :memory/flip (:db/id b))
+        (dispatch conn :memory/resolve minigame-id)
+        (is (nil? (:db/id (entity @conn (:db/id a)))) "matched cards are retracted")
+        (is (nil? (:db/id (entity @conn (:db/id b)))))
+        (is (= (:minigame/scores (entity @conn minigame-id)) {turn-id 1})
+            "the current-turn player's tally increments")
+        (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+            "matching players go again -- turn index unchanged")))))
 
 (deftest test-memory-resolve-mismatch
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
-          [va vb] (take 2 (keys by-value))
-          a (first (by-value va))
-          b (first (by-value vb))]
-      (dispatch conn :memory/flip (:db/id a))
-      (dispatch conn :memory/flip (:db/id b))
-      (dispatch conn :memory/resolve)
-      (is (:object/hidden (entity @conn (:db/id a)))
-          "mismatched cards are re-hidden, not removed")
-      (is (:object/hidden (entity @conn (:db/id b))))
-      (is (= (:scene/memory-scores (scene-memory conn)) {})
-          "no score change on a mismatch")
-      (is (= (:scene/memory-turn-index (scene-memory conn)) 1)
-          "turn advances to the next player"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
+            [va vb] (take 2 (keys by-value))
+            a (first (by-value va))
+            b (first (by-value vb))]
+        (dispatch conn :memory/flip (:db/id a))
+        (dispatch conn :memory/flip (:db/id b))
+        (dispatch conn :memory/resolve minigame-id)
+        (is (:object/hidden (entity @conn (:db/id a)))
+            "mismatched cards are re-hidden, not removed")
+        (is (:object/hidden (entity @conn (:db/id b))))
+        (is (nil? (:minigame/scores (entity @conn minigame-id)))
+            "no score change on a mismatch")
+        (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
+            "turn advances to the next player")))))
 
 (deftest test-memory-resolve-noop-unless-two-face-up
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (dispatch conn :memory/resolve)
-    (is (= (count (memory-cards conn)) 44)
-        "no-op when nothing is face-up yet")))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (dispatch conn :memory/resolve minigame-id)
+        (is (= (count (memory-cards (entity @conn minigame-id))) 44)
+            "no-op when nothing is face-up yet")))))
 
-(deftest test-memory-end
+(deftest test-memory-two-simultaneous-sessions-dont-interfere
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (dispatch conn :memory/end)
-    (let [scene (scene-memory conn)]
-      (is (empty? (memory-cards conn)) "every remaining card is retracted")
-      (is (nil? (:scene/memory-players scene)))
-      (is (nil? (:scene/memory-turn-index scene)))
-      (is (nil? (:scene/memory-scores scene))))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 p3 p4] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start [p1 p2])
+      (let [session-a-id (minigame-viewing-id conn)]
+        (dispatch conn :memory/start [p3 p4])
+        (let [session-b-id (minigame-viewing-id conn)
+              cards-a (set (map :db/id (memory-cards (entity @conn session-a-id))))
+              cards-b (set (map :db/id (memory-cards (entity @conn session-b-id))))]
+          (is (not= session-a-id session-b-id))
+          (is (= (count (memory-sessions conn)) 2))
+          (is (empty? (set/intersection cards-a cards-b))
+              "each session owns its own independent set of cards")
+          (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn session-a-id)))
+                [a b] (first (vals by-value))]
+            (dispatch conn :memory/flip (:db/id a))
+            (dispatch conn :memory/flip (:db/id b))
+            (dispatch conn :memory/resolve session-a-id)
+            (is (= (:minigame/turn-index (entity @conn session-a-id)) 0))
+            (is (= (:minigame/turn-index (entity @conn session-b-id)) 0)
+                "session B's turn index is completely unaffected by
+                 session A's own resolve")))))))
+
+(deftest test-memory-remove
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            card-ids (map :db/id (memory-cards (entity @conn minigame-id)))
+            seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) card-ids))
+            "every card is retracted too -- :minigame/props is a borrowed,
+             NON-component ref, so :minigame/remove retracts them
+             explicitly rather than relying on cascade")
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
+        (is (empty? (memory-sessions conn)))))))
 
 ;; --- Memory: mid-game roster reactivity ---
-;; :scene/memory-players stays a frozen seating order from :memory/start,
-;; but "whose turn is it" is resolved live against current :player/active
-;; state (ogres.app.memory/valid-turn-index) -- these confirm a bench/
-;; remove mid-game takes effect immediately, without a page reload or a
-;; separate correction event.
+;; A session's seats stay a frozen seating order from :memory/start, but
+;; "whose turn is it" is resolved live against current :player/active
+;; state (ogres.app.turn-order/valid-turn-index) -- these confirm a
+;; bench/remove mid-game takes effect immediately, without a page reload
+;; or a separate correction event.
 (deftest test-memory-flip-skips-benched-turn-player
   (let [conn (ds/conn-from-db (initial-data false))
         guest-uuid (random-uuid)]
     (transact! conn [{:db/id [:db/ident :user] :user/uuid guest-uuid}])
     (add-conn! conn guest-uuid)
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [[first-id second-id] (:scene/memory-players (scene-memory conn))]
-      (dispatch conn :player/set-controller second-id [:user/uuid guest-uuid])
-      (dispatch conn :player/set-active first-id false)
-      (let [card-id (:db/id (first (memory-cards conn)))]
-        (dispatch conn :memory/flip card-id)
-        (is (not (:object/hidden (entity @conn card-id)))
-            "the stored index still points at index 0, but that player
-             is now benched -- the turn cycle skips forward to index 1's
-             controller (this guest) live, with no separate event")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [first-id second-id] (memory-players (entity @conn minigame-id))]
+        (dispatch conn :player/set-controller second-id [:user/uuid guest-uuid])
+        (dispatch conn :player/set-active first-id false)
+        (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
+          (dispatch conn :memory/flip card-id)
+          (is (not (:object/hidden (entity @conn card-id)))
+              "the stored index still points at index 0, but that player
+               is now benched -- the turn cycle skips forward to index 1's
+               controller (this guest) live, with no separate event"))))))
 
 (deftest test-memory-resolve-mismatch-skips-benched-player
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [second-id (second (:scene/memory-players (scene-memory conn)))]
-      (dispatch conn :player/set-active second-id false)
-      (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
-            [va vb] (take 2 (keys by-value))
-            a (first (by-value va))
-            b (first (by-value vb))]
-        (dispatch conn :memory/flip (:db/id a))
-        (dispatch conn :memory/flip (:db/id b))
-        (dispatch conn :memory/resolve)
-        (is (= (:scene/memory-turn-index (scene-memory conn)) 2)
-            "index 1's player is benched -- the stored index skips
-             straight to index 2 instead of landing on a benched seat")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            second-id (second (memory-players (entity @conn minigame-id)))]
+        (dispatch conn :player/set-active second-id false)
+        (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
+              [va vb] (take 2 (keys by-value))
+              a (first (by-value va))
+              b (first (by-value vb))]
+          (dispatch conn :memory/flip (:db/id a))
+          (dispatch conn :memory/flip (:db/id b))
+          (dispatch conn :memory/resolve minigame-id)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "index 1's player is benched -- the stored index skips
+               straight to index 2 instead of landing on a benched seat"))))))
 
 (deftest test-memory-resolve-mismatch-skips-removed-player
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [second-id (second (:scene/memory-players (scene-memory conn)))]
-      (dispatch conn :player/remove second-id)
-      (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards conn))
-            [va vb] (take 2 (keys by-value))
-            a (first (by-value va))
-            b (first (by-value vb))]
-        (dispatch conn :memory/flip (:db/id a))
-        (dispatch conn :memory/flip (:db/id b))
-        (dispatch conn :memory/resolve)
-        (is (= (:scene/memory-turn-index (scene-memory conn)) 2)
-            "index 1's player was removed entirely -- treated the same
-             as benched, the stored index skips to index 2")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            second-id (second (memory-players (entity @conn minigame-id)))]
+        (dispatch conn :player/remove second-id)
+        (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
+              [va vb] (take 2 (keys by-value))
+              a (first (by-value va))
+              b (first (by-value vb))]
+          (dispatch conn :memory/flip (:db/id a))
+          (dispatch conn :memory/flip (:db/id b))
+          (dispatch conn :memory/resolve minigame-id)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "index 1's player was removed entirely -- treated the same
+               as benched, the stored index skips to index 2"))))))
 
 (deftest test-memory-turn-player-nil-when-all-benched
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (let [only-id (first (:scene/memory-players (scene-memory conn)))]
-      (dispatch conn :player/set-active only-id false)
-      (let [card-id (:db/id (first (memory-cards conn)))]
-        (dispatch conn :memory/flip card-id)
-        (is (not (:object/hidden (entity @conn card-id)))
-            "every seated player benched at once -- memory-turn-player
-             degrades to nil rather than throwing, and
-             authorized-for-turn?'s existing turn-continuity fallback
-             (the same one already used for an unassigned turn player)
-             still lets the host act rather than soft-locking the
-             game")))))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        ;; both seated players benched at once -- not just one, since
+        ;; :memory/start now requires >= 2 participants.
+        (doseq [id (memory-players (entity @conn minigame-id))]
+          (dispatch conn :player/set-active id false))
+        (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
+          (dispatch conn :memory/flip card-id)
+          (is (not (:object/hidden (entity @conn card-id)))
+              "every seated player benched at once -- memory-turn-player
+               degrades to nil rather than throwing, and
+               memory-authorized-for-turn?'s existing turn-continuity
+               fallback (the same one already used for an unassigned
+               turn player) still lets the host act rather than
+               soft-locking the game"))))))
 
 ;; --- Go Fish (example game) ---
+;; The third game ported onto the generic mini-game session scaffolding
+;; (see events.cljs's 'Mini-game sessions' section) -- a session-scoped
+;; prototype for letting several independent, arbitrary-subset-of-the-
+;; roster tables run nested inside one scene at once.
 (defn ^:private scene-go-fish [conn]
   (:camera/scene (:user/camera (user conn))))
 
-(defn ^:private go-fish-hand [conn holder-id]
-  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+(defn ^:private go-fish-sessions [conn]
+  (filter (comp #{:go-fish} :minigame/kind) (:scene/minigames (scene-go-fish conn))))
 
-(defn ^:private set-enabled-elements!
-  "Test helper: replaces the active scene's game-type's own
-   :game-type/enabled-elements wholesale (a schema-free, single-value
-   attribute -- map-form transact! replaces it, doesn't merge) so a
-   test can exercise a specific combination of Go Fish's four rule
-   toggles without switching to the seeded 'Go Fish' template at all."
-  [conn elements]
-  (let [game-type-id (:db/id (:scene/game-type (scene-go-fish conn)))]
-    (transact! conn [{:db/id game-type-id :game-type/enabled-elements (set elements)}])))
+(defn ^:private go-fish-session [conn]
+  (first (go-fish-sessions conn)))
+
+(defn ^:private go-fish-deck [minigame]
+  (:minigame/deck minigame))
+
+(defn ^:private go-fish-hand [minigame holder-id]
+  (cards/cards-of-holder (:deck/cards (go-fish-deck minigame)) holder-id))
+
+(defn ^:private go-fish-players [minigame]
+  (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats minigame))))
 
 (defn ^:private move-cards!
   "Test helper: directly relocates `cards` into `holder-id`'s hand,
@@ -1417,1011 +1574,1496 @@
   [conn holder-id cards]
   (transact! conn (for [c cards] {:db/id (:db/id c) :card/location :hand :card/holder holder-id})))
 
-(defn ^:private clear-all-cards-to-draw!
-  "Test helper: relocates EVERY card in the current Go Fish deck back to
-   the draw pile, holder cleared -- run right after :go-fish/start so
-   ask/score tests can deal out an exact, deterministic hand instead of
-   risking contamination from whatever the random initial deal put in
-   some OTHER player's hand (e.g. a 'guaranteed miss' scenario silently
-   becoming a hit because the shuffle happened to leave a matching rank
-   in the target's hand already)."
-  [conn]
-  (let [cards (:deck/cards (current-deck conn))]
-    (transact! conn (mapcat (fn [c i] [{:db/id (:db/id c) :card/location :draw :card/position i}
-                                        [:db/retract (:db/id c) :card/holder]])
-                             cards (range)))))
-
-(defn ^:private force-top-of-draw!
-  "Test helper: relocates one :draw-pile card of `rank` to the highest
-   :card/position (i.e. 'top of the pile') so the next go-fish draw is
-   deterministic -- returns that card's :db/id."
-  [conn rank]
-  (let [deck (current-deck conn)
-        draw (by-location deck :draw)
-        card (first (filter (comp #{rank} :card/rank) draw))
-        max-pos (apply max (map :card/position draw))]
-    (transact! conn [{:db/id (:db/id card) :card/position (inc max-pos)}])
-    (:db/id card)))
-
 (deftest test-go-fish-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:go-fish/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame (go-fish-session conn)
+            deck (go-fish-deck minigame)
+            players (go-fish-players minigame)]
+        (is (= (count players) 2))
+        (is (= (set players) (set ids))
+            "the turn cycle is exactly the participants given to
+             :go-fish/start")
+        (is (= (:minigame/turn-index minigame) 0))
+        (is (nil? (:minigame/scores minigame)))
+        (is (:minigame/neutral-authority? minigame))
+        (is (empty? (:scene/decks (scene-go-fish conn)))
+            "the session's deck is NOT also added to :scene/decks")
+        (is (= (:deck/name deck) "Go Fish (9 Ranks)"))
+        (is (= (count (:deck/cards deck)) 36) "9 ranks x 4 copies")
+        (is (= (count (by-location deck :hand)) 12) "6 cards dealt to each of 2 players")
+        (is (= (count (by-location deck :draw)) 24))
+        (doseq [id players]
+          (is (= (count (go-fish-hand minigame id)) 6)))))))
+
+(deftest test-go-fish-start-rejected-without-element-enabled
   (let [conn (ds/conn-from-db (initial-data true))]
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (let [scene (scene-go-fish conn)
-          deck (current-deck conn)
-          active-ids (into #{} (map :db/id) (root-players conn))]
-      (is (= (count (:scene/go-fish-players scene)) 2))
-      (is (= (set (:scene/go-fish-players scene)) active-ids)
-          "the turn cycle is exactly the currently-active roster players")
-      (is (= (:scene/go-fish-turn-index scene) 0))
-      (is (= (:scene/go-fish-scores scene) {}))
-      (is (:scene/neutral-authority? scene))
-      (is (= (:deck/name deck) "Go Fish (9 Ranks)"))
-      (is (= (count (:deck/cards deck)) 36) "9 ranks x 4 copies")
-      (is (= (count (by-location deck :hand)) 12) "6 cards dealt to each of 2 players")
-      (is (= (count (by-location deck :draw)) 24))
-      (doseq [id (:scene/go-fish-players scene)]
-        (is (= (count (go-fish-hand conn id)) 6))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (is (empty? (go-fish-sessions conn))
+          "rejected -- :go-fish/start checks :go-fish/game is actually
+           enabled on the scene's own game-type"))))
 
 (deftest test-go-fish-ask-hit-transfers-cards-and-advances-turn
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn asker-id [(first twos)])
-      (move-cards! conn target-id (rest twos))
-      (dispatch conn :go-fish/ask asker-id target-id :two)
-      (is (= (count (go-fish-hand conn asker-id)) 4)
-          "every matching card moved to the asker's hand")
-      (is (empty? (go-fish-hand conn target-id)) "none left with the target")
-      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 1)
-          "a hit advances the turn by default (extra-turn-on-hit off)"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id target-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn asker-id [(first twos)])
+          (move-cards! conn target-id (rest twos))
+          (dispatch conn :go-fish/ask minigame-id asker-id target-id :two)
+          (is (= (count (go-fish-hand (entity @conn minigame-id) asker-id)) 4)
+              "every matching card moved to the asker's hand")
+          (is (empty? (go-fish-hand (entity @conn minigame-id) target-id)) "none left with the target")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
+              "a hit advances the turn by default (extra-turn-on-hit off)"))))))
 
 (deftest test-go-fish-ask-hit-grants-extra-turn-when-enabled
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring :go-fish/extra-turn-on-hit})
-    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn asker-id [(first twos)])
-      (move-cards! conn target-id (rest twos))
-      (dispatch conn :go-fish/ask asker-id target-id :two)
-      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 0)
-          "extra-turn-on-hit keeps the same player's turn after a hit"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id target-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn asker-id [(first twos)])
+          (move-cards! conn target-id (rest twos))
+          (dispatch conn :go-fish/ask minigame-id asker-id target-id :two)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+              "extra-turn-on-hit keeps the same player's turn after a hit"))))))
 
 (deftest test-go-fish-ask-miss-draws-and-advances-turn
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
-          deck (current-deck conn)
-          twos (filter (comp #{:two} :card/rank) (:deck/cards deck))]
-      ;; asker holds a :two, target holds none -- guaranteed miss
-      (move-cards! conn asker-id [(first twos)])
-      (force-top-of-draw! conn :three)
-      (let [before (count (go-fish-hand conn asker-id))]
-        (dispatch conn :go-fish/ask asker-id target-id :two)
-        (is (= (count (go-fish-hand conn asker-id)) (inc before))
-            "the asker drew one card from the pile")
-        (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 1)
-            "a miss without a lucky draw always advances the turn")))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id target-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          ;; asker holds a :two, target holds none -- guaranteed miss
+          (move-cards! conn asker-id [(first twos)])
+          (force-deck-top-of-draw! conn (go-fish-deck (entity @conn minigame-id)) :three)
+          (let [before (count (go-fish-hand (entity @conn minigame-id) asker-id))]
+            (dispatch conn :go-fish/ask minigame-id asker-id target-id :two)
+            (is (= (count (go-fish-hand (entity @conn minigame-id) asker-id)) (inc before))
+                "the asker drew one card from the pile")
+            (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
+                "a miss without a lucky draw always advances the turn")))))))
 
 (deftest test-go-fish-ask-lucky-draw-grants-extra-turn-when-enabled
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring :go-fish/extra-turn-on-lucky-draw})
-    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn asker-id [(first twos)])
-      (force-top-of-draw! conn :two)
-      (dispatch conn :go-fish/ask asker-id target-id :two)
-      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 0)
-          "drawing the exact rank asked for keeps the turn when the rule is on"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id target-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn asker-id [(first twos)])
+          (force-deck-top-of-draw! conn (go-fish-deck (entity @conn minigame-id)) :two)
+          (dispatch conn :go-fish/ask minigame-id asker-id target-id :two)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+              "drawing the exact rank asked for keeps the turn when the rule is on"))))))
 
 (deftest test-go-fish-ask-rejects-non-next-target-when-ask-anyone-off
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [[asker-id _mid-id third-id] (:scene/go-fish-players (scene-go-fish conn))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn asker-id [(first twos)])
-      (move-cards! conn third-id (rest twos))
-      (dispatch conn :go-fish/ask asker-id third-id :two)
-      (is (= (count (go-fish-hand conn asker-id)) 1)
-          "asking the 3rd seat instead of the next one is refused --
-           the asker's own :two never leaves their hand, still just
-           the 1 card placed there for setup")
-      (is (= (count (go-fish-hand conn third-id)) 3)
-          "third seat's cards are untouched too")
-      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 0) "no-op, turn unchanged"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id _mid-id third-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn asker-id [(first twos)])
+          (move-cards! conn third-id (rest twos))
+          (dispatch conn :go-fish/ask minigame-id asker-id third-id :two)
+          (is (= (count (go-fish-hand (entity @conn minigame-id) asker-id)) 1)
+              "asking the 3rd seat instead of the next one is refused --
+               the asker's own :two never leaves their hand, still just
+               the 1 card placed there for setup")
+          (is (= (count (go-fish-hand (entity @conn minigame-id) third-id)) 3)
+              "third seat's cards are untouched too")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "no-op, turn unchanged"))))))
 
 (deftest test-go-fish-ask-rejects-when-asker-lacks-rank
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [[asker-id target-id] (:scene/go-fish-players (scene-go-fish conn))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn target-id twos)
-      (dispatch conn :go-fish/ask asker-id target-id :two)
-      (is (= (count (go-fish-hand conn target-id)) 4)
-          "asker never held a :two at all -- refused, nothing moves"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id target-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn target-id twos)
+          (dispatch conn :go-fish/ask minigame-id asker-id target-id :two)
+          (is (= (count (go-fish-hand (entity @conn minigame-id) target-id)) 4)
+              "asker never held a :two at all -- refused, nothing moves"))))))
+
+(deftest test-go-fish-ask-by-non-participant-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 outsider] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start [p1 p2])
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (dispatch conn :go-fish/ask minigame-id outsider p2 :two)
+        (is (empty? (go-fish-hand (entity @conn minigame-id) p1)) "no-op -- p1 unaffected")
+        (is (empty? (go-fish-hand (entity @conn minigame-id) p2)) "no-op -- p2 unaffected")
+        (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "no-op, turn unchanged")))))
 
 (deftest test-go-fish-score-book-mode
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id twos)
-      (dispatch conn :go-fish/score player-id :two)
-      (is (empty? (go-fish-hand conn player-id))
-          "all 4 moved to :scored -- go-fish-hand (now :card/location-
-           filtered) no longer counts them as still 'in hand'")
-      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 1})
-          "a completed book is worth 1 point, not 2"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [player-id (first (go-fish-players (entity @conn minigame-id)))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn player-id twos)
+          (dispatch conn :go-fish/score minigame-id player-id :two)
+          (is (empty? (go-fish-hand (entity @conn minigame-id) player-id))
+              "all 4 moved to :scored -- go-fish-hand (now :card/location-
+               filtered) no longer counts them as still 'in hand'")
+          (is (= (:minigame/scores (entity @conn minigame-id)) {player-id 1})
+              "a completed book is worth 1 point, not 2"))))))
 
 (deftest test-go-fish-score-book-mode-refuses-incomplete-set
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id (take 3 twos))
-      (dispatch conn :go-fish/score player-id :two)
-      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {})
-          "3 of 4 isn't a complete book -- no-op"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [player-id (first (go-fish-players (entity @conn minigame-id)))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn player-id (take 3 twos))
+          (dispatch conn :go-fish/score minigame-id player-id :two)
+          (is (nil? (:minigame/scores (entity @conn minigame-id)))
+              "3 of 4 isn't a complete book -- no-op"))))))
 
 (deftest test-go-fish-score-pair-mode
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/pair-scoring})
-    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id (take 3 twos))
-      (dispatch conn :go-fish/score player-id :two)
-      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 1})
-          "a 3-of-a-kind lays down 1 pair, worth 1 point")
-      (is (= (count (filter (comp #{:scored} :card/location) (:deck/cards (current-deck conn)))) 2)
-          "2 of the 3 twos are now scored (go-fish-hand itself no longer
-           counts them as 'in hand' once scored, see cards-of-holder's
-           :card/location filter)")
-      (is (= (count (go-fish-hand conn player-id)) 1)
-          "the odd 3rd card stays in hand, unscored"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [player-id (first (go-fish-players (entity @conn minigame-id)))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (move-cards! conn player-id (take 3 twos))
+          (dispatch conn :go-fish/score minigame-id player-id :two)
+          (is (= (:minigame/scores (entity @conn minigame-id)) {player-id 1})
+              "a 3-of-a-kind lays down 1 pair, worth 1 point")
+          (is (= (count (filter (comp #{:scored} :card/location) (:deck/cards (go-fish-deck (entity @conn minigame-id))))) 2)
+              "2 of the 3 twos are now scored (go-fish-hand itself no longer
+               counts them as 'in hand' once scored, see cards-of-holder's
+               :card/location filter)")
+          (is (= (count (go-fish-hand (entity @conn minigame-id) player-id)) 1)
+              "the odd 3rd card stays in hand, unscored"))))))
 
 (deftest test-go-fish-score-pair-mode-then-more-of-the-same-rank-arrives
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/pair-scoring})
-    (let [player-id (first (:scene/go-fish-players (scene-go-fish conn)))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      ;; Score a pair, leaving the odd 3rd two unscored in hand -- then
-      ;; a 4th two arrives later (e.g. from a subsequent successful
-      ;; ask). Scoring again must count ONLY the 2 currently-in-hand
-      ;; twos (the odd 3rd plus the new 4th), never the 2 already-
-      ;; scored ones -- this is exactly the bug cards-of-holder's
-      ;; missing :card/location filter would cause: go-fish-hand would
-      ;; wrongly still include the 2 already-scored twos (they keep
-      ;; :card/holder to record credit), inflating the rank-count to 4
-      ;; and re-processing already-scored cards.
-      (move-cards! conn player-id (take 3 twos))
-      (dispatch conn :go-fish/score player-id :two)
-      (move-cards! conn player-id [(nth twos 3)])
-      (dispatch conn :go-fish/score player-id :two)
-      (is (= (:scene/go-fish-scores (scene-go-fish conn)) {player-id 2})
-          "1 point for the first pair, 1 more for the second -- not a
-           single inflated re-score of stale already-scored cards")
-      (is (= (count (filter (comp #{:scored} :card/location) (:deck/cards (current-deck conn)))) 4)
-          "all 4 twos are scored exactly once each, never touched twice")
-      (is (empty? (go-fish-hand conn player-id))))))
-
-(deftest test-go-fish-end
-  (let [conn (ds/conn-from-db (initial-data true))]
     (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (let [deck-id (:db/id (current-deck conn))]
-      (dispatch conn :go-fish/end)
-      (let [scene (scene-go-fish conn)]
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [player-id (first (go-fish-players (entity @conn minigame-id)))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          ;; Score a pair, leaving the odd 3rd two unscored in hand -- then
+          ;; a 4th two arrives later (e.g. from a subsequent successful
+          ;; ask). Scoring again must count ONLY the 2 currently-in-hand
+          ;; twos (the odd 3rd plus the new 4th), never the 2 already-
+          ;; scored ones -- this is exactly the bug cards-of-holder's
+          ;; missing :card/location filter would cause: go-fish-hand
+          ;; would wrongly still include the 2 already-scored twos (they
+          ;; keep :card/holder to record credit), inflating the
+          ;; rank-count to 4 and re-processing already-scored cards.
+          (move-cards! conn player-id (take 3 twos))
+          (dispatch conn :go-fish/score minigame-id player-id :two)
+          (move-cards! conn player-id [(nth twos 3)])
+          (dispatch conn :go-fish/score minigame-id player-id :two)
+          (is (= (:minigame/scores (entity @conn minigame-id)) {player-id 2})
+              "1 point for the first pair, 1 more for the second -- not a
+               single inflated re-score of stale already-scored cards")
+          (is (= (count (filter (comp #{:scored} :card/location) (:deck/cards (go-fish-deck (entity @conn minigame-id))))) 4)
+              "all 4 twos are scored exactly once each, never touched twice")
+          (is (empty? (go-fish-hand (entity @conn minigame-id) player-id))))))))
+
+(deftest test-go-fish-remove
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:go-fish/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            deck-id (:db/id (go-fish-deck (entity @conn minigame-id)))
+            seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
         (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
-        (is (nil? (:scene/go-fish-players scene)))
-        (is (nil? (:scene/go-fish-turn-index scene)))
-        (is (nil? (:scene/go-fish-scores scene)))
-        (is (nil? (:scene/go-fish-deck scene)))
-        (is (false? (:scene/neutral-authority? scene)))))))
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
+        (is (empty? (go-fish-sessions conn)))))))
+
+(deftest test-go-fish-leaves-scene-neutral-authority-untouched
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:go-fish/game})
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (is (:scene/neutral-authority? (scene-go-fish conn))
+          "starting a table doesn't touch the scene-wide flag")
+      (let [minigame-id (minigame-viewing-id conn)]
+        (is (:minigame/neutral-authority? (entity @conn minigame-id))
+            "the SESSION gets its own hand-visibility default instead")
+        (dispatch conn :minigame/remove minigame-id)
+        (is (:scene/neutral-authority? (scene-go-fish conn))
+            "ending the table doesn't touch it either")))))
 
 (deftest test-go-fish-turn-skips-benched-player
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :player/create :human)
-    (dispatch conn :go-fish/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
-    (let [[asker-id second-id third-id] (:scene/go-fish-players (scene-go-fish conn))
-          twos (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn)))]
-      (dispatch conn :player/set-active second-id false)
-      ;; asker holds a :two, nobody target-relevant matters here -- force
-      ;; a miss so the turn actually advances, landing on whichever seat
-      ;; is correctly next.
-      (move-cards! conn asker-id [(first twos)])
-      (force-top-of-draw! conn :three)
-      (dispatch conn :go-fish/ask asker-id third-id :two)
-      (is (= (:scene/go-fish-turn-index (scene-go-fish conn)) 2)
-          "index 1 is benched -- the stored index skips straight to
-           index 2 instead of landing on a benched seat"))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :go-fish/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+        (let [[asker-id second-id third-id] (go-fish-players (entity @conn minigame-id))
+              twos (filter (comp #{:two} :card/rank) (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+          (dispatch conn :player/set-active second-id false)
+          ;; asker holds a :two, nobody target-relevant matters here --
+          ;; force a miss so the turn actually advances, landing on
+          ;; whichever seat is correctly next.
+          (move-cards! conn asker-id [(first twos)])
+          (force-deck-top-of-draw! conn (go-fish-deck (entity @conn minigame-id)) :three)
+          (dispatch conn :go-fish/ask minigame-id asker-id third-id :two)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "index 1 is benched -- the stored index skips straight to
+               index 2 instead of landing on a benched seat"))))))
 
 ;; --- Old Maid (example game) ---
 (defn ^:private scene-old-maid [conn]
   (:camera/scene (:user/camera (user conn))))
 
-(defn ^:private old-maid-hand [conn holder-id]
-  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+(defn ^:private old-maid-sessions
+  "Every Old Maid session currently on the scene -- unlike every other
+   example game, more than one can legitimately exist at once (see
+   events.cljs's 'Mini-game sessions' section), so tests exercising a
+   single table resolve it via minigame-viewing-id below rather than
+   assuming this returns exactly one."
+  [conn]
+  (filter (comp #{:old-maid} :minigame/kind) (:scene/minigames (scene-old-maid conn))))
+
+(defn ^:private old-maid-session
+  "The (assumed single) current Old Maid session -- only valid for
+   tests that create exactly one; the multi-session tests resolve
+   theirs via minigame-viewing-id instead."
+  [conn]
+  (first (old-maid-sessions conn)))
+
+(defn ^:private old-maid-deck [minigame]
+  (:minigame/deck minigame))
+
+(defn ^:private old-maid-hand [minigame holder-id]
+  (cards/cards-of-holder (:deck/cards (old-maid-deck minigame)) holder-id))
+
+(defn ^:private old-maid-players
+  "`minigame`'s participants, in seating order -- the session-scoped
+   equivalent of the old, now-gone :scene/old-maid-players vector."
+  [minigame]
+  (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats minigame))))
 
 (defn ^:private rank-with-copies
-  "[rank cards] for some rank still holding >= n copies among the
-   current Old Maid deck's remaining cards -- used by tests needing 2
+  "[rank cards] for some rank still holding >= n copies among
+   `minigame`'s deck's remaining cards -- used by tests needing 2
    same-rank cards for a deterministic setup, since :old-maid/start's
    own auto-discard-at-deal-time means which ranks (if any) survive
    with all their copies intact varies from run to run (round-robin
    dealing a shuffled deck has real per-rank collision odds -- this is
    expected, not a bug, the same way a real physical deal can land two
    kings in the same hand by chance)."
-  [conn n]
-  (let [by-rank (group-by :card/rank (:deck/cards (current-deck conn)))]
+  [minigame n]
+  (let [by-rank (group-by :card/rank (:deck/cards (old-maid-deck minigame)))]
     (first (filter (fn [[_ cs]] (>= (count cs) n)) by-rank))))
 
 (defn ^:private two-different-ranks-one-card-each
-  "One card each from two DIFFERENT ranks still present in the current
-   Old Maid deck -- used by tests needing a guaranteed non-match."
-  [conn]
-  (map first (take 2 (vals (group-by :card/rank (:deck/cards (current-deck conn)))))))
+  "One card each from two DIFFERENT ranks still present in `minigame`'s
+   deck -- used by tests needing a guaranteed non-match."
+  [minigame]
+  (map first (take 2 (vals (group-by :card/rank (:deck/cards (old-maid-deck minigame)))))))
+
+(defn ^:private clear-old-maid-cards-to-draw!
+  "Test helper: relocates EVERY card in `minigame`'s own deck back to
+   the draw pile, holder cleared -- the Old-Maid-specific precursor to
+   the generic clear-cards-to-draw! (defined near the top of this
+   file, and used by every OTHER ported game's tests); kept as-is here
+   rather than churned to match, since it's already correct."
+  [conn minigame]
+  (let [cards (:deck/cards (old-maid-deck minigame))]
+    (transact! conn (mapcat (fn [c i] [{:db/id (:db/id c) :card/location :draw :card/position i}
+                                        [:db/retract (:db/id c) :card/holder]])
+                             cards (range)))))
 
 (deftest test-old-maid-start
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (let [scene (scene-old-maid conn)
-          deck (current-deck conn)
-          active-ids (into #{} (map :db/id) (root-players conn))
-          hands (map #(old-maid-hand conn %) (:scene/old-maid-players scene))
-          total-remaining (apply + (map count hands))]
-      (is (= (set (:scene/old-maid-players scene)) active-ids)
-          "the turn cycle is exactly the currently-active roster players")
-      (is (= (:scene/old-maid-turn-index scene) 0))
-      (is (:scene/neutral-authority? scene))
-      (is (= (:deck/name deck) "Old Maid"))
-      (is (= (count (:deck/cards deck)) total-remaining)
-          "every surviving card is in exactly one hand -- the deck's own
-           :deck/cards list and the sum of all hands always agree")
-      (is (odd? total-remaining)
-          "49 minus an even number of auto-discarded pairs is always odd,
-           regardless of how many pairs the random deal happened to
-           produce (round-robin dealing a shuffled deck has real
-           per-rank collision odds -- discarding several pairs right
-           at deal time is expected, not a bug)")
-      (is (every? empty? (map old-maid/pairs-to-discard hands))
-          "no hand holds a complete pair after start -- every pair the
-           deal happened to produce was auto-discarded immediately")
-      (is (= (count (filter (comp #{"Old Maid"} :card/label) (mapcat identity hands))) 1)
-          "the single reskinned queen is always dealt to someone -- it
-           never pairs, so auto-discard never touches it"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame (old-maid-session conn)
+            deck (old-maid-deck minigame)
+            players (old-maid-players minigame)
+            hands (map #(old-maid-hand minigame %) players)
+            total-remaining (apply + (map count hands))]
+        (is (= (set players) (set ids))
+            "the turn cycle is exactly the participants given to
+             :old-maid/start")
+        (is (= (:minigame/turn-index minigame) 0))
+        (is (= (:minigame/label minigame) "Old Maid 1"))
+        (is (:minigame/neutral-authority? minigame))
+        (is (not (:scene/neutral-authority? (scene-old-maid conn)))
+            "the scene-wide flag is untouched -- Old Maid uses its own
+             per-session flag instead")
+        (is (empty? (:scene/decks (scene-old-maid conn)))
+            "the session's deck is NOT also added to :scene/decks")
+        (is (= (:deck/name deck) "Old Maid"))
+        (is (= (count (:deck/cards deck)) total-remaining)
+            "every surviving card is in exactly one hand -- the deck's own
+             :deck/cards list and the sum of all hands always agree")
+        (is (odd? total-remaining)
+            "49 minus an even number of auto-discarded pairs is always odd,
+             regardless of how many pairs the random deal happened to
+             produce (round-robin dealing a shuffled deck has real
+             per-rank collision odds -- discarding several pairs right
+             at deal time is expected, not a bug)")
+        (is (every? empty? (map old-maid/pairs-to-discard hands))
+            "no hand holds a complete pair after start -- every pair the
+             deal happened to produce was auto-discarded immediately")
+        (is (= (count (filter (comp #{"Old Maid"} :card/label) (mapcat identity hands))) 1)
+            "the single reskinned queen is always dealt to someone -- it
+             never pairs, so auto-discard never touches it")))))
+
+(deftest test-old-maid-start-rejected-without-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      ;; the active scene's game-type is still :default here --
+      ;; :old-maid/game was never enabled.
+      (dispatch conn :old-maid/start ids)
+      (is (empty? (old-maid-sessions conn))
+          "rejected -- :old-maid/start checks :old-maid/game is
+           actually enabled on the scene's own game-type, not just
+           relying on the UI to gate it, since any connected
+           participant may dispatch this"))))
 
 (deftest test-old-maid-draw-completes-pair
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[drawer-id target-id] (:scene/old-maid-players (scene-old-maid conn))
-          [_ two-cards] (rank-with-copies conn 2)]
-      (move-cards! conn drawer-id [(first two-cards)])
-      (move-cards! conn target-id [(second two-cards)])
-      (dispatch conn :old-maid/draw drawer-id (:db/id (second two-cards)))
-      (is (empty? (old-maid-hand conn drawer-id))
-          "the drawn card completed a pair -- both vanish, none land in
-           the drawer's hand at all")
-      (is (empty? (old-maid-hand conn target-id)))
-      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 1)
-          "the turn unconditionally advances to whoever was drawn from"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[drawer-id target-id] (old-maid-players (entity @conn minigame-id))
+              [_ two-cards] (rank-with-copies (entity @conn minigame-id) 2)]
+          (move-cards! conn drawer-id [(first two-cards)])
+          (move-cards! conn target-id [(second two-cards)])
+          (dispatch conn :old-maid/draw minigame-id drawer-id (:db/id (second two-cards)))
+          (is (empty? (old-maid-hand (entity @conn minigame-id) drawer-id))
+              "the drawn card completed a pair -- both vanish, none land in
+               the drawer's hand at all")
+          (is (empty? (old-maid-hand (entity @conn minigame-id) target-id)))
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
+              "the turn unconditionally advances to whoever was drawn from"))))))
 
 (deftest test-old-maid-draw-no-match
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[drawer-id target-id] (:scene/old-maid-players (scene-old-maid conn))
-          [a b] (two-different-ranks-one-card-each conn)]
-      (move-cards! conn drawer-id [a])
-      (move-cards! conn target-id [b])
-      (dispatch conn :old-maid/draw drawer-id (:db/id b))
-      (is (= (count (old-maid-hand conn drawer-id)) 2)
-          "no match -- the drawn card just moves into the drawer's hand")
-      (is (empty? (old-maid-hand conn target-id)))
-      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 1)))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[drawer-id target-id] (old-maid-players (entity @conn minigame-id))
+              [a b] (two-different-ranks-one-card-each (entity @conn minigame-id))]
+          (move-cards! conn drawer-id [a])
+          (move-cards! conn target-id [b])
+          (dispatch conn :old-maid/draw minigame-id drawer-id (:db/id b))
+          (is (= (count (old-maid-hand (entity @conn minigame-id) drawer-id)) 2)
+              "no match -- the drawn card just moves into the drawer's hand")
+          (is (empty? (old-maid-hand (entity @conn minigame-id) target-id)))
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)))))))
+
+(deftest test-old-maid-draw-by-non-participant-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 outsider] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start [p1 p2])
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[a b] (two-different-ranks-one-card-each (entity @conn minigame-id))]
+          (move-cards! conn p1 [a])
+          (move-cards! conn p2 [b])
+          ;; `outsider` isn't seated at this session at all -- claiming
+          ;; to BE the current turn player must be rejected the same
+          ;; way a wrong card-id is: drawer-id has to equal the
+          ;; RESOLVED current turn player, not just belong to someone.
+          (dispatch conn :old-maid/draw minigame-id outsider (:db/id b))
+          (is (= (count (old-maid-hand (entity @conn minigame-id) p1)) 1) "no-op -- p1 unaffected")
+          (is (= (count (old-maid-hand (entity @conn minigame-id) p2)) 1) "no-op -- p2 unaffected")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "no-op, turn unchanged"))))))
 
 (deftest test-old-maid-elimination-skips-empty-handed-player
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[first-id _second-id third-id] (:scene/old-maid-players (scene-old-maid conn))
-          [a b] (two-different-ranks-one-card-each conn)]
-      ;; _second-id starts with an empty hand -- eliminated before the
-      ;; game even really gets going, no separate event needed.
-      (move-cards! conn first-id [a])
-      (move-cards! conn third-id [b])
-      (dispatch conn :old-maid/draw first-id (:db/id b))
-      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 2)
-          "index 1 (second-id) has no cards -- the stored index skips
-           straight to index 2 instead of landing on an empty hand"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[first-id _second-id third-id] (old-maid-players (entity @conn minigame-id))
+              [a b] (two-different-ranks-one-card-each (entity @conn minigame-id))]
+          ;; _second-id starts with an empty hand -- eliminated before the
+          ;; game even really gets going, no separate event needed.
+          (move-cards! conn first-id [a])
+          (move-cards! conn third-id [b])
+          (dispatch conn :old-maid/draw minigame-id first-id (:db/id b))
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "index 1 (second-id) has no cards -- the stored index skips
+               straight to index 2 instead of landing on an empty hand"))))))
 
 (deftest test-old-maid-draw-after-external-bench-targets-drawers-real-neighbor
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[first-id second-id third-id] (:scene/old-maid-players (scene-old-maid conn))
-          [a b] (two-different-ranks-one-card-each conn)]
-      ;; Bench the CURRENT turn holder (index 0) -- the stored
-      ;; :scene/old-maid-turn-index (still 0) now points at a benched
-      ;; seat, no longer matching second-id's own real position (1).
-      ;; This reproduces exactly what a live manual-benching smoke
-      ;; test caught: :old-maid/draw must derive "who's next" from the
-      ;; DRAWER's own resolved position in `players`, not from the
-      ;; raw stored index, or the drawer ends up drawing from
-      ;; themselves (a spurious self-pair that silently vanishes one
-      ;; of their own cards).
-      (dispatch conn :player/set-active first-id false)
-      (move-cards! conn second-id [a])
-      (move-cards! conn third-id [b])
-      (dispatch conn :old-maid/draw second-id (:db/id b))
-      (is (= (count (old-maid-hand conn second-id)) 2)
-          "the drawer actually gained a card from someone else")
-      (is (empty? (old-maid-hand conn third-id))
-          "the card came from third-id, not a phantom duplicate of the
-           drawer's own card")
-      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 2)
-          "turn advances to third-id's real index, never back onto the
-           drawer itself"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[first-id second-id third-id] (old-maid-players (entity @conn minigame-id))
+              [a b] (two-different-ranks-one-card-each (entity @conn minigame-id))]
+          ;; Bench the CURRENT turn holder (index 0) -- the stored
+          ;; :minigame/turn-index (still 0) now points at a benched
+          ;; seat, no longer matching second-id's own real position (1).
+          ;; This reproduces exactly what a live manual-benching smoke
+          ;; test caught: :old-maid/draw must derive "who's next" from the
+          ;; DRAWER's own resolved position among the session's seats,
+          ;; not from the raw stored index, or the drawer ends up
+          ;; drawing from themselves (a spurious self-pair that
+          ;; silently vanishes one of their own cards).
+          (dispatch conn :player/set-active first-id false)
+          (move-cards! conn second-id [a])
+          (move-cards! conn third-id [b])
+          (dispatch conn :old-maid/draw minigame-id second-id (:db/id b))
+          (is (= (count (old-maid-hand (entity @conn minigame-id) second-id)) 2)
+              "the drawer actually gained a card from someone else")
+          (is (empty? (old-maid-hand (entity @conn minigame-id) third-id))
+              "the card came from third-id, not a phantom duplicate of the
+               drawer's own card")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "turn advances to third-id's real index, never back onto the
+               drawer itself"))))))
 
 (deftest test-old-maid-draw-wrong-card-id-rejected
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[drawer-id target-id other-id] (:scene/old-maid-players (scene-old-maid conn))
-          [a b c] (take 3 (:deck/cards (current-deck conn)))]
-      ;; target-id (the correctly-resolved neighbor) holds b; other-id
-      ;; holds a DIFFERENT card, c. The drawer mistakenly tries to draw
-      ;; c -- e.g. a stale UI click after hands changed underneath it.
-      ;; :old-maid/draw must reject it: card-id must belong to the
-      ;; RESOLVED neighbor's hand specifically, not just belong to
-      ;; SOMEONE's hand.
-      (move-cards! conn drawer-id [a])
-      (move-cards! conn target-id [b])
-      (move-cards! conn other-id [c])
-      (dispatch conn :old-maid/draw drawer-id (:db/id c))
-      (is (= (count (old-maid-hand conn drawer-id)) 1) "no-op -- the drawer's hand is unchanged")
-      (is (= (count (old-maid-hand conn other-id)) 1) "no-op -- other-id still holds their card")
-      (is (= (count (old-maid-hand conn target-id)) 1) "target-id (the real neighbor) is untouched")
-      (is (= (:scene/old-maid-turn-index (scene-old-maid conn)) 0) "no-op, turn unchanged"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[drawer-id target-id other-id] (old-maid-players (entity @conn minigame-id))
+              [a b c] (take 3 (:deck/cards (old-maid-deck (entity @conn minigame-id))))]
+          ;; target-id (the correctly-resolved neighbor) holds b; other-id
+          ;; holds a DIFFERENT card, c. The drawer mistakenly tries to draw
+          ;; c -- e.g. a stale UI click after hands changed underneath it.
+          ;; :old-maid/draw must reject it: card-id must belong to the
+          ;; RESOLVED neighbor's hand specifically, not just belong to
+          ;; SOMEONE's hand.
+          (move-cards! conn drawer-id [a])
+          (move-cards! conn target-id [b])
+          (move-cards! conn other-id [c])
+          (dispatch conn :old-maid/draw minigame-id drawer-id (:db/id c))
+          (is (= (count (old-maid-hand (entity @conn minigame-id) drawer-id)) 1) "no-op -- the drawer's hand is unchanged")
+          (is (= (count (old-maid-hand (entity @conn minigame-id) other-id)) 1) "no-op -- other-id still holds their card")
+          (is (= (count (old-maid-hand (entity @conn minigame-id) target-id)) 1) "target-id (the real neighbor) is untouched")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "no-op, turn unchanged"))))))
 
-(deftest test-old-maid-end
-  (let [conn (ds/conn-from-db (initial-data true))]
+(deftest test-old-maid-seat-controller-override-beats-roster-controller
+  (let [conn (ds/conn-from-db (initial-data false))
+        roster-guest (random-uuid)
+        seat-guest (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid seat-guest}])
+    (add-conn! conn roster-guest)
+    (add-conn! conn seat-guest)
+    (set-enabled-elements! conn #{:old-maid/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :old-maid/start)
-    (let [deck-id (:db/id (current-deck conn))]
-      (dispatch conn :old-maid/end)
-      (let [scene (scene-old-maid conn)]
+    (dispatch conn :player/create :human)
+    (let [[p1 p2] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      ;; p1's ROSTER controller is roster-guest, but this ONE session
+      ;; overrides p1's SEAT to seat-guest -- the local viewer here IS
+      ;; seat-guest, so the per-session override must win.
+      (dispatch conn :player/set-controller p1 [:user/uuid roster-guest])
+      (dispatch conn :old-maid/start [p1 p2])
+      (let [minigame-id (minigame-viewing-id conn)]
+        (dispatch conn :minigame/set-controller minigame-id p1 seat-guest)
+        (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
+        (let [[a b] (two-different-ranks-one-card-each (entity @conn minigame-id))]
+          (move-cards! conn p1 [a])
+          (move-cards! conn p2 [b])
+          (dispatch conn :old-maid/draw minigame-id p1 (:db/id b))
+          (is (= (count (old-maid-hand (entity @conn minigame-id) p1)) 2)
+              "seat-guest -- not roster-guest -- is authorized to act
+               for p1, since the per-session :seat/controller override
+               takes priority over the roster's own :player/controller"))))))
+
+(deftest test-old-maid-two-simultaneous-sessions-dont-interfere
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 p3 p4] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start [p1 p2])
+      (let [session-a-id (minigame-viewing-id conn)]
+        (dispatch conn :old-maid/start [p3 p4])
+        (let [session-b-id (minigame-viewing-id conn)]
+          (is (not= session-a-id session-b-id))
+          (is (= (count (old-maid-sessions conn)) 2))
+          (is (= (set (map :minigame/label (old-maid-sessions conn))) #{"Old Maid 1" "Old Maid 2"})
+              "sessions are auto-labeled distinctly")
+          (is (= (set (old-maid-players (entity @conn session-a-id))) #{p1 p2}))
+          (is (= (set (old-maid-players (entity @conn session-b-id))) #{p3 p4}))
+          (let [deck-a-cards (set (map :db/id (:deck/cards (old-maid-deck (entity @conn session-a-id)))))
+                deck-b-cards (set (map :db/id (:deck/cards (old-maid-deck (entity @conn session-b-id)))))]
+            (is (empty? (set/intersection deck-a-cards deck-b-cards))
+                "each session owns its own independent set of cards"))
+          (clear-old-maid-cards-to-draw! conn (entity @conn session-a-id))
+          (let [[drawer-id target-id] (old-maid-players (entity @conn session-a-id))
+                [_ two-cards] (rank-with-copies (entity @conn session-a-id) 2)]
+            (move-cards! conn drawer-id [(first two-cards)])
+            (move-cards! conn target-id [(second two-cards)])
+            (dispatch conn :old-maid/draw session-a-id drawer-id (:db/id (second two-cards)))
+            (is (= (:minigame/turn-index (entity @conn session-a-id)) 1))
+            (is (= (:minigame/turn-index (entity @conn session-b-id)) 0)
+                "session B's turn index is completely unaffected by
+                 session A's own draw")))))))
+
+(deftest test-old-maid-same-player-in-two-sessions-has-separate-hands
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 p3] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start [p1 p2])
+      (let [session-a-id (minigame-viewing-id conn)]
+        (dispatch conn :old-maid/start [p1 p3])
+        (let [session-b-id (minigame-viewing-id conn)
+              hand-a (set (map :db/id (old-maid-hand (entity @conn session-a-id) p1)))
+              hand-b (set (map :db/id (old-maid-hand (entity @conn session-b-id) p1)))]
+          (is (seq hand-a))
+          (is (seq hand-b))
+          (is (empty? (set/intersection hand-a hand-b))
+              "p1's hand in session A and session B are disjoint card sets --
+               the same roster player, two independent hands"))))))
+
+(deftest test-old-maid-remove-cascades-without-touching-other-sessions
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 p3 p4] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start [p1 p2])
+      (let [session-a-id (minigame-viewing-id conn)]
+        (dispatch conn :old-maid/start [p3 p4])
+        (let [session-b-id (minigame-viewing-id conn)
+              deck-a-id (:db/id (old-maid-deck (entity @conn session-a-id)))
+              deck-b-id (:db/id (old-maid-deck (entity @conn session-b-id)))
+              seat-a-ids (map :db/id (:minigame/seats (entity @conn session-a-id)))]
+          (dispatch conn :minigame/remove session-a-id)
+          (is (nil? (:db/id (entity @conn session-a-id))) "the session entity itself is gone")
+          (is (nil? (:db/id (entity @conn deck-a-id))) "its deck is gone")
+          (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-a-ids)) "its seats are gone")
+          (is (some? (:db/id (entity @conn deck-b-id))) "the OTHER session's deck is untouched")
+          (is (some? (:db/id (entity @conn session-b-id))) "the other session itself is untouched")
+          (is (= (count (old-maid-sessions conn)) 1) "only the other session remains"))))))
+
+(deftest test-old-maid-leaves-scene-neutral-authority-untouched
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (is (:scene/neutral-authority? (scene-old-maid conn))
+          "starting a table doesn't touch the scene-wide flag -- it was
+           already true (a manual DM setting) and stays true")
+      (let [minigame-id (minigame-viewing-id conn)]
+        (is (:minigame/neutral-authority? (entity @conn minigame-id))
+            "the SESSION gets its own hand-visibility default instead")
+        (dispatch conn :minigame/remove minigame-id)
+        (is (:scene/neutral-authority? (scene-old-maid conn))
+            "ending the table doesn't touch it either")))))
+
+(deftest test-old-maid-remove
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:old-maid/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :old-maid/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            deck-id (:db/id (old-maid-deck (entity @conn minigame-id)))
+            seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
         (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
-        (is (nil? (:scene/old-maid-players scene)))
-        (is (nil? (:scene/old-maid-turn-index scene)))
-        (is (nil? (:scene/old-maid-deck scene)))
-        (is (false? (:scene/neutral-authority? scene)))))))
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
+        (is (empty? (old-maid-sessions conn)))))))
 
 ;; --- Crazy 8s (example game) ---
+;; The fourth game ported onto the generic mini-game session
+;; scaffolding (see events.cljs's 'Mini-game sessions' section) -- a
+;; session-scoped prototype for letting several independent, arbitrary-
+;; subset-of-the-roster tables run nested inside one scene at once.
 (defn ^:private scene-crazy-eights [conn]
   (:camera/scene (:user/camera (user conn))))
 
-(defn ^:private crazy-eights-hand [conn holder-id]
-  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+(defn ^:private crazy-eights-sessions [conn]
+  (filter (comp #{:crazy-eights} :minigame/kind) (:scene/minigames (scene-crazy-eights conn))))
 
-(defn ^:private discard-top [conn]
-  (apply max-key :card/position (by-location (current-deck conn) :discard)))
+(defn ^:private crazy-eights-session [conn]
+  (first (crazy-eights-sessions conn)))
+
+(defn ^:private crazy-eights-deck [minigame]
+  (:minigame/deck minigame))
+
+(defn ^:private crazy-eights-hand [minigame holder-id]
+  (cards/cards-of-holder (:deck/cards (crazy-eights-deck minigame)) holder-id))
+
+(defn ^:private crazy-eights-players [minigame]
+  (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats minigame))))
+
+(defn ^:private discard-top [minigame]
+  (apply max-key :card/position (by-location (crazy-eights-deck minigame) :discard)))
 
 (defn ^:private set-discard-top!
-  "Test helper: makes `card` the sole live top-of-discard card and sets
-   :scene/crazy-eights-suit to `suit` -- whatever was previously on top
-   moves back into the draw pile (at positions guaranteed lower than
-   `card`'s) so the discard pile never goes empty and `card` is
-   unambiguously the new max-position (i.e. 'top') card."
-  [conn card suit]
-  (let [deck (current-deck conn)
+  "Test helper: makes `card` the sole live top-of-discard card of
+   `minigame-id`'s deck and sets its :minigame/suit to `suit` --
+   whatever was previously on top moves back into the draw pile (at
+   positions guaranteed lower than `card`'s) so the discard pile never
+   goes empty and `card` is unambiguously the new max-position (i.e.
+   'top') card."
+  [conn minigame-id card suit]
+  (let [deck (crazy-eights-deck (entity @conn minigame-id))
         old-top (remove (comp #{(:db/id card)} :db/id) (by-location deck :discard))
-        scene-id (:db/id (scene-crazy-eights conn))
         reclaim-tx (map-indexed
                     (fn [i c] {:db/id (:db/id c) :card/location :draw :card/position (- i)})
                     old-top)]
     (transact! conn
       (concat [{:db/id (:db/id card) :card/location :discard :card/position 0}
                [:db/retract (:db/id card) :card/holder]
-               {:db/id scene-id :scene/crazy-eights-suit suit}]
+               {:db/id minigame-id :minigame/suit suit}]
               reclaim-tx))))
 
 (deftest test-crazy-eights-start
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (let [scene (scene-crazy-eights conn)
-          deck (current-deck conn)
-          active-ids (into #{} (map :db/id) (root-players conn))
-          top (discard-top conn)]
-      (is (= (set (:scene/crazy-eights-players scene)) active-ids)
-          "the turn cycle is exactly the currently-active roster players")
-      (is (= (:scene/crazy-eights-turn-index scene) 0))
-      (is (:scene/neutral-authority? scene))
-      (is (nil? (:scene/crazy-eights-winner scene)) "nobody's won yet")
-      (is (= (:deck/name deck) "Crazy 8s"))
-      (is (= (count (:deck/cards deck)) 52) "the full deck, nothing removed")
-      (is (= (count (by-location deck :hand)) 18) "6 cards dealt to each of 3 players")
-      (is (every? #(= 6 (count (crazy-eights-hand conn %))) active-ids)
-          "every active player gets EXACTLY 6 -- unlike Old Maid, Crazy 8s
-           never auto-discards at deal time, so this is fully deterministic")
-      (is (= (count (by-location deck :discard)) 1) "exactly one starting card is face up")
-      (is (not= (:card/rank top) :eight)
-          "the starter is never a wild 8 -- there'd be no declared suit yet")
-      (is (= (:scene/crazy-eights-suit scene) (:card/suit top))
-          "the initial active suit is simply the starter's own printed suit")
-      (is (= (count (by-location deck :draw)) (- 52 18 1))
-          "everything not dealt or flipped stays in the draw pile"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame (crazy-eights-session conn)
+            deck (crazy-eights-deck minigame)
+            players (crazy-eights-players minigame)
+            top (discard-top minigame)]
+        (is (= (set players) (set ids))
+            "the turn cycle is exactly the participants given to
+             :crazy-eights/start")
+        (is (= (:minigame/turn-index minigame) 0))
+        (is (:minigame/neutral-authority? minigame))
+        (is (nil? (:minigame/winner minigame)) "nobody's won yet")
+        (is (empty? (:scene/decks (scene-crazy-eights conn)))
+            "the session's deck is NOT also added to :scene/decks")
+        (is (= (:deck/name deck) "Crazy 8s"))
+        (is (= (count (:deck/cards deck)) 52) "the full deck, nothing removed")
+        (is (= (count (by-location deck :hand)) 18) "6 cards dealt to each of 3 players")
+        (is (every? #(= 6 (count (crazy-eights-hand minigame %))) players)
+            "every participant gets EXACTLY 6 -- unlike Old Maid, Crazy 8s
+             never auto-discards at deal time, so this is fully deterministic")
+        (is (= (count (by-location deck :discard)) 1) "exactly one starting card is face up")
+        (is (not= (:card/rank top) :eight)
+            "the starter is never a wild 8 -- there'd be no declared suit yet")
+        (is (= (:minigame/suit minigame) (:card/suit top))
+            "the initial active suit is simply the starter's own printed suit")
+        (is (= (count (by-location deck :draw)) (- 52 18 1))
+            "everything not dealt or flipped stays in the draw pile")))))
+
+(deftest test-crazy-eights-start-rejected-without-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (is (empty? (crazy-eights-sessions conn))
+          "rejected -- :crazy-eights/start checks :crazy-eights/game is
+           actually enabled on the scene's own game-type"))))
 
 (deftest test-crazy-eights-play-legal-rank-match
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id _next-id] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          non-eights (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn)))
-          [_ [top-card hand-card]] (first (filter (fn [[_ cs]] (>= (count cs) 2))
-                                                    (group-by :card/rank non-eights)))
-          ;; A filler card so playing hand-card doesn't ALSO empty the
-          ;; hand -- that would be a win, a different scenario than
-          ;; "a normal legal play advances the turn".
-          filler (first (remove (comp #{(:db/id top-card) (:db/id hand-card)} :db/id)
-                                 (:deck/cards (current-deck conn))))]
-      (set-discard-top! conn top-card (:card/suit top-card))
-      (move-cards! conn player-id [hand-card filler])
-      (dispatch conn :crazy-eights/play player-id (:db/id hand-card) nil)
-      (is (not (contains? (into #{} (map :db/id) (crazy-eights-hand conn player-id)) (:db/id hand-card)))
-          "the played card leaves the player's hand")
-      (is (= (:db/id (discard-top conn)) (:db/id hand-card))
-          "the played card becomes the new top of the discard pile")
-      (is (= (:scene/crazy-eights-suit (scene-crazy-eights conn)) (:card/suit hand-card))
-          "a non-8 play's own suit becomes the new thing to match")
-      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 1)
-          "the turn advances"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[player-id _next-id] (crazy-eights-players (entity @conn minigame-id))
+              non-eights (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id))))
+              [_ [top-card hand-card]] (first (filter (fn [[_ cs]] (>= (count cs) 2))
+                                                        (group-by :card/rank non-eights)))
+              ;; A filler card so playing hand-card doesn't ALSO empty
+              ;; the hand -- that would be a win, a different scenario
+              ;; than "a normal legal play advances the turn".
+              filler (first (remove (comp #{(:db/id top-card) (:db/id hand-card)} :db/id)
+                                     (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+          (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+          (move-cards! conn player-id [hand-card filler])
+          (dispatch conn :crazy-eights/play minigame-id player-id (:db/id hand-card) nil)
+          (is (not (contains? (into #{} (map :db/id) (crazy-eights-hand (entity @conn minigame-id) player-id)) (:db/id hand-card)))
+              "the played card leaves the player's hand")
+          (is (= (:db/id (discard-top (entity @conn minigame-id))) (:db/id hand-card))
+              "the played card becomes the new top of the discard pile")
+          (is (= (:minigame/suit (entity @conn minigame-id)) (:card/suit hand-card))
+              "a non-8 play's own suit becomes the new thing to match")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
+              "the turn advances"))))))
 
 (deftest test-crazy-eights-play-illegal-rejected
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          illegal-card (first (remove #(crazy-eights/playable? % top-card (:card/suit top-card))
-                                       (:deck/cards (current-deck conn))))]
-      (set-discard-top! conn top-card (:card/suit top-card))
-      (move-cards! conn player-id [illegal-card])
-      (dispatch conn :crazy-eights/play player-id (:db/id illegal-card) nil)
-      (is (contains? (into #{} (map :db/id) (crazy-eights-hand conn player-id)) (:db/id illegal-card))
-          "the illegal card is rejected -- still in the player's hand")
-      (is (= (:db/id (discard-top conn)) (:db/id top-card)) "the discard top is unchanged")
-      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0) "no-op, turn unchanged"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[player-id _] (crazy-eights-players (entity @conn minigame-id))
+              top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              illegal-card (first (remove #(crazy-eights/playable? % top-card (:card/suit top-card))
+                                           (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+          (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+          (move-cards! conn player-id [illegal-card])
+          (dispatch conn :crazy-eights/play minigame-id player-id (:db/id illegal-card) nil)
+          (is (contains? (into #{} (map :db/id) (crazy-eights-hand (entity @conn minigame-id) player-id)) (:db/id illegal-card))
+              "the illegal card is rejected -- still in the player's hand")
+          (is (= (:db/id (discard-top (entity @conn minigame-id))) (:db/id top-card)) "the discard top is unchanged")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "no-op, turn unchanged"))))))
 
 (deftest test-crazy-eights-play-eight-declares-suit-and-constrains-next-player
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-a player-b] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          eight (first (filter (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          ;; A filler so playing the 8 doesn't ALSO empty player-a's
-          ;; hand and win -- this test is about the declared suit, not
-          ;; the win condition (see test-crazy-eights-win-on-empty-hand).
-          filler (first (remove (comp #{(:db/id top-card) (:db/id eight)} :db/id)
-                                 (:deck/cards (current-deck conn))))]
-      (set-discard-top! conn top-card (:card/suit top-card))
-      (move-cards! conn player-a [eight filler])
-      (dispatch conn :crazy-eights/play player-a (:db/id eight) :hearts)
-      (is (= (:db/id (discard-top conn)) (:db/id eight)) "the wild 8 becomes the new top card")
-      (is (= (:scene/crazy-eights-suit (scene-crazy-eights conn)) :hearts)
-          "the chosen suit is now what must be matched")
-      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 1) "turn advances to player-b")
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[player-a player-b] (crazy-eights-players (entity @conn minigame-id))
+              top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              eight (first (filter (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              ;; A filler so playing the 8 doesn't ALSO empty player-a's
+              ;; hand and win -- this test is about the declared suit,
+              ;; not the win condition (see test-crazy-eights-win-on-
+              ;; empty-hand).
+              filler (first (remove (comp #{(:db/id top-card) (:db/id eight)} :db/id)
+                                     (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+          (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+          (move-cards! conn player-a [eight filler])
+          (dispatch conn :crazy-eights/play minigame-id player-a (:db/id eight) :hearts)
+          (is (= (:db/id (discard-top (entity @conn minigame-id))) (:db/id eight)) "the wild 8 becomes the new top card")
+          (is (= (:minigame/suit (entity @conn minigame-id)) :hearts)
+              "the chosen suit is now what must be matched")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 1) "turn advances to player-b")
 
-      (testing "player-b, now facing a suit-less top card, can't play an off-suit non-8"
-        (let [off-suit (first (remove #(crazy-eights/playable? % eight :hearts)
-                                       (:deck/cards (current-deck conn))))]
-          (move-cards! conn player-b [off-suit])
-          (dispatch conn :crazy-eights/play player-b (:db/id off-suit) nil)
-          (is (contains? (into #{} (map :db/id) (crazy-eights-hand conn player-b)) (:db/id off-suit))
-              "rejected -- still in hand")
-          (is (= (:db/id (discard-top conn)) (:db/id eight)) "discard top still unchanged")))
+          (testing "player-b, now facing a suit-less top card, can't play an off-suit non-8"
+            (let [off-suit (first (remove #(crazy-eights/playable? % eight :hearts)
+                                           (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+              (move-cards! conn player-b [off-suit])
+              (dispatch conn :crazy-eights/play minigame-id player-b (:db/id off-suit) nil)
+              (is (contains? (into #{} (map :db/id) (crazy-eights-hand (entity @conn minigame-id) player-b)) (:db/id off-suit))
+                  "rejected -- still in hand")
+              (is (= (:db/id (discard-top (entity @conn minigame-id))) (:db/id eight)) "discard top still unchanged")))
 
-      (testing "but a card of the declared suit IS legal"
-        (let [hearts-card (first (filter #(= (:card/suit %) :hearts) (:deck/cards (current-deck conn))))]
-          (move-cards! conn player-b [hearts-card])
-          (dispatch conn :crazy-eights/play player-b (:db/id hearts-card) nil)
-          (is (= (:db/id (discard-top conn)) (:db/id hearts-card))
-              "legal -- the declared suit constrained play, and this card satisfies it"))))))
+          (testing "but a card of the declared suit IS legal"
+            (let [hearts-card (first (filter #(= (:card/suit %) :hearts) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+              (move-cards! conn player-b [hearts-card])
+              (dispatch conn :crazy-eights/play minigame-id player-b (:db/id hearts-card) nil)
+              (is (= (:db/id (discard-top (entity @conn minigame-id))) (:db/id hearts-card))
+                  "legal -- the declared suit constrained play, and this card satisfies it"))))))))
+
+(deftest test-crazy-eights-play-by-non-participant-rejected
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [[p1 p2 outsider] (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start [p1 p2])
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+          (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+          (dispatch conn :crazy-eights/play minigame-id outsider (:db/id top-card) nil)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "no-op, turn unchanged"))))))
 
 (deftest test-crazy-eights-draw-does-not-advance-turn
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          _ (set-discard-top! conn top-card (:card/suit top-card))
-          deck (current-deck conn)
-          draw-before (by-location deck :draw)
-          non-matching (take 6 (remove #(crazy-eights/playable? % top-card (:card/suit top-card)) draw-before))]
-      (is (= (count non-matching) 6) "the draw pile has plenty of non-matching cards to build a stuck hand from")
-      (move-cards! conn player-id non-matching)
-      (let [draw-count-before (count (by-location (current-deck conn) :draw))]
-        (dispatch conn :crazy-eights/draw player-id)
-        (is (= (count (crazy-eights-hand conn player-id)) 7) "the player's hand grows by exactly 1")
-        (is (= (count (by-location (current-deck conn) :draw)) (dec draw-count-before))
-            "exactly 1 card leaves the draw pile")
-        (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0)
-            "drawing never advances the turn -- the same player continues")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[player-id _] (crazy-eights-players (entity @conn minigame-id))
+              top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              _ (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+              deck (crazy-eights-deck (entity @conn minigame-id))
+              draw-before (by-location deck :draw)
+              non-matching (take 6 (remove #(crazy-eights/playable? % top-card (:card/suit top-card)) draw-before))]
+          (is (= (count non-matching) 6) "the draw pile has plenty of non-matching cards to build a stuck hand from")
+          (move-cards! conn player-id non-matching)
+          (let [draw-count-before (count (by-location (crazy-eights-deck (entity @conn minigame-id)) :draw))]
+            (dispatch conn :crazy-eights/draw minigame-id player-id)
+            (is (= (count (crazy-eights-hand (entity @conn minigame-id) player-id)) 7) "the player's hand grows by exactly 1")
+            (is (= (count (by-location (crazy-eights-deck (entity @conn minigame-id)) :draw)) (dec draw-count-before))
+                "exactly 1 card leaves the draw pile")
+            (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+                "drawing never advances the turn -- the same player continues")))))))
 
 (deftest test-crazy-eights-draw-reshuffles-discard-preserving-top-card
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          _ (set-discard-top! conn top-card (:card/suit top-card))
-          deck (current-deck conn)
-          draw (by-location deck :draw)
-          non-matching (take 6 (remove #(crazy-eights/playable? % top-card (:card/suit top-card)) draw))]
-      (move-cards! conn player-id non-matching)
-      ;; Empty the draw pile entirely -- every remaining :draw card moves
-      ;; into the discard pile UNDER the live top card (lower positions),
-      ;; simulating a long game where most of the deck has been played.
-      (let [deck (current-deck conn)
-            remaining-draw (by-location deck :draw)
-            pool-size (count remaining-draw)]
-        (transact! conn
-          (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position (- (inc i))})
-                        remaining-draw))
-        (is (empty? (by-location (current-deck conn) :draw)) "draw pile is now empty, by construction")
-        (dispatch conn :crazy-eights/draw player-id)
-        (let [deck (current-deck conn)]
-          (is (= (count (crazy-eights-hand conn player-id)) 7) "the player still gets exactly 1 new card")
-          (is (= (count (by-location deck :draw)) (dec pool-size))
-              "the reclaimed discard pile (minus the 1 just drawn) is the new draw pile")
-          (is (= (count (by-location deck :discard)) 1) "only the original top card remains in discard")
-          (is (= (:db/id (discard-top conn)) (:db/id top-card))
-              "the live top card itself was never touched by the reshuffle")
-          (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0) "still no turn advance"))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[player-id _] (crazy-eights-players (entity @conn minigame-id))
+              top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              _ (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+              deck (crazy-eights-deck (entity @conn minigame-id))
+              draw (by-location deck :draw)
+              non-matching (take 6 (remove #(crazy-eights/playable? % top-card (:card/suit top-card)) draw))]
+          (move-cards! conn player-id non-matching)
+          ;; Empty the draw pile entirely -- every remaining :draw card
+          ;; moves into the discard pile UNDER the live top card (lower
+          ;; positions), simulating a long game where most of the deck
+          ;; has been played.
+          (let [deck (crazy-eights-deck (entity @conn minigame-id))
+                remaining-draw (by-location deck :draw)
+                pool-size (count remaining-draw)]
+            (transact! conn
+              (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position (- (inc i))})
+                            remaining-draw))
+            (is (empty? (by-location (crazy-eights-deck (entity @conn minigame-id)) :draw)) "draw pile is now empty, by construction")
+            (dispatch conn :crazy-eights/draw minigame-id player-id)
+            (let [deck (crazy-eights-deck (entity @conn minigame-id))]
+              (is (= (count (crazy-eights-hand (entity @conn minigame-id) player-id)) 7) "the player still gets exactly 1 new card")
+              (is (= (count (by-location deck :draw)) (dec pool-size))
+                  "the reclaimed discard pile (minus the 1 just drawn) is the new draw pile")
+              (is (= (count (by-location deck :discard)) 1) "only the original top card remains in discard")
+              (is (= (:db/id (discard-top (entity @conn minigame-id))) (:db/id top-card))
+                  "the live top card itself was never touched by the reshuffle")
+              (is (= (:minigame/turn-index (entity @conn minigame-id)) 0) "still no turn advance"))))))))
 
 (deftest test-crazy-eights-win-on-empty-hand
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id _] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          ;; Excludes top-card's own id (every card trivially "matches"
-          ;; itself by rank, so without this a naive scan can pick
-          ;; top-card right back as "matching") AND excludes 8s (always
-          ;; "playable" regardless of top/suit -- an 8 landing here
-          ;; would need a real declared suit, not the `nil` this test
-          ;; dispatches with).
-          matching (some #(if (and (not= (:db/id %) (:db/id top-card))
-                                    (not= (:card/rank %) :eight)
-                                    (crazy-eights/playable? % top-card (:card/suit top-card)))
-                             %)
-                         (:deck/cards (current-deck conn)))]
-      (set-discard-top! conn top-card (:card/suit top-card))
-      (move-cards! conn player-id [matching])
-      (dispatch conn :crazy-eights/play player-id (:db/id matching) nil)
-      (is (empty? (crazy-eights-hand conn player-id)) "the winning play empties the hand")
-      (is (= (:scene/crazy-eights-winner (scene-crazy-eights conn)) player-id))
-      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 0)
-          "the turn index is left alone -- the game is over, not paused"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[player-id _] (crazy-eights-players (entity @conn minigame-id))
+              top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              ;; Excludes top-card's own id (every card trivially
+              ;; "matches" itself by rank, so without this a naive scan
+              ;; can pick top-card right back as "matching") AND
+              ;; excludes 8s (always "playable" regardless of top/suit
+              ;; -- an 8 landing here would need a real declared suit,
+              ;; not the `nil` this test dispatches with).
+              matching (some #(if (and (not= (:db/id %) (:db/id top-card))
+                                        (not= (:card/rank %) :eight)
+                                        (crazy-eights/playable? % top-card (:card/suit top-card)))
+                                 %)
+                             (:deck/cards (crazy-eights-deck (entity @conn minigame-id))))]
+          (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+          (move-cards! conn player-id [matching])
+          (dispatch conn :crazy-eights/play minigame-id player-id (:db/id matching) nil)
+          (is (empty? (crazy-eights-hand (entity @conn minigame-id) player-id)) "the winning play empties the hand")
+          (is (= (:minigame/winner (entity @conn minigame-id)) player-id))
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+              "the turn index is left alone -- the game is over, not paused"))))))
 
 (deftest test-crazy-eights-play-after-external-bench-targets-players-real-neighbor
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[first-id second-id _third-id] (:scene/crazy-eights-players (scene-crazy-eights conn))
-          top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (current-deck conn))))
-          ;; Excludes 8s too -- always "playable" regardless of top/
-          ;; suit, but this test dispatches with a `nil` suit, which
-          ;; would corrupt :scene/crazy-eights-suit if `matching`
-          ;; happened to land on one.
-          matching (some #(if (and (not= (:db/id %) (:db/id top-card))
-                                    (not= (:card/rank %) :eight)
-                                    (crazy-eights/playable? % top-card (:card/suit top-card)))
-                             %)
-                         (:deck/cards (current-deck conn)))
-          ;; A filler so playing `matching` doesn't ALSO empty second-
-          ;; id's hand and win -- this test is about turn resolution,
-          ;; not the win condition.
-          filler (first (remove (comp #{(:db/id top-card) (:db/id matching)} :db/id)
-                                 (:deck/cards (current-deck conn))))]
-      ;; Bench the CURRENT turn holder (index 0) -- the stored
-      ;; :scene/crazy-eights-turn-index (still 0) now points at a
-      ;; benched seat, no longer matching second-id's own real position
-      ;; (1). Same regression Old Maid's live smoke test first caught:
-      ;; :crazy-eights/play must derive 'next' from the PLAYER's own
-      ;; resolved position, not the raw stored index, or the turn would
-      ;; land right back on second-id instead of advancing to third-id.
-      (set-discard-top! conn top-card (:card/suit top-card))
-      (dispatch conn :player/set-active first-id false)
-      (move-cards! conn second-id [matching filler])
-      (dispatch conn :crazy-eights/play second-id (:db/id matching) nil)
-      (is (= (:scene/crazy-eights-turn-index (scene-crazy-eights conn)) 2)
-          "turn advances to third-id's real index, never back onto second-id itself"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (crazy-eights-deck (entity @conn minigame-id)))
+        (let [[first-id second-id _third-id] (crazy-eights-players (entity @conn minigame-id))
+              top-card (first (remove (comp #{:eight} :card/rank) (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))
+              ;; Excludes 8s too -- always "playable" regardless of
+              ;; top/suit, but this test dispatches with a `nil` suit,
+              ;; which would corrupt :minigame/suit if `matching`
+              ;; happened to land on one.
+              matching (some #(if (and (not= (:db/id %) (:db/id top-card))
+                                        (not= (:card/rank %) :eight)
+                                        (crazy-eights/playable? % top-card (:card/suit top-card)))
+                                 %)
+                             (:deck/cards (crazy-eights-deck (entity @conn minigame-id))))
+              ;; A filler so playing `matching` doesn't ALSO empty
+              ;; second-id's hand and win -- this test is about turn
+              ;; resolution, not the win condition.
+              filler (first (remove (comp #{(:db/id top-card) (:db/id matching)} :db/id)
+                                     (:deck/cards (crazy-eights-deck (entity @conn minigame-id)))))]
+          ;; Bench the CURRENT turn holder (index 0) -- the stored
+          ;; :minigame/turn-index (still 0) now points at a benched
+          ;; seat, no longer matching second-id's own real position (1).
+          ;; Same regression Old Maid's live smoke test first caught:
+          ;; :crazy-eights/play must derive 'next' from the PLAYER's own
+          ;; resolved position, not the raw stored index, or the turn
+          ;; would land right back on second-id instead of advancing to
+          ;; third-id.
+          (set-discard-top! conn minigame-id top-card (:card/suit top-card))
+          (dispatch conn :player/set-active first-id false)
+          (move-cards! conn second-id [matching filler])
+          (dispatch conn :crazy-eights/play minigame-id second-id (:db/id matching) nil)
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "turn advances to third-id's real index, never back onto second-id itself"))))))
 
-(deftest test-crazy-eights-end
+(deftest test-crazy-eights-remove
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :crazy-eights/start)
-    (let [deck-id (:db/id (current-deck conn))]
-      (dispatch conn :crazy-eights/end)
-      (let [scene (scene-crazy-eights conn)]
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            deck-id (:db/id (crazy-eights-deck (entity @conn minigame-id)))
+            seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
         (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
-        (is (nil? (:scene/crazy-eights-players scene)))
-        (is (nil? (:scene/crazy-eights-turn-index scene)))
-        (is (nil? (:scene/crazy-eights-deck scene)))
-        (is (nil? (:scene/crazy-eights-suit scene)))
-        (is (nil? (:scene/crazy-eights-winner scene)))
-        (is (false? (:scene/neutral-authority? scene)))))))
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
+        (is (empty? (crazy-eights-sessions conn)))))))
+
+(deftest test-crazy-eights-leaves-scene-neutral-authority-untouched
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:crazy-eights/game})
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :crazy-eights/start ids)
+      (is (:scene/neutral-authority? (scene-crazy-eights conn))
+          "starting a table doesn't touch the scene-wide flag")
+      (let [minigame-id (minigame-viewing-id conn)]
+        (is (:minigame/neutral-authority? (entity @conn minigame-id))
+            "the SESSION gets its own hand-visibility default instead")
+        (dispatch conn :minigame/remove minigame-id)
+        (is (:scene/neutral-authority? (scene-crazy-eights conn))
+            "ending the table doesn't touch it either")))))
 
 ;; --- Rummy (example game) ---
+;; The fifth game ported onto the generic mini-game session scaffolding
+;; (see events.cljs's 'Mini-game sessions' section) -- a session-scoped
+;; prototype for letting several independent, arbitrary-subset-of-the-
+;; roster tables run nested inside one scene at once.
 (defn ^:private scene-rummy [conn]
   (:camera/scene (:user/camera (user conn))))
 
-(defn ^:private rummy-hand [conn holder-id]
-  (cards/cards-of-holder (:deck/cards (current-deck conn)) holder-id))
+(defn ^:private rummy-sessions [conn]
+  (filter (comp #{:rummy} :minigame/kind) (:scene/minigames (scene-rummy conn))))
 
-(defn ^:private rummy-scored [conn]
-  (by-location (current-deck conn) :scored))
+(defn ^:private rummy-session [conn]
+  (first (rummy-sessions conn)))
+
+(defn ^:private rummy-deck [minigame]
+  (:minigame/deck minigame))
+
+(defn ^:private rummy-hand [minigame holder-id]
+  (cards/cards-of-holder (:deck/cards (rummy-deck minigame)) holder-id))
+
+(defn ^:private rummy-scored [minigame]
+  (by-location (rummy-deck minigame) :scored))
+
+(defn ^:private rummy-players [minigame]
+  (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats minigame))))
 
 (deftest test-rummy-start
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [scene (scene-rummy conn)
-          deck (current-deck conn)
-          active-ids (into #{} (map :db/id) (root-players conn))]
-      (is (= (set (:scene/rummy-players scene)) active-ids)
-          "the turn cycle is exactly the currently-active roster players")
-      (is (= (:scene/rummy-turn-index scene) 0))
-      (is (false? (:scene/rummy-drawn? scene)))
-      (is (:scene/neutral-authority? scene))
-      (is (= (:deck/name deck) "Standard 52-Card Deck")
-          "the purest reuse case yet -- no deck modification at all")
-      (is (= (count (:deck/cards deck)) 52))
-      (is (every? #(= 6 (count (rummy-hand conn %))) active-ids)
-          "every active player gets EXACTLY 6 -- no auto-discard at deal
-           time the way Old Maid has, fully deterministic")
-      (is (= (count (by-location deck :discard)) 1) "exactly one starting card is face up")
-      (is (= (count (by-location deck :draw)) (- 52 18 1))
-          "everything not dealt or flipped stays in the draw pile"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame (rummy-session conn)
+            deck (rummy-deck minigame)
+            players (rummy-players minigame)]
+        (is (= (set players) (set ids))
+            "the turn cycle is exactly the participants given to
+             :rummy/start")
+        (is (= (:minigame/turn-index minigame) 0))
+        (is (false? (:minigame/drawn? minigame)))
+        (is (:minigame/neutral-authority? minigame))
+        (is (empty? (:scene/decks (scene-rummy conn)))
+            "the session's deck is NOT also added to :scene/decks")
+        (is (= (:deck/name deck) "Standard 52-Card Deck")
+            "the purest reuse case yet -- no deck modification at all")
+        (is (= (count (:deck/cards deck)) 52))
+        (is (every? #(= 6 (count (rummy-hand minigame %))) players)
+            "every participant gets EXACTLY 6 -- no auto-discard at deal
+             time the way Old Maid has, fully deterministic")
+        (is (= (count (by-location deck :discard)) 1) "exactly one starting card is face up")
+        (is (= (count (by-location deck :draw)) (- 52 18 1))
+            "everything not dealt or flipped stays in the draw pile")))))
+
+(deftest test-rummy-start-rejected-without-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (is (empty? (rummy-sessions conn))
+          "rejected -- :rummy/start checks :rummy/game is actually
+           enabled on the scene's own game-type"))))
 
 (deftest test-rummy-draw-from-pile
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
-          draw-before (count (by-location (current-deck conn) :draw))
-          hand-before (count (rummy-hand conn player-id))]
-      (dispatch conn :rummy/draw-from-pile player-id)
-      (is (= (count (rummy-hand conn player-id)) (inc hand-before)))
-      (is (= (count (by-location (current-deck conn) :draw)) (dec draw-before)))
-      (is (:scene/rummy-drawn? (scene-rummy conn))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [player-id _] (rummy-players (entity @conn minigame-id))
+            draw-before (count (by-location (rummy-deck (entity @conn minigame-id)) :draw))
+            hand-before (count (rummy-hand (entity @conn minigame-id) player-id))]
+        (dispatch conn :rummy/draw-from-pile minigame-id player-id)
+        (is (= (count (rummy-hand (entity @conn minigame-id) player-id)) (inc hand-before)))
+        (is (= (count (by-location (rummy-deck (entity @conn minigame-id)) :draw)) (dec draw-before)))
+        (is (:minigame/drawn? (entity @conn minigame-id)))))))
 
 (deftest test-rummy-draw-from-discard
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
-          top (apply max-key :card/position (by-location (current-deck conn) :discard))
-          hand-before (count (rummy-hand conn player-id))]
-      (dispatch conn :rummy/draw-from-discard player-id)
-      (is (contains? (into #{} (map :db/id) (rummy-hand conn player-id)) (:db/id top)))
-      (is (= (count (rummy-hand conn player-id)) (inc hand-before)))
-      (is (empty? (by-location (current-deck conn) :discard))
-          "momentarily empty -- refilled by this player's own mandatory discard, same turn")
-      (is (:scene/rummy-drawn? (scene-rummy conn))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [player-id _] (rummy-players (entity @conn minigame-id))
+            top (apply max-key :card/position (by-location (rummy-deck (entity @conn minigame-id)) :discard))
+            hand-before (count (rummy-hand (entity @conn minigame-id) player-id))]
+        (dispatch conn :rummy/draw-from-discard minigame-id player-id)
+        (is (contains? (into #{} (map :db/id) (rummy-hand (entity @conn minigame-id) player-id)) (:db/id top)))
+        (is (= (count (rummy-hand (entity @conn minigame-id) player-id)) (inc hand-before)))
+        (is (empty? (by-location (rummy-deck (entity @conn minigame-id)) :discard))
+            "momentarily empty -- refilled by this player's own mandatory discard, same turn")
+        (is (:minigame/drawn? (entity @conn minigame-id)))))))
 
 (deftest test-rummy-second-draw-same-turn-rejected
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))]
-      (dispatch conn :rummy/draw-from-pile player-id)
-      (let [hand-after-first (count (rummy-hand conn player-id))
-            draw-after-first (count (by-location (current-deck conn) :draw))]
-        (dispatch conn :rummy/draw-from-pile player-id)
-        (is (= (count (rummy-hand conn player-id)) hand-after-first) "no-op, already drawn this turn")
-        (is (= (count (by-location (current-deck conn) :draw)) draw-after-first))
-        (dispatch conn :rummy/draw-from-discard player-id)
-        (is (= (count (rummy-hand conn player-id)) hand-after-first)
-            "no-op -- the OTHER draw action is equally blocked, one draw total per turn")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [player-id _] (rummy-players (entity @conn minigame-id))]
+        (dispatch conn :rummy/draw-from-pile minigame-id player-id)
+        (let [hand-after-first (count (rummy-hand (entity @conn minigame-id) player-id))
+              draw-after-first (count (by-location (rummy-deck (entity @conn minigame-id)) :draw))]
+          (dispatch conn :rummy/draw-from-pile minigame-id player-id)
+          (is (= (count (rummy-hand (entity @conn minigame-id) player-id)) hand-after-first) "no-op, already drawn this turn")
+          (is (= (count (by-location (rummy-deck (entity @conn minigame-id)) :draw)) draw-after-first))
+          (dispatch conn :rummy/draw-from-discard minigame-id player-id)
+          (is (= (count (rummy-hand (entity @conn minigame-id) player-id)) hand-after-first)
+              "no-op -- the OTHER draw action is equally blocked, one draw total per turn"))))))
 
 (deftest test-rummy-discard-before-draw-rejected
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
-          card (first (rummy-hand conn player-id))]
-      (dispatch conn :rummy/discard player-id (:db/id card))
-      (is (contains? (into #{} (map :db/id) (rummy-hand conn player-id)) (:db/id card))
-          "no-op -- must draw before discarding")
-      (is (= (:scene/rummy-turn-index (scene-rummy conn)) 0)))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [player-id _] (rummy-players (entity @conn minigame-id))
+            card (first (rummy-hand (entity @conn minigame-id) player-id))]
+        (dispatch conn :rummy/discard minigame-id player-id (:db/id card))
+        (is (contains? (into #{} (map :db/id) (rummy-hand (entity @conn minigame-id) player-id)) (:db/id card))
+            "no-op -- must draw before discarding")
+        (is (= (:minigame/turn-index (entity @conn minigame-id)) 0))))))
 
 (deftest test-rummy-discard-ends-turn
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))]
-      (dispatch conn :rummy/draw-from-pile player-id)
-      (let [card (first (rummy-hand conn player-id))]
-        (dispatch conn :rummy/discard player-id (:db/id card))
-        (is (not (contains? (into #{} (map :db/id) (rummy-hand conn player-id)) (:db/id card))))
-        (is (= (:db/id (apply max-key :card/position (by-location (current-deck conn) :discard)))
-               (:db/id card)))
-        (is (false? (:scene/rummy-drawn? (scene-rummy conn)))
-            "cleared -- the next player must draw before they can discard too")
-        (is (= (:scene/rummy-turn-index (scene-rummy conn)) 1))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [player-id _] (rummy-players (entity @conn minigame-id))]
+        (dispatch conn :rummy/draw-from-pile minigame-id player-id)
+        (let [card (first (rummy-hand (entity @conn minigame-id) player-id))]
+          (dispatch conn :rummy/discard minigame-id player-id (:db/id card))
+          (is (not (contains? (into #{} (map :db/id) (rummy-hand (entity @conn minigame-id) player-id)) (:db/id card))))
+          (is (= (:db/id (apply max-key :card/position (by-location (rummy-deck (entity @conn minigame-id)) :discard)))
+                 (:db/id card)))
+          (is (false? (:minigame/drawn? (entity @conn minigame-id)))
+              "cleared -- the next player must draw before they can discard too")
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)))))))
 
 (deftest test-rummy-score-fresh-set
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
-          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id (take 3 sevens))
-      (dispatch conn :rummy/score player-id :seven)
-      (is (= (count (rummy-scored conn)) 3))
-      (is (every? #(= (:db/id (:card/holder %)) player-id) (rummy-scored conn))))))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (rummy-deck (entity @conn minigame-id)))
+        (let [[player-id other-id] (rummy-players (entity @conn minigame-id))
+              sevens (filter (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              ;; A filler for the OTHER seated player -- clear-cards-to-
+              ;; draw! emptied every hand, and rummy-finished? treats
+              ;; ANY seated player's empty hand as game-over, which
+              ;; would reject this score outright before it's even
+              ;; about the fresh-set logic being tested here.
+              filler (first (remove (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id)))))]
+          (move-cards! conn player-id (take 3 sevens))
+          (move-cards! conn other-id [filler])
+          (dispatch conn :rummy/score minigame-id player-id :seven)
+          (is (= (count (rummy-scored (entity @conn minigame-id))) 3))
+          (is (every? #(= (:db/id (:card/holder %)) player-id) (rummy-scored (entity @conn minigame-id)))))))))
 
 (deftest test-rummy-score-lay-off-fourth-by-different-player
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-a player-b] (:scene/rummy-players (scene-rummy conn))
-          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))
-          ;; A filler for player-a so scoring their 3 sevens doesn't
-          ;; ALSO empty their hand and end the game (rummy-finished?
-          ;; would then reject player-b's later lay-off outright) --
-          ;; this test is about shared-credit lay-off, not game-end.
-          filler (first (remove (comp #{:seven} :card/rank) (:deck/cards (current-deck conn))))]
-      (move-cards! conn player-a (conj (vec (take 3 sevens)) filler))
-      (move-cards! conn player-b [(nth sevens 3)])
-      (dispatch conn :rummy/score player-a :seven)
-      (dispatch conn :rummy/score player-b :seven)
-      (is (= (count (rummy-scored conn)) 4) "all 4 sevens now scored")
-      (let [scores (frequencies (map (comp :db/id :card/holder) (rummy-scored conn)))]
-        (is (= (get scores player-a) 3))
-        (is (= (get scores player-b) 1)
-            "player-b gets individual credit for laying off the 4th, even
-             though player-a started the set")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (rummy-deck (entity @conn minigame-id)))
+        (let [[player-a player-b] (rummy-players (entity @conn minigame-id))
+              sevens (filter (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              ;; A filler for player-a so scoring their 3 sevens doesn't
+              ;; ALSO empty their hand and end the game (rummy-finished?
+              ;; would then reject player-b's later lay-off outright) --
+              ;; this test is about shared-credit lay-off, not game-end.
+              filler (first (remove (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id)))))]
+          (move-cards! conn player-a (conj (vec (take 3 sevens)) filler))
+          (move-cards! conn player-b [(nth sevens 3)])
+          (dispatch conn :rummy/score minigame-id player-a :seven)
+          (dispatch conn :rummy/score minigame-id player-b :seven)
+          (is (= (count (rummy-scored (entity @conn minigame-id))) 4) "all 4 sevens now scored")
+          (let [scores (frequencies (map (comp :db/id :card/holder) (rummy-scored (entity @conn minigame-id))))]
+            (is (= (get scores player-a) 3))
+            (is (= (get scores player-b) 1)
+                "player-b gets individual credit for laying off the 4th, even
+                 though player-a started the set")))))))
 
 (deftest test-rummy-score-over-full-rank-rejected
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
-          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id sevens)
-      (dispatch conn :rummy/score player-id :seven)
-      (is (= (count (rummy-scored conn)) 4))
-      (dispatch conn :rummy/score player-id :seven)
-      (is (= (count (rummy-scored conn)) 4) "no-op -- the rank is already fully scored"))))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (rummy-deck (entity @conn minigame-id)))
+        (let [[player-id other-id] (rummy-players (entity @conn minigame-id))
+              sevens (filter (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              ;; A filler for the OTHER seated player -- see the same
+              ;; note in test-rummy-score-fresh-set.
+              filler (first (remove (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id)))))]
+          (move-cards! conn player-id sevens)
+          (move-cards! conn other-id [filler])
+          (dispatch conn :rummy/score minigame-id player-id :seven)
+          (is (= (count (rummy-scored (entity @conn minigame-id))) 4))
+          (dispatch conn :rummy/score minigame-id player-id :seven)
+          (is (= (count (rummy-scored (entity @conn minigame-id))) 4) "no-op -- the rank is already fully scored"))))))
 
 (deftest test-rummy-score-run-requires-element-enabled
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
-          run-cards (filter (fn [c] (and (= (:card/suit c) :hearts)
-                                          (contains? #{:five :six :seven} (:card/rank c))))
-                             (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id run-cards)
-      (dispatch conn :rummy/score-run player-id (mapv :db/id run-cards))
-      (is (empty? (rummy-scored conn)) "no-op -- :rummy/runs isn't enabled by default"))))
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (rummy-deck (entity @conn minigame-id)))
+        (let [[player-id other-id] (rummy-players (entity @conn minigame-id))
+              run-cards (filter (fn [c] (and (= (:card/suit c) :hearts)
+                                              (contains? #{:five :six :seven} (:card/rank c))))
+                                 (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              ;; A filler for the OTHER seated player -- see the same
+              ;; note in test-rummy-score-fresh-set.
+              filler (first (remove (comp (set (map :db/id run-cards)) :db/id)
+                                     (:deck/cards (rummy-deck (entity @conn minigame-id)))))]
+          (move-cards! conn player-id run-cards)
+          (move-cards! conn other-id [filler])
+          (dispatch conn :rummy/score-run minigame-id player-id (mapv :db/id run-cards))
+          (is (empty? (rummy-scored (entity @conn minigame-id))) "no-op -- :rummy/runs isn't enabled by default"))))))
 
 (deftest test-rummy-score-run-when-enabled
   (let [conn (ds/conn-from-db (initial-data true))]
-    (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (clear-all-cards-to-draw! conn)
     (set-enabled-elements! conn #{:rummy/game :rummy/runs})
-    (let [[player-id] (:scene/rummy-players (scene-rummy conn))
-          run-cards (filter (fn [c] (and (= (:card/suit c) :hearts)
-                                          (contains? #{:five :six :seven} (:card/rank c))))
-                             (:deck/cards (current-deck conn)))]
-      (move-cards! conn player-id run-cards)
-      (dispatch conn :rummy/score-run player-id (mapv :db/id run-cards))
-      (is (= (count (rummy-scored conn)) 3))
-      (is (every? #(= (:db/id (:card/holder %)) player-id) (rummy-scored conn))))))
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (rummy-deck (entity @conn minigame-id)))
+        (let [[player-id other-id] (rummy-players (entity @conn minigame-id))
+              run-cards (filter (fn [c] (and (= (:card/suit c) :hearts)
+                                              (contains? #{:five :six :seven} (:card/rank c))))
+                                 (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              ;; A filler for the OTHER seated player -- see the same
+              ;; note in test-rummy-score-fresh-set.
+              filler (first (remove (comp (set (map :db/id run-cards)) :db/id)
+                                     (:deck/cards (rummy-deck (entity @conn minigame-id)))))]
+          (move-cards! conn player-id run-cards)
+          (move-cards! conn other-id [filler])
+          (dispatch conn :rummy/score-run minigame-id player-id (mapv :db/id run-cards))
+          (is (= (count (rummy-scored (entity @conn minigame-id))) 3))
+          (is (every? #(= (:db/id (:card/holder %)) player-id) (rummy-scored (entity @conn minigame-id)))))))))
 
 (deftest test-rummy-draw-from-pile-reshuffles-discard-preserving-top-card
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[player-id _] (:scene/rummy-players (scene-rummy conn))
-          deck (current-deck conn)
-          top-card (apply max-key :card/position (by-location deck :discard))
-          remaining-draw (by-location deck :draw)
-          pool-size (count remaining-draw)]
-      ;; Empty the draw pile entirely -- every remaining :draw card
-      ;; moves into the discard pile UNDER the live top card (lower
-      ;; positions), simulating a long game where most of the deck has
-      ;; been played.
-      (transact! conn
-        (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position (- (inc i))})
-                      remaining-draw))
-      (is (empty? (by-location (current-deck conn) :draw)) "draw pile is now empty, by construction")
-      (dispatch conn :rummy/draw-from-pile player-id)
-      (let [deck (current-deck conn)]
-        (is (= (count (by-location deck :draw)) (dec pool-size))
-            "the reclaimed discard pile (minus the 1 just drawn) is the new draw pile")
-        (is (= (count (by-location deck :discard)) 1) "only the original top card remains in discard")
-        (is (= (:db/id (apply max-key :card/position (by-location deck :discard))) (:db/id top-card))
-            "the live top card itself was never touched by the reshuffle")
-        (is (:scene/rummy-drawn? (scene-rummy conn)))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [player-id _] (rummy-players (entity @conn minigame-id))
+            deck (rummy-deck (entity @conn minigame-id))
+            top-card (apply max-key :card/position (by-location deck :discard))
+            remaining-draw (by-location deck :draw)
+            pool-size (count remaining-draw)]
+        ;; Empty the draw pile entirely -- every remaining :draw card
+        ;; moves into the discard pile UNDER the live top card (lower
+        ;; positions), simulating a long game where most of the deck has
+        ;; been played.
+        (transact! conn
+          (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :discard :card/position (- (inc i))})
+                        remaining-draw))
+        (is (empty? (by-location (rummy-deck (entity @conn minigame-id)) :draw)) "draw pile is now empty, by construction")
+        (dispatch conn :rummy/draw-from-pile minigame-id player-id)
+        (let [deck (rummy-deck (entity @conn minigame-id))]
+          (is (= (count (by-location deck :draw)) (dec pool-size))
+              "the reclaimed discard pile (minus the 1 just drawn) is the new draw pile")
+          (is (= (count (by-location deck :discard)) 1) "only the original top card remains in discard")
+          (is (= (:db/id (apply max-key :card/position (by-location deck :discard))) (:db/id top-card))
+              "the live top card itself was never touched by the reshuffle")
+          (is (:minigame/drawn? (entity @conn minigame-id))))))))
 
 (deftest test-rummy-game-ends-and-tally-can-differ-from-who-emptied
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (clear-all-cards-to-draw! conn)
-    (let [[player-a player-b] (:scene/rummy-players (scene-rummy conn))
-          kings (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn)))
-          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))
-          filler (take 2 (remove (comp #{:king :seven} :card/rank) (:deck/cards (current-deck conn))))]
-      ;; player-a's ENTIRE hand is exactly 3 kings -- scoring them
-      ;; empties it completely and ends the game, without ever needing
-      ;; a turn or a discard (scoring is never turn-gated).
-      (move-cards! conn player-a (take 3 kings))
-      ;; player-b holds all 4 sevens plus 2 unrelated cards -- their
-      ;; hand stays non-empty even after scoring the sevens.
-      (move-cards! conn player-b (concat sevens filler))
-      ;; player-b scores FIRST, while the game is still active --
-      ;; player-a's own score (below) is what actually ends it, and
-      ;; once it does, rummy-finished? correctly blocks anything
-      ;; further, so ordering matters: player-b's score must land
-      ;; before player-a's does.
-      (dispatch conn :rummy/score player-b :seven)
-      (dispatch conn :rummy/score player-a :king)
-      (is (empty? (rummy-hand conn player-a)) "player-a's hand is empty -- the game has ended")
-      (is (seq (rummy-hand conn player-b)) "player-b's hand is NOT empty -- they didn't end the game")
-      (let [scores (frequencies (map (comp :db/id :card/holder) (rummy-scored conn)))]
-        (is (= (get scores player-a) 3))
-        (is (= (get scores player-b) 4))
-        (is (> (get scores player-b) (get scores player-a))
-            "player-b holds MORE scored cards despite NOT being the one
-             who ended the game -- the tallied winner (turn-order/
-             winners over this same scores map, computed live by
-             panel_rummy.cljs) would correctly be player-b, not
-             player-a")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)]
+        (clear-cards-to-draw! conn (rummy-deck (entity @conn minigame-id)))
+        (let [[player-a player-b] (rummy-players (entity @conn minigame-id))
+              kings (filter (comp #{:king} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              sevens (filter (comp #{:seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id))))
+              filler (take 2 (remove (comp #{:king :seven} :card/rank) (:deck/cards (rummy-deck (entity @conn minigame-id)))))]
+          ;; player-a's ENTIRE hand is exactly 3 kings -- scoring them
+          ;; empties it completely and ends the game, without ever
+          ;; needing a turn or a discard (scoring is never turn-gated).
+          (move-cards! conn player-a (take 3 kings))
+          ;; player-b holds all 4 sevens plus 2 unrelated cards -- their
+          ;; hand stays non-empty even after scoring the sevens.
+          (move-cards! conn player-b (concat sevens filler))
+          ;; player-b scores FIRST, while the game is still active --
+          ;; player-a's own score (below) is what actually ends it, and
+          ;; once it does, rummy-finished? correctly blocks anything
+          ;; further, so ordering matters: player-b's score must land
+          ;; before player-a's does.
+          (dispatch conn :rummy/score minigame-id player-b :seven)
+          (dispatch conn :rummy/score minigame-id player-a :king)
+          (is (empty? (rummy-hand (entity @conn minigame-id) player-a)) "player-a's hand is empty -- the game has ended")
+          (is (seq (rummy-hand (entity @conn minigame-id) player-b)) "player-b's hand is NOT empty -- they didn't end the game")
+          (let [scores (frequencies (map (comp :db/id :card/holder) (rummy-scored (entity @conn minigame-id))))]
+            (is (= (get scores player-a) 3))
+            (is (= (get scores player-b) 4))
+            (is (> (get scores player-b) (get scores player-a))
+                "player-b holds MORE scored cards despite NOT being the one
+                 who ended the game -- the tallied winner (turn-order/
+                 winners over this same scores map, computed live by
+                 panel_rummy.cljs) would correctly be player-b, not
+                 player-a")))))))
 
 (deftest test-rummy-discard-after-external-bench-targets-players-real-neighbor
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [[first-id second-id _third-id] (:scene/rummy-players (scene-rummy conn))]
-      ;; Bench the CURRENT turn holder (index 0) -- the stored
-      ;; :scene/rummy-turn-index (still 0) now points at a benched
-      ;; seat, no longer matching second-id's own real position (1).
-      ;; Same regression class Old Maid's live smoke test first caught,
-      ;; and Crazy 8s' own analogous test guards against too.
-      (dispatch conn :player/set-active first-id false)
-      (dispatch conn :rummy/draw-from-pile second-id)
-      (let [card (first (rummy-hand conn second-id))]
-        (dispatch conn :rummy/discard second-id (:db/id card))
-        (is (= (:scene/rummy-turn-index (scene-rummy conn)) 2)
-            "turn advances to third-id's real index, never back onto second-id itself")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [first-id second-id _third-id] (rummy-players (entity @conn minigame-id))]
+        ;; Bench the CURRENT turn holder (index 0) -- the stored
+        ;; :minigame/turn-index (still 0) now points at a benched seat,
+        ;; no longer matching second-id's own real position (1). Same
+        ;; regression class Old Maid's live smoke test first caught,
+        ;; and Crazy 8s' own analogous test guards against too.
+        (dispatch conn :player/set-active first-id false)
+        (dispatch conn :rummy/draw-from-pile minigame-id second-id)
+        (let [card (first (rummy-hand (entity @conn minigame-id) second-id))]
+          (dispatch conn :rummy/discard minigame-id second-id (:db/id card))
+          (is (= (:minigame/turn-index (entity @conn minigame-id)) 2)
+              "turn advances to third-id's real index, never back onto second-id itself"))))))
 
-(deftest test-rummy-end
+(deftest test-rummy-remove
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :rummy/start)
-    (let [deck-id (:db/id (current-deck conn))]
-      (dispatch conn :rummy/end)
-      (let [scene (scene-rummy conn)]
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            deck-id (:db/id (rummy-deck (entity @conn minigame-id)))
+            seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
         (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
-        (is (nil? (:scene/rummy-players scene)))
-        (is (nil? (:scene/rummy-turn-index scene)))
-        (is (nil? (:scene/rummy-deck scene)))
-        (is (nil? (:scene/rummy-drawn? scene)))
-        (is (false? (:scene/neutral-authority? scene)))))))
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
+        (is (empty? (rummy-sessions conn)))))))
+
+(deftest test-rummy-leaves-scene-neutral-authority-untouched
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:rummy/game})
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :rummy/start ids)
+      (is (:scene/neutral-authority? (scene-rummy conn))
+          "starting a table doesn't touch the scene-wide flag")
+      (let [minigame-id (minigame-viewing-id conn)]
+        (is (:minigame/neutral-authority? (entity @conn minigame-id))
+            "the SESSION gets its own hand-visibility default instead")
+        (dispatch conn :minigame/remove minigame-id)
+        (is (:scene/neutral-authority? (scene-rummy conn))
+            "ending the table doesn't touch it either")))))
 
 ;; --- War (example game) ---
+;; The sixth and last game ported onto the generic mini-game session
+;; scaffolding (see events.cljs's 'Mini-game sessions' section) -- a
+;; session-scoped prototype for letting several independent, arbitrary-
+;; subset-of-the-roster tables run nested inside one scene at once.
 (defn ^:private scene-war [conn]
   (:camera/scene (:user/camera (user conn))))
 
-(defn ^:private war-pile [conn player-id location]
-  (filter (fn [c] (and (= (:card/location c) location) (= (:db/id (:card/holder c)) player-id)))
-          (:deck/cards (current-deck conn))))
+(defn ^:private war-sessions [conn]
+  (filter (comp #{:war} :minigame/kind) (:scene/minigames (scene-war conn))))
 
-(defn ^:private war-total [conn player-id]
-  (+ (count (war-pile conn player-id :draw)) (count (war-pile conn player-id :won))))
+(defn ^:private war-session [conn]
+  (first (war-sessions conn)))
+
+(defn ^:private war-deck [minigame]
+  (:minigame/deck minigame))
+
+(defn ^:private war-players [minigame]
+  (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats minigame))))
+
+(defn ^:private war-pile [minigame player-id location]
+  (filter (fn [c] (and (= (:card/location c) location) (= (:db/id (:card/holder c)) player-id)))
+          (:deck/cards (war-deck minigame))))
+
+(defn ^:private war-total [minigame player-id]
+  (+ (count (war-pile minigame player-id :draw)) (count (war-pile minigame player-id :won))))
 
 (defn ^:private set-war-draw!
   "Test helper: makes `cards` (first = top) EXACTLY `player-id`'s
@@ -2432,11 +3074,11 @@
    leaving `player-id`'s own piles an exact, uncontaminated match for
    `cards` -- callers bench `sink-id` (or fully strip-player! it
    afterward) so it doesn't show up as a live contender itself."
-  [conn player-id sink-id cards]
+  [conn minigame player-id sink-id cards]
   (let [wanted-ids (into #{} (map :db/id) cards)
-        leftover (concat (remove (comp wanted-ids :db/id) (war-pile conn player-id :draw))
-                          (war-pile conn player-id :won))
-        sink-start (count (war-pile conn sink-id :won))]
+        leftover (concat (remove (comp wanted-ids :db/id) (war-pile minigame player-id :draw))
+                          (war-pile minigame player-id :won))
+        sink-start (count (war-pile minigame sink-id :won))]
     (transact! conn
       (concat
        (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won
@@ -2450,9 +3092,9 @@
   "Test helper: moves ALL of `player-id`'s cards (both piles) to
    `to-id`'s :won pile, leaving `player-id` with nothing at all --
    used to construct a deterministic 'already eliminated' scenario."
-  [conn player-id to-id]
-  (let [cards (concat (war-pile conn player-id :draw) (war-pile conn player-id :won))
-        start (count (war-pile conn to-id :won))]
+  [conn minigame player-id to-id]
+  (let [cards (concat (war-pile minigame player-id :draw) (war-pile minigame player-id :won))
+        start (count (war-pile minigame to-id :won))]
     (transact! conn
       (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won
                                :card/holder to-id :card/position (+ start i)})
@@ -2460,148 +3102,198 @@
 
 (deftest test-war-start
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [scene (scene-war conn)
-          deck (current-deck conn)
-          active-ids (into #{} (map :db/id) (root-players conn))]
-      (is (= (set (:scene/war-players scene)) active-ids)
-          "the turn cycle is exactly the currently-active roster players")
-      (is (nil? (:scene/war-contenders scene)))
-      (is (nil? (:scene/war-last-round scene)))
-      (is (= (count (:deck/cards deck)) 52) "the full deck, nothing removed")
-      (is (every? #(= (:card/location %) :draw) (:deck/cards deck))
-          "the ENTIRE deck goes straight into personal draw piles -- no shared pile at all")
-      (is (every? :card/holder (:deck/cards deck))
-          "every single card belongs to exactly one player from the start")
-      (is (= (apply + (map #(war-total conn %) (:scene/war-players scene))) 52))
-      (is (= (set (map #(war-total conn %) (:scene/war-players scene))) #{17 18})
-          "round-robin dealing 52 cards among 3 players -- 18/17/17"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame (war-session conn)
+            deck (war-deck minigame)
+            players (war-players minigame)]
+        (is (= (set players) (set ids))
+            "the players are exactly the participants given to
+             :war/start")
+        (is (nil? (:minigame/contenders minigame)))
+        (is (nil? (:minigame/last-round minigame)))
+        (is (empty? (:scene/decks (scene-war conn)))
+            "the session's deck is NOT also added to :scene/decks")
+        (is (= (count (:deck/cards deck)) 52) "the full deck, nothing removed")
+        (is (every? #(= (:card/location %) :draw) (:deck/cards deck))
+            "the ENTIRE deck goes straight into personal draw piles -- no shared pile at all")
+        (is (every? :card/holder (:deck/cards deck))
+            "every single card belongs to exactly one player from the start")
+        (is (= (apply + (map #(war-total minigame %) players)) 52))
+        (is (= (set (map #(war-total minigame %) players)) #{17 18})
+            "round-robin dealing 52 cards among 3 players -- 18/17/17")))))
+
+(deftest test-war-start-rejected-without-element-enabled
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (is (empty? (war-sessions conn))
+          "rejected -- :war/start checks :war/game is actually enabled
+           on the scene's own game-type"))))
 
 (deftest test-war-round-clear-winner
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [[p1 p2 sink] (:scene/war-players (scene-war conn))
-          king (first (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn))))
-          two (first (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn))))]
-      (dispatch conn :player/set-active sink false)
-      (set-war-draw! conn p1 sink [king])
-      (set-war-draw! conn p2 sink [two])
-      (dispatch conn :war/play-round)
-      (is (nil? (:scene/war-contenders (scene-war conn))) "resolved -- no ongoing war")
-      (is (= (:winner-id (:scene/war-last-round (scene-war conn))) p1))
-      (is (= (:cards-won (:scene/war-last-round (scene-war conn))) 2))
-      (is (= (set (map :db/id (war-pile conn p1 :won))) #{(:db/id king) (:db/id two)})
-          "p1 wins both cards played this round")
-      (is (empty? (war-pile conn p2 :won)))
-      (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn))))
-          "the pot is empty again -- fully swept to the winner"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [p1 p2 sink] (war-players (entity @conn minigame-id))
+            king (first (filter (comp #{:king} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))
+            two (first (filter (comp #{:two} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))]
+        (dispatch conn :player/set-active sink false)
+        (set-war-draw! conn (entity @conn minigame-id) p1 sink [king])
+        (set-war-draw! conn (entity @conn minigame-id) p2 sink [two])
+        (dispatch conn :war/play-round minigame-id)
+        (is (nil? (:minigame/contenders (entity @conn minigame-id))) "resolved -- no ongoing war")
+        (is (= (:winner-id (:minigame/last-round (entity @conn minigame-id))) p1))
+        (is (= (:cards-won (:minigame/last-round (entity @conn minigame-id))) 2))
+        (is (= (set (map :db/id (war-pile (entity @conn minigame-id) p1 :won))) #{(:db/id king) (:db/id two)})
+            "p1 wins both cards played this round")
+        (is (empty? (war-pile (entity @conn minigame-id) p2 :won)))
+        (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (war-deck (entity @conn minigame-id)))))
+            "the pot is empty again -- fully swept to the winner")))))
 
 (deftest test-war-tie-then-continue
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [[p1 p2 sink] (:scene/war-players (scene-war conn))
-          sevens (filter (comp #{:seven} :card/rank) (:deck/cards (current-deck conn)))
-          [s1 s2] (take 2 sevens)
-          king (first (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn))))
-          three (first (filter (comp #{:three} :card/rank) (:deck/cards (current-deck conn))))]
-      (dispatch conn :player/set-active sink false)
-      (set-war-draw! conn p1 sink [s1 king])
-      (set-war-draw! conn p2 sink [s2 three])
-      (dispatch conn :war/play-round)
-      (is (= (set (:scene/war-contenders (scene-war conn))) #{p1 p2}) "both played a 7 -- tied, war!")
-      (is (nil? (:scene/war-last-round (scene-war conn))) "not resolved yet")
-      (is (= (count (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn)))) 2)
-          "both 7s sit in the pot")
-      (is (empty? (war-pile conn p1 :won)))
-      (dispatch conn :war/play-round)
-      (is (nil? (:scene/war-contenders (scene-war conn))) "resolved -- p1's king beats p2's three")
-      (is (= (:winner-id (:scene/war-last-round (scene-war conn))) p1))
-      (is (= (:cards-won (:scene/war-last-round (scene-war conn))) 4))
-      (is (= (set (map :db/id (war-pile conn p1 :won)))
-             #{(:db/id s1) (:db/id s2) (:db/id king) (:db/id three)})
-          "the WHOLE accumulated pot -- both 7s plus both escalation cards -- goes to p1")
-      (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn))))))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [p1 p2 sink] (war-players (entity @conn minigame-id))
+            sevens (filter (comp #{:seven} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id))))
+            [s1 s2] (take 2 sevens)
+            king (first (filter (comp #{:king} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))
+            three (first (filter (comp #{:three} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))]
+        (dispatch conn :player/set-active sink false)
+        (set-war-draw! conn (entity @conn minigame-id) p1 sink [s1 king])
+        (set-war-draw! conn (entity @conn minigame-id) p2 sink [s2 three])
+        (dispatch conn :war/play-round minigame-id)
+        (is (= (set (:minigame/contenders (entity @conn minigame-id))) #{p1 p2}) "both played a 7 -- tied, war!")
+        (is (nil? (:minigame/last-round (entity @conn minigame-id))) "not resolved yet")
+        (is (= (count (filter (comp #{:war} :card/location) (:deck/cards (war-deck (entity @conn minigame-id))))) 2)
+            "both 7s sit in the pot")
+        (is (empty? (war-pile (entity @conn minigame-id) p1 :won)))
+        (dispatch conn :war/play-round minigame-id)
+        (is (nil? (:minigame/contenders (entity @conn minigame-id))) "resolved -- p1's king beats p2's three")
+        (is (= (:winner-id (:minigame/last-round (entity @conn minigame-id))) p1))
+        (is (= (:cards-won (:minigame/last-round (entity @conn minigame-id))) 4))
+        (is (= (set (map :db/id (war-pile (entity @conn minigame-id) p1 :won)))
+               #{(:db/id s1) (:db/id s2) (:db/id king) (:db/id three)})
+            "the WHOLE accumulated pot -- both 7s plus both escalation cards -- goes to p1")
+        (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (war-deck (entity @conn minigame-id))))))))))
 
 (deftest test-war-personal-reshuffle
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [[p1 p2 sink] (:scene/war-players (scene-war conn))
-          two (first (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn))))]
-      (dispatch conn :player/set-active sink false)
-      (set-war-draw! conn p1 sink [])
-      (set-war-draw! conn p2 sink [two])
-      ;; Give p1 a concrete, non-empty :won pile (relocated from sink,
-      ;; which already absorbed p1's original leftovers) -- :draw stays
-      ;; genuinely empty, forcing a reshuffle on their next draw.
-      (let [p1-won (take 3 (war-pile conn sink :won))]
-        (transact! conn
-          (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won :card/holder p1 :card/position i})
-                       p1-won)))
-      (let [p1-total-before (war-total conn p1)
-            p2-total-before (war-total conn p2)]
-        (is (empty? (war-pile conn p1 :draw)) "p1's draw pile is genuinely empty")
-        (is (pos? (count (war-pile conn p1 :won))) "everything they hold sits in :won, unshuffled")
-        (dispatch conn :war/play-round)
-        (is (= (+ (war-total conn p1) (war-total conn p2)) (+ p1-total-before p2-total-before))
-            "no card lost or duplicated by the reshuffle -- the combined
-             total between the two participants is conserved, regardless
-             of who actually wins the round")
-        (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (current-deck conn))))
-            "the round still resolved -- reshuffling didn't block play")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [p1 p2 sink] (war-players (entity @conn minigame-id))
+            two (first (filter (comp #{:two} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))]
+        (dispatch conn :player/set-active sink false)
+        (set-war-draw! conn (entity @conn minigame-id) p1 sink [])
+        (set-war-draw! conn (entity @conn minigame-id) p2 sink [two])
+        ;; Give p1 a concrete, non-empty :won pile (relocated from sink,
+        ;; which already absorbed p1's original leftovers) -- :draw
+        ;; stays genuinely empty, forcing a reshuffle on their next
+        ;; draw.
+        (let [p1-won (take 3 (war-pile (entity @conn minigame-id) sink :won))]
+          (transact! conn
+            (map-indexed (fn [i c] {:db/id (:db/id c) :card/location :won :card/holder p1 :card/position i})
+                         p1-won)))
+        (let [p1-total-before (war-total (entity @conn minigame-id) p1)
+              p2-total-before (war-total (entity @conn minigame-id) p2)]
+          (is (empty? (war-pile (entity @conn minigame-id) p1 :draw)) "p1's draw pile is genuinely empty")
+          (is (pos? (count (war-pile (entity @conn minigame-id) p1 :won))) "everything they hold sits in :won, unshuffled")
+          (dispatch conn :war/play-round minigame-id)
+          (is (= (+ (war-total (entity @conn minigame-id) p1) (war-total (entity @conn minigame-id) p2))
+                 (+ p1-total-before p2-total-before))
+              "no card lost or duplicated by the reshuffle -- the combined
+               total between the two participants is conserved, regardless
+               of who actually wins the round")
+          (is (empty? (filter (comp #{:war} :card/location) (:deck/cards (war-deck (entity @conn minigame-id)))))
+              "the round still resolved -- reshuffling didn't block play"))))))
 
 (deftest test-war-elimination-drops-empty-handed-player
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [[p1 p2 p3] (:scene/war-players (scene-war conn))
-          king (first (filter (comp #{:king} :card/rank) (:deck/cards (current-deck conn))))
-          two (first (filter (comp #{:two} :card/rank) (:deck/cards (current-deck conn))))]
-      (set-war-draw! conn p1 p3 [king])
-      (set-war-draw! conn p2 p3 [two])
-      ;; p3 has NOTHING at all in either pile -- eliminated before this
-      ;; round even starts, no separate event needed.
-      (strip-player! conn p3 p1)
-      (dispatch conn :war/play-round)
-      (is (= (:winner-id (:scene/war-last-round (scene-war conn))) p1))
-      (is (= (:cards-won (:scene/war-last-round (scene-war conn))) 2)
-          "only p1's and p2's cards -- p3 never participated at all"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [p1 p2 p3] (war-players (entity @conn minigame-id))
+            king (first (filter (comp #{:king} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))
+            two (first (filter (comp #{:two} :card/rank) (:deck/cards (war-deck (entity @conn minigame-id)))))]
+        (set-war-draw! conn (entity @conn minigame-id) p1 p3 [king])
+        (set-war-draw! conn (entity @conn minigame-id) p2 p3 [two])
+        ;; p3 has NOTHING at all in either pile -- eliminated before
+        ;; this round even starts, no separate event needed.
+        (strip-player! conn (entity @conn minigame-id) p3 p1)
+        (dispatch conn :war/play-round minigame-id)
+        (is (= (:winner-id (:minigame/last-round (entity @conn minigame-id))) p1))
+        (is (= (:cards-won (:minigame/last-round (entity @conn minigame-id))) 2)
+            "only p1's and p2's cards -- p3 never participated at all")))))
 
 (deftest test-war-finished-when-one-player-has-everything
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [[p1 p2] (:scene/war-players (scene-war conn))]
-      (strip-player! conn p2 p1)
-      (is (zero? (war-total conn p2)) "p2 holds nothing -- eliminated")
-      (is (= (war-total conn p1) 52) "p1 holds the entire deck -- the win condition"))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            [p1 p2] (war-players (entity @conn minigame-id))]
+        (strip-player! conn (entity @conn minigame-id) p2 p1)
+        (is (zero? (war-total (entity @conn minigame-id) p2)) "p2 holds nothing -- eliminated")
+        (is (= (war-total (entity @conn minigame-id) p1) 52) "p1 holds the entire deck -- the win condition")))))
 
-(deftest test-war-end
+(deftest test-war-remove
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
     (dispatch conn :player/create :human)
-    (dispatch conn :war/start)
-    (let [deck-id (:db/id (current-deck conn))]
-      (dispatch conn :war/end)
-      (let [scene (scene-war conn)]
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (let [minigame-id (minigame-viewing-id conn)
+            deck-id (:db/id (war-deck (entity @conn minigame-id)))
+            seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
         (is (nil? (:db/id (entity @conn deck-id))) "the deck and its cards are retracted")
-        (is (nil? (:scene/war-players scene)))
-        (is (nil? (:scene/war-contenders scene)))
-        (is (nil? (:scene/war-last-round scene)))
-        (is (nil? (:scene/war-deck scene)))))))
+        (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
+        (is (empty? (war-sessions conn)))))))
+
+(deftest test-war-never-touches-scene-neutral-authority
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:war/game})
+    (dispatch conn :scene/toggle-neutral-authority true)
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :war/start ids)
+      (is (:scene/neutral-authority? (scene-war conn))
+          "War has no privacy concept at all -- it never touches the
+           scene-wide flag, unlike every other example game")
+      (let [minigame-id (minigame-viewing-id conn)]
+        (dispatch conn :minigame/remove minigame-id)
+        (is (:scene/neutral-authority? (scene-war conn)))))))
 
 ;; --- Neutral authority (impartial dealer) mode ---
 (deftest test-scene-toggle-neutral-authority
@@ -2634,18 +3326,22 @@
           "reverting to the default (non-neutral) scene restores the
            host's ordinary fallback authority"))))
 
-(deftest test-memory-start-sets-neutral-authority
+(deftest test-memory-leaves-scene-neutral-authority-untouched
   (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :scene/toggle-neutral-authority true)
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (is (:scene/neutral-authority? (scene-memory conn))
-        "Memory needs impartiality by default -- the host is often also
-         a competing player")))
-
-(deftest test-memory-end-clears-neutral-authority
-  (let [conn (ds/conn-from-db (initial-data true))]
     (dispatch conn :player/create :human)
-    (dispatch conn :memory/start)
-    (dispatch conn :memory/end)
-    (is (false? (:scene/neutral-authority? (scene-memory conn)))
-        "leaves no residue for whatever gets set up on this scene next")))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/start ids)
+      (is (:scene/neutral-authority? (scene-memory conn))
+          "starting a table doesn't touch the scene-wide flag -- it was
+           already true (a manual DM setting) and stays true")
+      (let [minigame-id (minigame-viewing-id conn)]
+        (is (:minigame/neutral-authority? (entity @conn minigame-id))
+            "the SESSION gets its own hand-visibility default instead --
+             Memory needs impartiality by default, the host is often
+             also a competing player")
+        (dispatch conn :minigame/remove minigame-id)
+        (is (:scene/neutral-authority? (scene-memory conn))
+            "ending the table doesn't touch it either")))))

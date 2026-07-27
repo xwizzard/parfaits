@@ -1576,6 +1576,136 @@
   [_ _ deck-id]
   [[:db/retractEntity deck-id]])
 
+;; --- Mini-game sessions ---
+;; Generic scaffolding for nested, opt-in mini-game sessions: an
+;; independent, simultaneously-runnable instance of a game (so far
+;; just Old Maid -- see ogres.app.component.panel-old-maid) seated by
+;; an arbitrary SUBSET of the roster, not "every active player" the
+;; way every other example game's singleton :scene/<game>-* attributes
+;; still assume. Mirrors :scene/decks' component/cardinality-many
+;; shape rather than a singleton -- see :scene/minigames in
+;; provider/state.cljs's schema. A session's participants are seat
+;; sub-entities (:minigame/seats), not a flat vector of raw player
+;; ids -- seating order needs an order, and a per-seat controller
+;; override (see minigame-controller-uuid) needs somewhere of its own
+;; to live rather than one shared, concurrently-editable map.
+
+(defn ^:private minigame-label
+  "An auto-numbered label for a new session of `kind` -- 'Old Maid 1',
+   'Old Maid 2', etc, one past however many sessions of that same kind
+   already exist among `existing-minigames` (a scene's :scene/
+   minigames). Not reused after a session ends, so labels stay unique
+   for the scene's lifetime even if that leaves gaps."
+  [existing-minigames kind title]
+  (let [existing (filter (comp #{kind} :minigame/kind) existing-minigames)]
+    (str title " " (inc (count existing)))))
+
+(defn ^:private minigame-seats
+  "`minigame`'s seats, in seating order."
+  [minigame]
+  (sort-by :seat/order (:minigame/seats minigame)))
+
+(defn ^:private minigame-controller-uuid
+  "The effective controller uuid for `seat` -- its own per-session
+   :seat/controller override if assigned, else its roster player's
+   ordinary :player/controller, else nil (host fallback). Feeds
+   ogres.app.player/authority? exactly like every other game's
+   controller-uuid resolution, just with this extra per-session layer
+   in front of the roster's own -- an NPC (or any seat) can be handed
+   to any connected participant for the duration of one table without
+   touching the roster's own persistent controller assignment."
+  [seat]
+  (or (get-in seat [:seat/controller :user/uuid])
+      (get-in seat [:seat/player :player/controller :user/uuid])))
+
+(defn ^:private minigame-create-tx
+  "Tx-data creating a new mini-game session's seats (one ref per
+   participant, in order) and the session entity itself, at the
+   caller's own already-reserved `minigame-id` -- the caller is
+   responsible for picking an id that doesn't collide with whatever
+   ELSE it's creating in the same transaction (e.g. `(dec deck-id)`
+   for a deck-owning game, matching deck-create-tx's own negative-
+   temp-id idiom, or a step past however many card/prop ids a dealt-
+   from-scratch game like Memory already consumed). `deck-id`, when
+   given, is an ALREADY-CREATED deck (typically deck-create-tx's own
+   result, composed by the caller the same way :go-fish/start composes
+   deck-create-tx with its own deal logic) -- deliberately NOT also
+   added to :scene/decks, so the session's own :db/retractEntity
+   cascades deck+cards for free later (see :minigame/remove), and
+   in-play game decks don't clutter the Decks panel while a table is
+   running. `deck-id` is nil for a game with no deck at all (e.g.
+   Memory, whose 'cards' are plain scene props tracked via :minigame/
+   props instead -- see minigame-props-cleanup-tx)."
+  [minigame-id kind label deck-id participant-ids]
+  (let [seats (map-indexed
+               (fn [i player-id] {:db/id (- minigame-id 1 i) :seat/player player-id :seat/order i})
+               participant-ids)]
+    (concat
+     seats
+     [(cond-> {:db/id minigame-id
+               :minigame/kind kind
+               :minigame/label label
+               :minigame/seats (mapv :db/id seats)
+               :minigame/turn-index 0
+               :minigame/neutral-authority? true}
+        deck-id (assoc :minigame/deck deck-id))])))
+
+(defn ^:private minigame-attach-tx
+  "Tx-data attaching a freshly-created session to the current scene's
+   :scene/minigames and pointing the creator's own :user/minigame-
+   viewing at it -- the shared last step every game's own /start
+   shares, after minigame-create-tx (and, for a deck-owning game,
+   whatever dealing tx-data) has already been assembled."
+  [scene-id minigame-id]
+  [{:db/id scene-id :scene/minigames minigame-id}
+   {:db/ident :user :user/minigame-viewing minigame-id}])
+
+(defmethod
+  ^{:doc "Assigns (or, given a nil uuid, clears) a connected
+          participant's per-session control over `player-id`'s seat
+          within `minigame-id` -- an override on top of that roster
+          player's ordinary :player/controller, scoped to just this
+          one session (see minigame-controller-uuid). A no-op if
+          `player-id` isn't actually seated at this session."}
+  event-tx-fn :minigame/set-controller
+  [data _ minigame-id player-id uuid]
+  (let [minigame (ds/entity data minigame-id)
+        seat (first (filter (comp #{player-id} :db/id :seat/player) (:minigame/seats minigame)))]
+    (if seat
+      (if uuid
+        [{:db/id (:db/id seat) :seat/controller [:user/uuid uuid]}]
+        [[:db/retract (:db/id seat) :seat/controller]])
+      [])))
+
+(defmethod
+  ^{:doc "Removes the given mini-game session entirely -- its seats and
+          its owned deck (and every card in it), if it has one, all
+          cascade via :db/isComponent, the same one-retraction cleanup
+          :deck/remove already relies on. A game with no deck (Memory)
+          instead tracks its cards as borrowed, NON-component refs in
+          :minigame/props (mirroring :scene/initiative's own 'refs to
+          entities really owned elsewhere' shape) -- since retracting
+          the session can't cascade to those for free, they're
+          explicitly retracted here too, so this one generic event
+          stays every game's teardown regardless of which shape its
+          state takes. Any participant, not just the host, may end
+          their own table -- mirrors how anyone may start one (see
+          :old-maid/start)."}
+  event-tx-fn :minigame/remove
+  [data _ minigame-id]
+  (into [[:db/retractEntity minigame-id]]
+        (map (fn [prop] [:db/retractEntity (:db/id prop)]))
+        (:minigame/props (ds/entity data minigame-id))))
+
+(defmethod
+  ^{:doc "Sets which of the scene's mini-game sessions the local user is
+          currently looking at -- mirrors :user/edit-game-type, just
+          for the session list/detail view instead of the game-type
+          builder's."}
+  event-tx-fn :user/view-minigame
+  [_ _ minigame-id]
+  [{:db/ident :user :user/minigame-viewing minigame-id}])
+
 ;; --- Players ---
 (defmethod
   ^{:doc "Creates a new player or NPC (kind is :human or :npc) on the
@@ -2364,20 +2494,33 @@
 ;; way D&D's d20 initiative roll and Gloomhaven's ability-deck rules are
 ;; game-specific layers on top of the generic turn-order/card systems.
 ;; See ogres.app.memory for the pure dealing/turn/scoring logic.
+;;
+;; The SECOND game ported onto the generic mini-game session scaffolding
+;; (see :scene/minigames, above the Players section) -- and the first
+;; with no deck at all. Its 'cards' are plain scene props (:scene/props
+;; already owns them, :db/isComponent), so a session can't OWN them the
+;; way Old Maid's session owns its deck; instead each session tracks
+;; its own subset as BORROWED, non-component refs in :minigame/props,
+;; mirroring how :scene/initiative already refs tokens it doesn't own.
+;; :minigame/remove explicitly retracts them for exactly that reason
+;; (see its own docstring). :memory/flip is dispatched from the canvas
+;; (scene_context_menu.cljs), which has no notion of 'which session is
+;; selected' -- it resolves the owning session itself, via the reverse
+;; ref :minigame/_props, the same way :deck/discard already resolves a
+;; card's owning deck via :deck/_cards; :memory/flip's own signature is
+;; therefore UNCHANGED by this port.
 
 (defn ^:private memory-cards
-  "Every prop on the current scene that belongs to the current Memory
-   game -- i.e. carries a :memory/value in its :object/variables map.
-   There's no separate 'session id': this is a single-game-per-scene v1."
-  [data]
-  (filter (comp :memory/value :object/variables) (scene-props data)))
+  "`minigame`'s own Memory cards -- i.e. its :minigame/props."
+  [minigame]
+  (:minigame/props minigame))
 
 (defn ^:private memory-face-up
-  "The subset of memory-cards that are currently revealed -- 0, 1, or 2
-   at any time (:memory/flip refuses a 3rd until :memory/resolve clears
-   the board back to 0 or 2->0)."
-  [data]
-  (remove :object/hidden (memory-cards data)))
+  "The subset of `minigame`'s memory-cards that are currently revealed
+   -- 0, 1, or 2 at any time (:memory/flip refuses a 3rd until
+   :memory/resolve clears the board back to 0 or 2->0)."
+  [minigame]
+  (remove :object/hidden (memory-cards minigame)))
 
 (defn ^:private memory-player-active?
   "True if roster player-id refers to a still-existing, still-active
@@ -2389,127 +2532,145 @@
     (boolean (and entity (:player/active entity)))))
 
 (defn ^:private memory-turn-player
-  "The roster player entity whose turn it currently is, or nil if no
-   Memory game is in progress on the current scene, or if every seated
-   player has since been benched/removed. Resolves the CORRECTED index
-   (skipping forward past anyone no longer active) rather than trusting
-   the raw stored index directly, so a mid-game bench/remove/reactivate
-   takes effect immediately without needing its own event."
-  [data]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        players (:scene/memory-players scene)
-        idx (:scene/memory-turn-index scene)]
+  "The roster player entity whose turn it currently is at `minigame`, or
+   nil if every seated player has since been benched/removed. Resolves
+   the CORRECTED index (skipping forward past anyone no longer active)
+   rather than trusting the raw stored index directly, so a mid-game
+   bench/remove/reactivate takes effect immediately without needing its
+   own event."
+  [data minigame]
+  (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+        idx (:minigame/turn-index minigame)]
     (if (seq players)
       (let [corrected (turn-order/valid-turn-index players (partial memory-player-active? data) idx)]
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
-(defn ^:private authorized-for-turn?
-  "True if the local viewer speaks for the current Memory turn player --
-   the same player/authority? primitive :objects/toggle-hidden's
+(defn ^:private memory-authorized-for-turn?
+  "True if the local viewer speaks for `minigame`'s current turn player
+   -- the same player/authority? primitive :objects/toggle-hidden's
    authorized-to-hide? already uses for object ownership, just pointed
-   at 'whose turn is it' instead of 'who owns this object'. No game in
-   progress (or an unassigned turn player) falls back to host-only,
-   the same default authority? always uses."
-  [data]
+   at 'whose turn is it' instead of 'who owns this object', fed the
+   current turn seat's effective controller (see minigame-controller-
+   uuid). No game in progress (or an unassigned turn player) falls back
+   to host-only, the same default authority? always uses."
+  [data minigame]
   (let [user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (memory-turn-player data) [:player/controller :user/uuid])]
-    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+        turn-player-id (:db/id (memory-turn-player data minigame))
+        seat (some #(if (= (:db/id (:seat/player %)) turn-player-id) %) (:minigame/seats minigame))]
+    (player/authority? (:user/uuid user) (:user/host user) connected
+                        (if seat (minigame-controller-uuid seat)))))
 
 (defmethod
-  ^{:doc "Starts a new Memory game on the current scene: deals 22
-          matching pairs (44 cards total, see ogres.app.memory/deal) as
-          face-down, shared props in a grid at the current camera point,
-          and initializes the turn cycle from whichever roster players
-          are currently active (:player/active true, :db/id order) --
-          the roster's own active/benched toggle is the 'who's playing'
-          selector, no separate picker needed. Host-driven like every
-          other setup action in this app -- UI-gated, not enforced here.
-          Also switches the scene into :scene/neutral-authority? mode
-          (see authorized-to-hide?/:scene/toggle-neutral-authority) --
-          the host doesn't automatically see face-down cards' values
-          either, since they're often a competing player too."}
+  ^{:doc "Starts a new Memory session seated by exactly
+          `participant-ids` -- rejected if fewer than 2 are given, or
+          if :memory/game isn't actually enabled on the scene's own
+          game-type (checked here, not just gated in the UI, since any
+          connected participant may dispatch this). Deals 22 matching
+          pairs (44 cards total, see ogres.app.memory/deal) as face-
+          down, shared props in a grid at the current camera point,
+          tracked as this session's own :minigame/props (see minigame-
+          create-tx) rather than added to :scene/decks -- Memory has no
+          deck at all. Host-driven like every other setup action in
+          this app used to be -- now anyone may start a table, same as
+          :old-maid/start."}
   event-tx-fn :memory/start
-  [data _]
-  (let [root (ds/entity data [:db/ident :root])
-        {point :camera/point
-         {scene-id :db/id} :camera/scene}
-        (:user/camera (ds/entity data [:db/ident :user]))
-        active (->> (:root/players root)
-                    (filter :player/active)
-                    (sort-by :db/id)
-                    (mapv :db/id))
-        ;; Card faces are a fixed 200x280 native size (see
-        ;; memory/value-image-hash/provider.state's card-back-svg) with
-        ;; no :image/cell-px calibration to auto-shrink them (unlike a
-        ;; normal uploaded prop) -- :card-scale/:card-spacing explicitly
-        ;; size and space them so the dealt grid doesn't overlap itself
-        ;; (grid-size, 70, is a token-cell unit and far too small for a
-        ;; 200x280 image at scale 1).
-        card-scale 0.4
-        card-spacing 120
-        cards (memory/deal 22 8 card-spacing)
-        values (into #{} (map :memory/value) cards)]
-    (into
-     (into
-      [[:db.fn/call assoc-scene
-        :scene/memory-players active
-        :scene/memory-turn-index 0
-        :scene/memory-scores {}
-        ;; Memory needs impartiality by default -- the host is often
-        ;; also a competing player, so they must not automatically see
-        ;; face-down cards' true values (see authorized-to-hide?'s
-        ;; :scene/neutral-authority? handling). :memory/end clears this
-        ;; back to false.
-        :scene/neutral-authority? true]]
-      ;; Each of the 22 distinct value-face images must be asserted as
-      ;; its own real entity (identified by its own :image/hash) BEFORE
-      ;; any card can reference it via a [:image/hash ...] lookup ref --
-      ;; unlike a map-form entity's own :db/id, a lookup ref used as the
-      ;; VALUE of a ref-typed attribute (:prop/image below) does NOT
-      ;; auto-vivify a new entity if nothing has ever asserted that
-      ;; identity; it requires the referenced entity to already exist.
-      ;; A fresh, ID-LESS map (no explicit :db/id) is what actually
-      ;; creates-or-merges by unique identity in DataScript -- using a
-      ;; lookup ref itself AS :db/id only resolves against an entity
-      ;; that already exists, the same "must pre-exist" requirement as
-      ;; using it in a ref attribute's value position; this matches
-      ;; provider/state.cljs's seed-props-images/seed-game-types, which
-      ;; likewise never assert an explicit :db/id for their upserts.
-      ;; The shared card-back (:prop/image-alt) doesn't need this --
-      ;; it's already a real entity via that same seed, at boot.
-      (map
-       (fn [value]
-         {:image/hash (memory/value-image-hash value)
-          :image/name (str "Memory " value)
-          :image/size 0
-          :image/width 200
-          :image/height 280})
-       values))
-     (mapcat
-      (fn [[id card]]
-        (let [value (:memory/value card)]
-          [[:db/add id :object/type :prop/prop]
-           [:db/add id :object/point (vec/add point (:point card))]
-           [:db/add id :object/scale card-scale]
-           [:db/add id :prop/image [:image/hash (memory/value-image-hash value)]]
-           [:db/add id :prop/image-alt [:image/hash state/card-back-hash]]
-           [:db/add id :object/hidden true]
-           [:db/add id :object/shared? true]
-           [:db/add id :object/variables {:memory/value value}]
-           [:db/add scene-id :scene/props id]]))
-      (sequence (indexed) cards)))))
+  [data _ participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        {point :camera/point scene :camera/scene} (:user/camera user)
+        scene-id (:db/id scene)
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :memory/game) (>= (count participant-ids) 2))
+      (let [;; Card faces are a fixed 200x280 native size (see
+            ;; memory/value-image-hash/provider.state's card-back-svg)
+            ;; with no :image/cell-px calibration to auto-shrink them
+            ;; (unlike a normal uploaded prop) -- :card-scale/:card-
+            ;; spacing explicitly size and space them so the dealt grid
+            ;; doesn't overlap itself (grid-size, 70, is a token-cell
+            ;; unit and far too small for a 200x280 image at scale 1).
+            card-scale 0.4
+            card-spacing 120
+            cards (memory/deal 22 8 card-spacing)
+            values (into #{} (map :memory/value) cards)
+            ;; Card ids -1..-44 (indexed's default offset/step) -- the
+            ;; session/seat ids below start past this whole range, the
+            ;; same "reserve a block, then continue past it" idiom
+            ;; deck-create-tx's own card-ids-then-deck-id already uses.
+            indexed-cards (vec (sequence (indexed) cards))
+            minigame-id (- (inc (count indexed-cards)))
+            label (minigame-label (:scene/minigames scene) :memory "Memory")
+            shell-tx (minigame-create-tx minigame-id :memory label nil participant-ids)]
+        ;; concat throughout, deliberately NOT (into (into ...) ...) --
+        ;; `into` conj's onto the front of anything that isn't already a
+        ;; vector, and concat's own result never is one, so nesting into
+        ;; here would silently reorder the image-upsert maps and card
+        ;; :db/add vectors relative to each other. Order is load-bearing
+        ;; below (images before the cards that reference them), so this
+        ;; whole tx-data is assembled with concat, which always preserves
+        ;; append order regardless of each piece's own collection type.
+        (concat
+         shell-tx
+         (minigame-attach-tx scene-id minigame-id)
+         [{:db/id minigame-id :minigame/props (mapv first indexed-cards)}]
+         ;; Each of the 22 distinct value-face images must be asserted
+         ;; as its own real entity (identified by its own :image/hash)
+         ;; BEFORE any card can reference it via a [:image/hash ...]
+         ;; lookup ref -- unlike a map-form entity's own :db/id, a
+         ;; lookup ref used as the VALUE of a ref-typed attribute
+         ;; (:prop/image below) does NOT auto-vivify a new entity if
+         ;; nothing has ever asserted that identity; it requires the
+         ;; referenced entity to already exist. A fresh, ID-LESS map
+         ;; (no explicit :db/id) is what actually creates-or-merges by
+         ;; unique identity in DataScript -- using a lookup ref itself
+         ;; AS :db/id only resolves against an entity that already
+         ;; exists, the same "must pre-exist" requirement as using it
+         ;; in a ref attribute's value position; this matches
+         ;; provider/state.cljs's seed-props-images/seed-game-types,
+         ;; which likewise never assert an explicit :db/id for their
+         ;; upserts. The shared card-back (:prop/image-alt) doesn't
+         ;; need this -- it's already a real entity via that same
+         ;; seed, at boot.
+         (map
+          (fn [value]
+            {:image/hash (memory/value-image-hash value)
+             :image/name (str "Memory " value)
+             :image/size 0
+             :image/width 200
+             :image/height 280})
+          values)
+         (mapcat
+          (fn [[id card]]
+            (let [value (:memory/value card)]
+              [[:db/add id :object/type :prop/prop]
+               [:db/add id :object/point (vec/add point (:point card))]
+               [:db/add id :object/scale card-scale]
+               [:db/add id :prop/image [:image/hash (memory/value-image-hash value)]]
+               [:db/add id :prop/image-alt [:image/hash state/card-back-hash]]
+               [:db/add id :object/hidden true]
+               [:db/add id :object/shared? true]
+               [:db/add id :object/variables {:memory/value value}]
+               [:db/add scene-id :scene/props id]]))
+          indexed-cards)))
+      [])))
 
 (defmethod
   ^{:doc "Flips the given Memory card face-up -- a direct :object/hidden
           write, not a call through the generic :objects/toggle-hidden,
-          since the turn-check (authorized-for-turn?) IS this action's
-          authorization (every Memory card is already :object/shared?
-          true, so the generic authority check would pass for anyone
-          regardless of turn -- this is what actually enforces 'players
-          take turns'). A no-op if: the viewer doesn't speak for the
-          current turn player, `card-id` isn't a Memory card, it's
+          since the turn-check (memory-authorized-for-turn?) IS this
+          action's authorization (every Memory card is already :object/
+          shared? true, so the generic authority check would pass for
+          anyone regardless of turn -- this is what actually enforces
+          'players take turns'). The owning session is resolved from
+          `card-id` itself via the reverse ref :minigame/_props (the
+          same way :deck/discard resolves a card's deck via :deck/
+          _cards) -- dispatched from the canvas (scene_context_menu.
+          cljs), which has no 'selected session' of its own to pass in,
+          so this event's own signature stays exactly `card-id`, same
+          as before session-scoping existed. A no-op if: `card-id`
+          isn't a Memory card (or its session has since ended), the
+          viewer doesn't speak for the current turn player, it's
           already face-up, or 2 cards are already face-up and awaiting
           :memory/resolve.
 
@@ -2528,65 +2689,48 @@
           drag-kit's draggable registration for everyone else."}
   event-tx-fn :memory/flip
   [data _ card-id]
-  (let [card (ds/entity data card-id)]
+  (let [card (ds/entity data card-id)
+        minigame (first (:minigame/_props card))]
     (into [[:db/retract [:db/ident :user] :user/dragging]]
-          (if (and (authorized-for-turn? data)
+          (if (and minigame
+                   (memory-authorized-for-turn? data minigame)
                    (:memory/value (:object/variables card))
                    (:object/hidden card)
-                   (< (count (memory-face-up data)) 2))
+                   (< (count (memory-face-up minigame)) 2))
             [[:db/add card-id :object/hidden false]]))))
 
 (defmethod
-  ^{:doc "Resolves the current turn once exactly 2 Memory cards are
-          face-up (a no-op otherwise) -- same turn-authorization as
-          :memory/flip. A match retracts both cards and increments the
-          current turn player's tally in :scene/memory-scores, with the
-          turn index UNCHANGED (matching players go again, same as a
-          real game of Memory). A mismatch flips both back face-down
-          and advances :scene/memory-turn-index to the next player,
-          wrapping around (ogres.app.turn-order/next-turn-index)."}
+  ^{:doc "Resolves `minigame-id`'s current turn once exactly 2 of its
+          Memory cards are face-up (a no-op otherwise) -- same turn-
+          authorization as :memory/flip. A match retracts both cards
+          and increments the current turn player's tally in :minigame/
+          scores, with the turn index UNCHANGED (matching players go
+          again, same as a real game of Memory). A mismatch flips both
+          back face-down and advances :minigame/turn-index to the next
+          player, wrapping around (ogres.app.turn-order/next-turn-
+          index)."}
   event-tx-fn :memory/resolve
-  [data _]
-  (let [face-up (memory-face-up data)]
-    (if (and (authorized-for-turn? data) (= (count face-up) 2))
+  [data _ minigame-id]
+  (let [minigame (ds/entity data minigame-id)
+        face-up (if minigame (memory-face-up minigame))]
+    (if (and minigame (memory-authorized-for-turn? data minigame) (= (count face-up) 2))
       (let [[a b] face-up
-            scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-            turn-id (:db/id (memory-turn-player data))
+            turn-id (:db/id (memory-turn-player data minigame))
             match? (= (:memory/value (:object/variables a))
                       (:memory/value (:object/variables b)))]
         (if match?
-          (let [scores (or (:scene/memory-scores scene) {})]
+          (let [scores (or (:minigame/scores minigame) {})]
             [[:db/retractEntity (:db/id a)]
              [:db/retractEntity (:db/id b)]
-             [:db.fn/call assoc-scene :scene/memory-scores (update scores turn-id (fnil inc 0))]])
-          (let [idx (:scene/memory-turn-index scene)
-                players (:scene/memory-players scene)
+             {:db/id minigame-id :minigame/scores (update scores turn-id (fnil inc 0))}])
+          (let [idx (:minigame/turn-index minigame)
+                players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
                 active? (partial memory-player-active? data)
                 next-idx (or (turn-order/next-turn-index players active? idx) idx)]
             [[:db/add (:db/id a) :object/hidden true]
              [:db/add (:db/id b) :object/hidden true]
-             [:db.fn/call assoc-scene :scene/memory-turn-index next-idx]])))
+             {:db/id minigame-id :minigame/turn-index next-idx}])))
       [])))
-
-(defmethod
-  ^{:doc "Ends the current Memory game: retracts every remaining
-          :memory/value-tagged card, clears the three :scene/memory-*
-          attributes, and clears :scene/neutral-authority? back to
-          false. Works whether the game finished naturally (no cards
-          left) or is being aborted mid-round -- the host-only 'End
-          Game' button is the only place this is dispatched from."}
-  event-tx-fn :memory/end
-  [data _]
-  (let [scene-id (:db/id (:camera/scene (:user/camera (ds/entity data [:db/ident :user]))))]
-    (into
-     [[:db/retract scene-id :scene/memory-players]
-      [:db/retract scene-id :scene/memory-turn-index]
-      [:db/retract scene-id :scene/memory-scores]
-      ;; Clears the impartial-dealer mode :memory/start turned on --
-      ;; leaves no residue for whatever gets set up on this scene next.
-      [:db/add scene-id :scene/neutral-authority? false]]
-     (map (fn [c] [:db/retractEntity (:db/id c)]))
-     (memory-cards data))))
 
 ;; --- Go Fish (example game) ---
 ;; A second concrete demonstration of the generic card/deck system
@@ -2598,43 +2742,49 @@
 ;; stored anywhere new. See ogres.app.go-fish for the pure rank-
 ;; matching/scoring logic and ogres.app.turn-order for the shared
 ;; turn-cycle logic both this and Memory use.
+;;
+;; The THIRD game ported onto the generic mini-game session scaffolding
+;; (see :scene/minigames, above the Players section) -- see :old-maid/
+;; start's own docstring for the shape every ported game now shares.
 
 (defn ^:private go-fish-player-active?
   "True if roster player-id refers to a still-existing, still-active
    (:player/active true) player -- same role as memory-player-active?,
    kept as its own function (not shared) since each game's turn-player
-   resolution reads its own distinct :scene/go-fish-*/:scene/memory-*
-   attributes, the same way dnd5e.cljs/gloomhaven.cljs each own their
-   own similarly-shaped widget code rather than sharing one function."
+   resolution reads its own distinct seats, the same way dnd5e.cljs/
+   gloomhaven.cljs each own their own similarly-shaped widget code
+   rather than sharing one function."
   [data player-id]
   (let [entity (ds/entity data player-id)]
     (boolean (and entity (:player/active entity)))))
 
 (defn ^:private go-fish-turn-player
-  "The roster player entity whose turn it currently is, or nil if no
-   Go Fish game is in progress, or if every seated player has since
-   been benched/removed -- resolves the corrected index the same way
-   memory-turn-player does, see ogres.app.turn-order/valid-turn-index."
-  [data]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        players (:scene/go-fish-players scene)
-        idx (:scene/go-fish-turn-index scene)]
+  "The roster player entity whose turn it currently is at `minigame`,
+   or nil if every seated player has since been benched/removed --
+   resolves the corrected index the same way memory-turn-player does,
+   see ogres.app.turn-order/valid-turn-index."
+  [data minigame]
+  (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+        idx (:minigame/turn-index minigame)]
     (if (seq players)
       (let [corrected (turn-order/valid-turn-index players (partial go-fish-player-active? data) idx)]
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
 (defn ^:private go-fish-authorized-for-turn?
-  "True if the local viewer speaks for the current Go Fish turn player
-   -- same player/authority? primitive Memory's own authorized-for-
-   turn? uses, deliberately still just host-only fallback (not
-   suppressed by :scene/neutral-authority?) for the same turn-
-   continuity-safety-net reason Memory's version is."
-  [data]
+  "True if the local viewer speaks for `minigame`'s current turn player
+   -- same player/authority? primitive Memory's own memory-authorized-
+   for-turn? uses, fed the current turn seat's effective controller
+   (see minigame-controller-uuid), deliberately still just host-only
+   fallback (not suppressed by :minigame/neutral-authority?) for the
+   same turn-continuity-safety-net reason Memory's version is."
+  [data minigame]
   (let [user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (go-fish-turn-player data) [:player/controller :user/uuid])]
-    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+        turn-player-id (:db/id (go-fish-turn-player data minigame))
+        seat (some #(if (= (:db/id (:seat/player %)) turn-player-id) %) (:minigame/seats minigame))]
+    (player/authority? (:user/uuid user) (:user/host user) connected
+                        (if seat (minigame-controller-uuid seat)))))
 
 (defn ^:private go-fish-hand
   "Every card in `player-id`'s hand, from a (ds/entity-pulled) `deck`."
@@ -2642,132 +2792,129 @@
   (cards/cards-of-holder (:deck/cards deck) player-id))
 
 (defmethod
-  ^{:doc "Starts a new Go Fish game on the current scene: creates a
-          fresh 36-card deck (9 ranks x 4 copies, see
-          game-type.games.go-fish/deck-definitions), adds it to
-          :scene/decks (so it's also visible/manageable via the
-          existing Decks panel), deals 6 cards to each currently-active
-          roster player's hand (:deck/deal, reused as-is), and
-          initializes the turn cycle -- the same active-roster-
-          snapshot/:scene/neutral-authority? pattern :memory/start
-          uses. Host-driven like every other setup action in this app
-          -- UI-gated, not enforced here."}
+  ^{:doc "Starts a new Go Fish session seated by exactly
+          `participant-ids` -- rejected if fewer than 2 are given, or
+          if :go-fish/game isn't actually enabled on the scene's own
+          game-type (checked here, not just gated in the UI, since any
+          connected participant may dispatch this). Creates a fresh
+          36-card deck (9 ranks x 4 copies, see game-type.games.go-
+          fish/deck-definitions), deals 6 cards to each participant's
+          hand (:deck/deal, reused as-is), and starts the session's
+          turn cycle at index 0. Anyone, not just the host, may start a
+          table, same as :old-maid/start."}
   event-tx-fn :go-fish/start
-  [data _]
-  (let [root (ds/entity data [:db/ident :root])
-        active (->> (:root/players root)
-                    (filter :player/active)
-                    (sort-by :db/id)
-                    (mapv :db/id))
-        [deck-id deck-tx] (deck-create-tx :go-fish-9 {})
-        cards (filter :card/rank deck-tx)]
-    (concat
-     deck-tx
-     ;; Dealt directly from `cards` (plain data, not yet committed) via
-     ;; deal-tx, NOT :deck/deal/:deck/draw -- deck-id is still a temp
-     ;; id at this point in the transaction, which ds/entity (what
-     ;; those events use to re-read the draw pile) can't resolve. See
-     ;; deal-tx's docstring.
-     (deal-tx cards active 6)
-     [[:db.fn/call assoc-scene
-       :scene/decks deck-id
-       :scene/go-fish-deck deck-id
-       :scene/go-fish-players active
-       :scene/go-fish-turn-index 0
-       :scene/go-fish-scores {}
-       ;; Go Fish needs impartiality by default for the exact same
-       ;; reason Memory does -- the host is often also a competing
-       ;; player, and must not automatically see every hand.
-       :scene/neutral-authority? true]])))
+  [data _ participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :go-fish/game) (>= (count participant-ids) 2))
+      (let [[deck-id deck-tx] (deck-create-tx :go-fish-9 {})
+            cards (filter :card/rank deck-tx)
+            label (minigame-label (:scene/minigames scene) :go-fish "Go Fish")
+            minigame-id (dec deck-id)
+            shell-tx (minigame-create-tx minigame-id :go-fish label deck-id participant-ids)]
+        (concat
+         deck-tx
+         ;; Dealt directly from `cards` (plain data, not yet committed)
+         ;; via deal-tx, NOT :deck/deal/:deck/draw -- deck-id is still
+         ;; a temp id at this point in the transaction, which ds/entity
+         ;; (what those events use to re-read the draw pile) can't
+         ;; resolve. See deal-tx's docstring.
+         (deal-tx cards participant-ids 6)
+         shell-tx
+         (minigame-attach-tx (:db/id scene) minigame-id)))
+      [])))
 
 (defmethod
-  ^{:doc "The core Go Fish turn action: `asker-id` asks `target-id` for
-          `rank`, which `asker-id` must already hold at least one copy
-          of (a hard rule gate, not just a UI convenience -- enforced
-          here the same way :memory/flip's own hidden/count checks
-          are). `target-id` must be a different, active player, and --
-          unless :go-fish/ask-anyone is enabled -- specifically the
-          next seat in the (skip-inactive) turn order. A hit transfers
-          every matching card from target's hand to asker's; a miss
-          draws the top of the draw pile into asker's hand instead
-          ('go fish'), with no draw at all if the pile is empty.
-          Whether the turn advances or stays with the asker depends on
-          :go-fish/extra-turn-on-hit (a hit) and
+  ^{:doc "The core Go Fish turn action within `minigame-id`: `asker-id`
+          asks `target-id` for `rank`, which `asker-id` must already
+          hold at least one copy of (a hard rule gate, not just a UI
+          convenience -- enforced here the same way :memory/flip's own
+          hidden/count checks are). `target-id` must be a different,
+          active player, and -- unless :go-fish/ask-anyone is enabled
+          -- specifically the next seat in the (skip-inactive) turn
+          order. A hit transfers every matching card from target's
+          hand to asker's; a miss draws the top of the draw pile into
+          asker's hand instead ('go fish'), with no draw at all if the
+          pile is empty. Whether the turn advances or stays with the
+          asker depends on :go-fish/extra-turn-on-hit (a hit) and
           :go-fish/extra-turn-on-lucky-draw (drawing the exact rank
           asked for) -- a miss with no lucky draw always advances the
           turn, in every rule combination."}
   event-tx-fn :go-fish/ask
-  [data _ asker-id target-id rank]
-  (if (and (go-fish-authorized-for-turn? data)
-           (= (:db/id (go-fish-turn-player data)) asker-id))
-    (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-          enabled (:game-type/enabled-elements (:scene/game-type scene))
-          ask-anyone? (contains? enabled :go-fish/ask-anyone)
-          extra-turn-on-hit? (contains? enabled :go-fish/extra-turn-on-hit)
-          extra-turn-on-lucky-draw? (contains? enabled :go-fish/extra-turn-on-lucky-draw)
-          players (:scene/go-fish-players scene)
-          idx (:scene/go-fish-turn-index scene)
-          active? (partial go-fish-player-active? data)
-          next-seat (turn-order/valid-turn-index players active? (mod (inc idx) (count players)))
-          next-seat-id (if next-seat (nth players next-seat))
-          deck-id (:db/id (:scene/go-fish-deck scene))
-          deck (ds/entity data deck-id)
-          asker-hand (go-fish-hand deck asker-id)]
-      (if (and (not= target-id asker-id)
-               (active? target-id)
-               (or ask-anyone? (= target-id next-seat-id))
-               (seq (cards/cards-of-rank asker-hand rank)))
-        (let [target-hand (go-fish-hand deck target-id)
-              matches (cards/cards-of-rank target-hand rank)]
-          (if (seq matches)
-            (let [start (next-position asker-hand)
-                  transfer-tx (mapcat (fn [card i] (move-card-tx (:db/id card) :hand (+ start i) asker-id))
-                                       matches (range))
-                  next-idx (if extra-turn-on-hit? idx (turn-order/next-turn-index players active? idx))]
-              (into (vec transfer-tx)
-                    [[:db.fn/call assoc-scene :scene/go-fish-turn-index (or next-idx idx)]]))
-            (let [draw-pile (pile deck :draw)]
-              (if (seq draw-pile)
-                (let [drawn (top-card draw-pile)
-                      lucky? (= (:card/rank drawn) rank)
-                      moved (move-card-tx (:db/id drawn) :hand (next-position asker-hand) asker-id)
-                      next-idx (if (and lucky? extra-turn-on-lucky-draw?)
-                                 idx
-                                 (turn-order/next-turn-index players active? idx))]
-                  (into (vec moved)
-                        [[:db.fn/call assoc-scene :scene/go-fish-turn-index (or next-idx idx)]]))
-                ;; empty draw pile -- no draw possible, a miss with
-                ;; nothing to fish for still just advances the turn.
-                (let [next-idx (turn-order/next-turn-index players active? idx)]
-                  [[:db.fn/call assoc-scene :scene/go-fish-turn-index (or next-idx idx)]])))))
-        []))
-    []))
+  [data _ minigame-id asker-id target-id rank]
+  (let [minigame (ds/entity data minigame-id)]
+    (if (and minigame
+             (go-fish-authorized-for-turn? data minigame)
+             (= (:db/id (go-fish-turn-player data minigame)) asker-id))
+      (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
+            enabled (:game-type/enabled-elements (:scene/game-type scene))
+            ask-anyone? (contains? enabled :go-fish/ask-anyone)
+            extra-turn-on-hit? (contains? enabled :go-fish/extra-turn-on-hit)
+            extra-turn-on-lucky-draw? (contains? enabled :go-fish/extra-turn-on-lucky-draw)
+            players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+            idx (:minigame/turn-index minigame)
+            active? (partial go-fish-player-active? data)
+            next-seat (turn-order/valid-turn-index players active? (mod (inc idx) (count players)))
+            next-seat-id (if next-seat (nth players next-seat))
+            deck-id (:db/id (:minigame/deck minigame))
+            deck (ds/entity data deck-id)
+            asker-hand (go-fish-hand deck asker-id)]
+        (if (and (not= target-id asker-id)
+                 (active? target-id)
+                 (or ask-anyone? (= target-id next-seat-id))
+                 (seq (cards/cards-of-rank asker-hand rank)))
+          (let [target-hand (go-fish-hand deck target-id)
+                matches (cards/cards-of-rank target-hand rank)]
+            (if (seq matches)
+              (let [start (next-position asker-hand)
+                    transfer-tx (mapcat (fn [card i] (move-card-tx (:db/id card) :hand (+ start i) asker-id))
+                                         matches (range))
+                    next-idx (if extra-turn-on-hit? idx (turn-order/next-turn-index players active? idx))]
+                (conj (vec transfer-tx) {:db/id minigame-id :minigame/turn-index (or next-idx idx)}))
+              (let [draw-pile (pile deck :draw)]
+                (if (seq draw-pile)
+                  (let [drawn (top-card draw-pile)
+                        lucky? (= (:card/rank drawn) rank)
+                        moved (move-card-tx (:db/id drawn) :hand (next-position asker-hand) asker-id)
+                        next-idx (if (and lucky? extra-turn-on-lucky-draw?)
+                                   idx
+                                   (turn-order/next-turn-index players active? idx))]
+                    (conj (vec moved) {:db/id minigame-id :minigame/turn-index (or next-idx idx)}))
+                  ;; empty draw pile -- no draw possible, a miss with
+                  ;; nothing to fish for still just advances the turn.
+                  (let [next-idx (turn-order/next-turn-index players active? idx)]
+                    [{:db/id minigame-id :minigame/turn-index (or next-idx idx)}])))))
+          []))
+      [])))
 
 (defmethod
-  ^{:doc "Lays down a scored set from `player-id`'s own hand for
-          `rank`, gated by player/authority? over that specific seat
-          (explicit player-id arg, same pattern as everywhere else in
-          this app -- authority is derived from whose hand it is, not
-          guessed from the dispatching viewer). NOT gated by whose
-          turn it is -- laying down a completed set is bookkeeping,
-          not a strategic action, and gating it by turn would just add
-          'forgot to score on my turn' friction with no fairness
-          benefit. How many cards move, and whether a completed 4-card
-          group is worth 1 point (a 'book', the classic rule) or 2
-          (two separate pairs) depends on :go-fish/book-scoring vs.
-          :go-fish/pair-scoring -- see ogres.app.go-fish/scoreable-
-          count. A no-op if `player-id` doesn't yet have an eligible
-          set for `rank`."}
+  ^{:doc "Lays down a scored set from `player-id`'s own hand for `rank`
+          within `minigame-id`, gated by player/authority? over that
+          specific seat's effective controller (see minigame-
+          controller-uuid) -- authority is derived from whose hand it
+          is, not guessed from the dispatching viewer. NOT gated by
+          whose turn it is -- laying down a completed set is
+          bookkeeping, not a strategic action, and gating it by turn
+          would just add 'forgot to score on my turn' friction with no
+          fairness benefit. How many cards move, and whether a
+          completed 4-card group is worth 1 point (a 'book', the
+          classic rule) or 2 (two separate pairs) depends on :go-fish/
+          book-scoring vs. :go-fish/pair-scoring -- see ogres.app.go-
+          fish/scoreable-count. A no-op if `player-id` doesn't yet have
+          an eligible set for `rank`, or isn't actually seated at this
+          session."}
   event-tx-fn :go-fish/score
-  [data _ player-id rank]
-  (let [user (ds/entity data [:db/ident :user])
+  [data _ minigame-id player-id rank]
+  (let [minigame (ds/entity data minigame-id)
+        user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
-    (if (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)
-      (let [scene (:camera/scene (:user/camera user))
-            enabled (:game-type/enabled-elements (:scene/game-type scene))
+        seat (if minigame (some #(if (= (:db/id (:seat/player %)) player-id) %) (:minigame/seats minigame)))]
+    (if (and seat (player/authority? (:user/uuid user) (:user/host user) connected (minigame-controller-uuid seat)))
+      (let [enabled (:game-type/enabled-elements (:scene/game-type (:camera/scene (:user/camera user))))
             book-scoring? (contains? enabled :go-fish/book-scoring)
-            deck-id (:db/id (:scene/go-fish-deck scene))
+            deck-id (:db/id (:minigame/deck minigame))
             deck (ds/entity data deck-id)
             hand (go-fish-hand deck player-id)
             group (cards/cards-of-rank hand rank)
@@ -2778,38 +2925,16 @@
                 start (next-position scored)
                 lay-tx (mapcat (fn [card i] (move-card-tx (:db/id card) :scored (+ start i) player-id))
                                 to-score (range))
-                scores (or (:scene/go-fish-scores scene) {})
+                scores (or (:minigame/scores minigame) {})
                 ;; A completed book is always 1 point regardless of n
                 ;; (n is always 4 in book mode) -- it's a single scored
                 ;; unit, not "2 pairs bundled together". Pair mode's
                 ;; point currency is the pair itself, so n/2 (n is
                 ;; always even) counts every pair laid down at once.
                 points (if book-scoring? 1 (quot n 2))]
-            (into (vec lay-tx)
-                  [[:db.fn/call assoc-scene :scene/go-fish-scores (update scores player-id (fnil + 0) points)]]))
+            (conj (vec lay-tx) {:db/id minigame-id :minigame/scores (update scores player-id (fnil + 0) points)}))
           []))
       [])))
-
-(defmethod
-  ^{:doc "Ends the current Go Fish game: retracts the deck (and every
-          card in it, via :deck/cards' :db/isComponent cascade),
-          clears the four :scene/go-fish-* attributes, and clears
-          :scene/neutral-authority? back to false -- directly mirrors
-          :memory/end. Works whether the game finished naturally (empty
-          draw pile and every hand empty) or is being aborted mid-round
-          -- the host-only 'End Game' button is the only place this is
-          dispatched from."}
-  event-tx-fn :go-fish/end
-  [data _]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        scene-id (:db/id scene)
-        deck-id (:db/id (:scene/go-fish-deck scene))]
-    (cond-> [[:db/retract scene-id :scene/go-fish-players]
-             [:db/retract scene-id :scene/go-fish-turn-index]
-             [:db/retract scene-id :scene/go-fish-scores]
-             [:db/retract scene-id :scene/go-fish-deck]
-             [:db/add scene-id :scene/neutral-authority? false]]
-      deck-id (conj [:db/retractEntity deck-id]))))
 
 ;; --- Old Maid (example game) ---
 ;; A third demonstration of the generic card/deck system -- dealing the
@@ -2821,116 +2946,136 @@
 ;; index/next-turn-index, exactly the extension seam those functions
 ;; were designed around; neither needed a single change. See
 ;; ogres.app.old-maid for the pure pair-detection logic.
+;;
+;; The FIRST game ported onto the generic mini-game session scaffolding
+;; above (see :scene/minigames) -- a session-scoped prototype for
+;; letting several independent, arbitrary-subset-of-the-roster tables
+;; run nested inside one scene at once, rather than one singleton
+;; instance assumed to include every active player. The other five
+;; example games are unaffected and still use their own singleton
+;; :scene/<game>-* attributes; they get ported the same way once this
+;; shape proves out.
 
 (defn ^:private old-maid-player-active?
   "True if roster player-id refers to a still-existing, still-active
    (:player/active true) player who ALSO still holds at least one
-   card -- an empty hand means that player is safe/eliminated for the
-   rest of this round, and the turn cycle should skip them exactly
-   like a benched player, with no separate 'eliminate' event needed."
+   card in `deck` -- an empty hand means that player is safe/
+   eliminated for the rest of this round, and the turn cycle should
+   skip them exactly like a benched player, with no separate
+   'eliminate' event needed."
   [data deck player-id]
   (let [entity (ds/entity data player-id)]
     (and (boolean (and entity (:player/active entity)))
          (seq (cards/cards-of-holder (:deck/cards deck) player-id)))))
 
 (defn ^:private old-maid-turn-player
-  "The roster player entity whose turn it currently is, or nil if no
-   Old Maid game is in progress, or if every seated player has since
-   been benched/removed/eliminated -- resolves the corrected index the
-   same way memory-turn-player/go-fish's equivalent do, see
+  "The roster player entity whose turn it currently is at `minigame`,
+   or nil if every seated player has since been benched/removed/
+   eliminated -- resolves the corrected index the same way
+   memory-turn-player/go-fish's equivalent do, see
    ogres.app.turn-order/valid-turn-index."
-  [data]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        players (:scene/old-maid-players scene)
-        idx (:scene/old-maid-turn-index scene)
-        deck (:scene/old-maid-deck scene)]
+  [data minigame]
+  (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+        idx (:minigame/turn-index minigame)
+        deck (:minigame/deck minigame)]
     (if (seq players)
       (let [corrected (turn-order/valid-turn-index players (partial old-maid-player-active? data deck) idx)]
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
 (defn ^:private old-maid-authorized-for-turn?
-  "True if the local viewer speaks for the current Old Maid turn player
+  "True if the local viewer speaks for `minigame`'s current turn player
    -- same player/authority? primitive Memory/Go Fish's own authorized-
-   for-turn? use, deliberately still just host-only fallback (not
-   suppressed by :scene/neutral-authority?) for the same turn-
-   continuity-safety-net reason theirs are."
-  [data]
+   for-turn? use, fed the current turn seat's effective controller (see
+   minigame-controller-uuid, which layers a per-session override on top
+   of the roster's own :player/controller), deliberately still just
+   host-only fallback (not suppressed by :minigame/neutral-authority?)
+   for the same turn-continuity-safety-net reason theirs are."
+  [data minigame]
   (let [user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (old-maid-turn-player data) [:player/controller :user/uuid])]
-    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+        turn-player-id (:db/id (old-maid-turn-player data minigame))
+        seat (some #(if (= (:db/id (:seat/player %)) turn-player-id) %) (:minigame/seats minigame))]
+    (player/authority? (:user/uuid user) (:user/host user) connected
+                        (if seat (minigame-controller-uuid seat)))))
 
 (defmethod
-  ^{:doc "Starts a new Old Maid game: creates a fresh 49-card deck (the
-          traditional 52 minus 3 queens, see game-type.games.old-
-          maid/deck-definitions), adds it to :scene/decks, deals the
-          ENTIRE deck to every currently-active roster player (deal-
-          assignment with n nil -- some players getting one extra card
-          when it doesn't divide evenly), and for each resulting hand
-          immediately retracts any complete pairs it landed with (the
-          mandatory 'discard pairs before play begins' rule -- see
-          ogres.app.old-maid/pairs-to-discard) instead of ever
-          asserting them into a hand at all. Sets :scene/old-maid-
-          players/-turn-index 0, :scene/neutral-authority? true -- no
-          :scene/old-maid-scores at all, since there's nothing numeric
-          to track. Host-driven like every other setup action in this
-          app -- UI-gated, not enforced here."}
+  ^{:doc "Starts a new Old Maid session seated by exactly
+          `participant-ids` (roster player ids, NOT necessarily every
+          active player -- an arbitrary subset, the whole point of the
+          mini-game session scaffolding above) -- rejected if fewer
+          than 2 are given, or if :old-maid/game isn't actually enabled
+          on the scene's own game-type (checked here, not just gated in
+          the UI, since any connected participant may dispatch this).
+          Creates a fresh 49-card deck (the traditional 52 minus 3
+          queens, see game-type.games.old-maid/deck-definitions), deals
+          the ENTIRE deck to the given participants (deal-assignment
+          with n nil -- some getting one extra card when it doesn't
+          divide evenly), and for each resulting hand immediately
+          retracts any complete pairs it landed with (the mandatory
+          'discard pairs before play begins' rule -- see ogres.app.
+          old-maid/pairs-to-discard) instead of ever asserting them
+          into a hand at all. The new session (see minigame-create-tx)
+          starts at :minigame/turn-index 0 and :minigame/neutral-
+          authority? true -- no per-game scores at all, since there's
+          nothing numeric to track. Sets :scene/minigames and the
+          creator's own :user/minigame-viewing to the new session --
+          anyone, not just the host, may start a table."}
   event-tx-fn :old-maid/start
-  [data _]
-  (let [root (ds/entity data [:db/ident :root])
-        active (->> (:root/players root)
-                    (filter :player/active)
-                    (sort-by :db/id)
-                    (mapv :db/id))
-        [deck-id deck-tx] (deck-create-tx :old-maid-52 {})
-        deck-map (first deck-tx)
-        cards (filter :card/rank deck-tx)
-        hands (deal-assignment cards active nil)
-        ;; :db/retractEntity refuses a still-unresolved temp id (unlike
-        ;; :db/add/map-form, which DOES resolve them) -- these cards
-        ;; are dealt-time pairs that should never exist at all, so
-        ;; rather than assert-then-retract them (which would fail),
-        ;; they're simply never asserted in the first place: excluded
-        ;; from both their own per-card tx-data AND the deck's own
-        ;; :deck/cards list below.
-        discard-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id (old-maid/pairs-to-discard hand)))) hands)
-        card-tx (remove (comp discard-ids :db/id) cards)
-        deck-map (update deck-map :deck/cards #(vec (remove discard-ids %)))
-        keep-tx (mapcat (fn [[holder-id hand]]
-                           (let [keep (remove (comp discard-ids :db/id) hand)]
-                             (map-indexed
-                              (fn [i card] {:db/id (:db/id card) :card/location :hand
-                                            :card/holder holder-id :card/position i})
-                              keep)))
-                         hands)]
-    (concat
-     [deck-map]
-     card-tx
-     keep-tx
-     [[:db.fn/call assoc-scene
-       :scene/decks deck-id
-       :scene/old-maid-deck deck-id
-       :scene/old-maid-players active
-       :scene/old-maid-turn-index 0
-       :scene/neutral-authority? true]])))
+  [data _ participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :old-maid/game) (>= (count participant-ids) 2))
+      (let [[deck-id deck-tx] (deck-create-tx :old-maid-52 {})
+            deck-map (first deck-tx)
+            cards (filter :card/rank deck-tx)
+            hands (deal-assignment cards participant-ids nil)
+            ;; :db/retractEntity refuses a still-unresolved temp id
+            ;; (unlike :db/add/map-form, which DOES resolve them) --
+            ;; these cards are dealt-time pairs that should never
+            ;; exist at all, so rather than assert-then-retract them
+            ;; (which would fail), they're simply never asserted in
+            ;; the first place: excluded from both their own per-card
+            ;; tx-data AND the deck's own :deck/cards list below.
+            discard-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id (old-maid/pairs-to-discard hand)))) hands)
+            card-tx (remove (comp discard-ids :db/id) cards)
+            deck-map (update deck-map :deck/cards #(vec (remove discard-ids %)))
+            keep-tx (mapcat (fn [[holder-id hand]]
+                               (let [keep (remove (comp discard-ids :db/id) hand)]
+                                 (map-indexed
+                                  (fn [i card] {:db/id (:db/id card) :card/location :hand
+                                                :card/holder holder-id :card/position i})
+                                  keep)))
+                             hands)
+            label (minigame-label (:scene/minigames scene) :old-maid "Old Maid")
+            minigame-id (dec deck-id)
+            shell-tx (minigame-create-tx minigame-id :old-maid label deck-id participant-ids)]
+        (concat
+         [deck-map]
+         card-tx
+         keep-tx
+         shell-tx
+         (minigame-attach-tx (:db/id scene) minigame-id)))
+      [])))
 
 (defmethod
-  ^{:doc "The core Old Maid turn action: `drawer-id` draws `card-id`,
-          one specific (player-CHOSEN, not random) card from whoever is
-          next in the (skip-eliminated) turn cycle after them -- 'the
-          person to your right' and 'who plays next' are the same
-          relationship once play moves in one consistent direction, so
-          this reuses turn-order/valid-turn-index directly rather than
-          inventing a separate 'neighbor' concept. The drawer picks
-          WHICH of their neighbor's cards by position (component/
-          card_hand.cljs's face-down, individually-clickable
-          placeholders, wired up in panel_old_maid.cljs) -- they still
-          never see its rank/suit beforehand, so the outcome is exactly
-          as blind as a truly random draw, but the choice of position
-          itself is the player's, not the game's. `card-id` must
-          actually belong to the resolved neighbor's hand -- a no-op
-          otherwise (a stale/manipulated click, e.g. the UI's own
+  ^{:doc "The core Old Maid turn action within `minigame-id`:
+          `drawer-id` draws `card-id`, one specific (player-CHOSEN, not
+          random) card from whoever is next in the (skip-eliminated)
+          turn cycle after them -- 'the person to your right' and 'who
+          plays next' are the same relationship once play moves in one
+          consistent direction, so this reuses turn-order/valid-turn-
+          index directly rather than inventing a separate 'neighbor'
+          concept. The drawer picks WHICH of their neighbor's cards by
+          position (component/card_hand.cljs's face-down, individually-
+          clickable placeholders, wired up in panel_old_maid.cljs) --
+          they still never see its rank/suit beforehand, so the outcome
+          is exactly as blind as a truly random draw, but the choice of
+          position itself is the player's, not the game's. `card-id`
+          must actually belong to the resolved neighbor's hand -- a
+          no-op otherwise (a stale/manipulated click, e.g. the UI's own
           rendered target going out of date). If the drawn card
           completes a pair in the drawer's hand, both cards are
           immediately retracted (ogres.app.old-maid/pairs-to-discard,
@@ -2939,57 +3084,42 @@
           advances to whoever was drawn from afterward -- no hit/miss
           branching, no extra-turn rule; Old Maid's turn logic is
           strictly simpler than Go Fish's by design, not by omission.
-          A no-op if no other active player remains to draw from. The
-          'next' index is computed from the DRAWER's own resolved
-          position in `players` -- never from the raw stored
-          :scene/old-maid-turn-index -- because that stored index can
-          go stale relative to the actual (skip-inactive) current
-          player when a player is deactivated externally (e.g.
-          benched from the roster) between draws; basing it on the
-          drawer's own position keeps target != drawer even then."}
+          A no-op if no other active player remains to draw from, or if
+          `minigame-id` doesn't refer to a real session. The 'next'
+          index is computed from the DRAWER's own resolved position
+          among the session's seats -- never from the raw stored
+          :minigame/turn-index -- because that stored index can go
+          stale relative to the actual (skip-inactive) current player
+          when a player is deactivated externally (e.g. benched from
+          the roster) between draws; basing it on the drawer's own
+          position keeps target != drawer even then."}
   event-tx-fn :old-maid/draw
-  [data _ drawer-id card-id]
-  (if (and (old-maid-authorized-for-turn? data)
-           (= (:db/id (old-maid-turn-player data)) drawer-id))
-    (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-          players (:scene/old-maid-players scene)
-          deck-id (:db/id (:scene/old-maid-deck scene))
-          deck (ds/entity data deck-id)
-          active? (partial old-maid-player-active? data deck)
-          drawer-index (first (keep-indexed (fn [i id] (if (= id drawer-id) i)) players))
-          next-index (turn-order/valid-turn-index players active? (mod (inc drawer-index) (count players)))]
-      (if next-index
-        (let [target-id (nth players next-index)
-              target-hand (cards/cards-of-holder (:deck/cards deck) target-id)
-              drawn (some #(if (= (:db/id %) card-id) %) target-hand)]
-          (if drawn
-            (let [drawer-hand (cards/cards-of-holder (:deck/cards deck) drawer-id)
-                  discard (old-maid/pairs-to-discard (conj (vec drawer-hand) drawn))]
-              (concat
-               (if (seq discard)
-                 (map (fn [c] [:db/retractEntity (:db/id c)]) discard)
-                 (move-card-tx (:db/id drawn) :hand (next-position drawer-hand) drawer-id))
-               [[:db.fn/call assoc-scene :scene/old-maid-turn-index next-index]]))
-            []))
-        []))
-    []))
-
-(defmethod
-  ^{:doc "Ends the current Old Maid game: retracts the deck (and every
-          card in it, via :deck/cards' :db/isComponent cascade), clears
-          the three :scene/old-maid-* attributes, and clears :scene/
-          neutral-authority? back to false -- directly mirrors
-          :memory/end/:go-fish/end."}
-  event-tx-fn :old-maid/end
-  [data _]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        scene-id (:db/id scene)
-        deck-id (:db/id (:scene/old-maid-deck scene))]
-    (cond-> [[:db/retract scene-id :scene/old-maid-players]
-             [:db/retract scene-id :scene/old-maid-turn-index]
-             [:db/retract scene-id :scene/old-maid-deck]
-             [:db/add scene-id :scene/neutral-authority? false]]
-      deck-id (conj [:db/retractEntity deck-id]))))
+  [data _ minigame-id drawer-id card-id]
+  (let [minigame (ds/entity data minigame-id)]
+    (if (and minigame
+             (old-maid-authorized-for-turn? data minigame)
+             (= (:db/id (old-maid-turn-player data minigame)) drawer-id))
+      (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+            deck-id (:db/id (:minigame/deck minigame))
+            deck (ds/entity data deck-id)
+            active? (partial old-maid-player-active? data deck)
+            drawer-index (first (keep-indexed (fn [i id] (if (= id drawer-id) i)) players))
+            next-index (turn-order/valid-turn-index players active? (mod (inc drawer-index) (count players)))]
+        (if next-index
+          (let [target-id (nth players next-index)
+                target-hand (cards/cards-of-holder (:deck/cards deck) target-id)
+                drawn (some #(if (= (:db/id %) card-id) %) target-hand)]
+            (if drawn
+              (let [drawer-hand (cards/cards-of-holder (:deck/cards deck) drawer-id)
+                    discard (old-maid/pairs-to-discard (conj (vec drawer-hand) drawn))]
+                (concat
+                 (if (seq discard)
+                   (map (fn [c] [:db/retractEntity (:db/id c)]) discard)
+                   (move-card-tx (:db/id drawn) :hand (next-position drawer-hand) drawer-id))
+                 [{:db/id minigame-id :minigame/turn-index next-index}]))
+              []))
+          []))
+      [])))
 
 ;; --- Crazy 8s (example game) ---
 ;; A fourth demonstration of the generic card/deck system -- the first
@@ -2999,6 +3129,11 @@
 ;; and the first where the unit of action is a single specific card
 ;; (rank AND suit both matter) rather than a whole rank/hand. See
 ;; ogres.app.crazy-eights for the pure per-card legality logic.
+;;
+;; The FOURTH game ported onto the generic mini-game session
+;; scaffolding (see :scene/minigames, above the Players section) -- see
+;; :old-maid/start's own docstring for the shape every ported game now
+;; shares.
 
 (defn ^:private crazy-eights-player-active?
   "True if roster player-id refers to a still-existing, still-active
@@ -3012,195 +3147,183 @@
     (boolean (and entity (:player/active entity)))))
 
 (defn ^:private crazy-eights-turn-player
-  "The roster player entity whose turn it currently is, or nil if no
-   Crazy 8s game is in progress, or if every seated player has since
-   been benched/removed -- resolves the corrected index the same way
-   go-fish-turn-player/old-maid-turn-player do, see
-   ogres.app.turn-order/valid-turn-index."
-  [data]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        players (:scene/crazy-eights-players scene)
-        idx (:scene/crazy-eights-turn-index scene)]
+  "The roster player entity whose turn it currently is at `minigame`,
+   or nil if every seated player has since been benched/removed --
+   resolves the corrected index the same way go-fish-turn-player/old-
+   maid-turn-player do, see ogres.app.turn-order/valid-turn-index."
+  [data minigame]
+  (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+        idx (:minigame/turn-index minigame)]
     (if (seq players)
       (let [corrected (turn-order/valid-turn-index players (partial crazy-eights-player-active? data) idx)]
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
 (defn ^:private crazy-eights-authorized-for-turn?
-  "True if the local viewer speaks for the current Crazy 8s turn player
+  "True if the local viewer speaks for `minigame`'s current turn player
    -- same player/authority? primitive Go Fish/Old Maid's own
-   authorized-for-turn? use, deliberately still just host-only fallback
-   (not suppressed by :scene/neutral-authority?) for the same turn-
-   continuity-safety-net reason theirs are."
-  [data]
+   authorized-for-turn? use, fed the current turn seat's effective
+   controller (see minigame-controller-uuid), deliberately still just
+   host-only fallback (not suppressed by :minigame/neutral-authority?)
+   for the same turn-continuity-safety-net reason theirs are."
+  [data minigame]
   (let [user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (crazy-eights-turn-player data) [:player/controller :user/uuid])]
-    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+        turn-player-id (:db/id (crazy-eights-turn-player data minigame))
+        seat (some #(if (= (:db/id (:seat/player %)) turn-player-id) %) (:minigame/seats minigame))]
+    (player/authority? (:user/uuid user) (:user/host user) connected
+                        (if seat (minigame-controller-uuid seat)))))
 
 (defmethod
-  ^{:doc "Starts a new Crazy 8s game: creates a fresh 52-card deck (the
-          standard deck with suit-less 8s, see game-type.games.crazy-
-          eights/deck-definitions), adds it to :scene/decks, deals 6
-          cards to each currently-active roster player (deal-assignment
-          with n 6 -- untouched cards simply stay at :card/location
-          :draw from deck-create-tx, no post-processing needed the way
-          Old Maid's whole-deck deal requires), then flips the topmost
-          remaining NON-8 card face up onto the discard pile as the
-          starting card -- skipping past any 8s so play never opens
-          with a suit-less card and no declared suit yet (the digital
-          equivalent of reshuffling a wild starter back in). Sets
-          :scene/crazy-eights-players/-turn-index 0/-suit (the starting
-          card's own suit) and :scene/neutral-authority? true -- no
-          :scene/crazy-eights-winner at all until someone actually
-          empties their hand. Host-driven like every other setup action
-          in this app -- UI-gated, not enforced here."}
+  ^{:doc "Starts a new Crazy 8s session seated by exactly
+          `participant-ids` -- rejected if fewer than 2 are given, or
+          if :crazy-eights/game isn't actually enabled on the scene's
+          own game-type (checked here, not just gated in the UI, since
+          any connected participant may dispatch this). Creates a fresh
+          52-card deck (the standard deck with suit-less 8s, see
+          game-type.games.crazy-eights/deck-definitions), deals 6 cards
+          to each participant (deal-assignment with n 6 -- untouched
+          cards simply stay at :card/location :draw from deck-create-
+          tx, no post-processing needed the way Old Maid's whole-deck
+          deal requires), then flips the topmost remaining NON-8 card
+          face up onto the discard pile as the starting card --
+          skipping past any 8s so play never opens with a suit-less
+          card and no declared suit yet (the digital equivalent of
+          reshuffling a wild starter back in). The new session (see
+          minigame-create-tx) starts at :minigame/turn-index 0,
+          :minigame/suit (the starting card's own suit), and
+          :minigame/neutral-authority? true -- no :minigame/winner at
+          all until someone actually empties their hand. Anyone, not
+          just the host, may start a table, same as :old-maid/start."}
   event-tx-fn :crazy-eights/start
-  [data _]
-  (let [root (ds/entity data [:db/ident :root])
-        active (->> (:root/players root)
-                    (filter :player/active)
-                    (sort-by :db/id)
-                    (mapv :db/id))
-        [deck-id deck-tx] (deck-create-tx :crazy-eights-52 {})
-        deck-map (first deck-tx)
-        cards (filter :card/rank deck-tx)
-        hands (deal-assignment cards active 6)
-        dealt-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id hand))) hands)
-        hand-tx (mapcat (fn [[holder-id hand]]
-                           (map-indexed
-                            (fn [i card] {:db/id (:db/id card) :card/location :hand
-                                          :card/holder holder-id :card/position i})
-                            hand))
-                         hands)
-        remaining (remove (comp dealt-ids :db/id) cards)
-        starter (top-card (remove (comp #{:eight} :card/rank) remaining))
-        discard-tx [{:db/id (:db/id starter) :card/location :discard :card/position 0}]]
-    (concat
-     [deck-map]
-     cards
-     hand-tx
-     discard-tx
-     [[:db.fn/call assoc-scene
-       :scene/decks deck-id
-       :scene/crazy-eights-deck deck-id
-       :scene/crazy-eights-players active
-       :scene/crazy-eights-turn-index 0
-       :scene/crazy-eights-suit (:card/suit starter)
-       :scene/neutral-authority? true]])))
+  [data _ participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :crazy-eights/game) (>= (count participant-ids) 2))
+      (let [[deck-id deck-tx] (deck-create-tx :crazy-eights-52 {})
+            deck-map (first deck-tx)
+            cards (filter :card/rank deck-tx)
+            hands (deal-assignment cards participant-ids 6)
+            dealt-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id hand))) hands)
+            hand-tx (mapcat (fn [[holder-id hand]]
+                               (map-indexed
+                                (fn [i card] {:db/id (:db/id card) :card/location :hand
+                                              :card/holder holder-id :card/position i})
+                                hand))
+                             hands)
+            remaining (remove (comp dealt-ids :db/id) cards)
+            starter (top-card (remove (comp #{:eight} :card/rank) remaining))
+            discard-tx [{:db/id (:db/id starter) :card/location :discard :card/position 0}]
+            label (minigame-label (:scene/minigames scene) :crazy-eights "Crazy 8s")
+            minigame-id (dec deck-id)
+            shell-tx (minigame-create-tx minigame-id :crazy-eights label deck-id participant-ids)]
+        (concat
+         [deck-map]
+         cards
+         hand-tx
+         discard-tx
+         shell-tx
+         [{:db/id minigame-id :minigame/suit (:card/suit starter)}]
+         (minigame-attach-tx (:db/id scene) minigame-id)))
+      [])))
 
 (defmethod
-  ^{:doc "The core Crazy 8s turn action: `player-id` plays `card-id`
-          from their own hand face up onto the discard pile, legal only
-          per ogres.app.crazy-eights/playable? (checked here, server-
-          side -- the panel's disabled state is convenience, not
-          enforcement). `suit` names the suit to declare when `card-id`
-          is an 8 (a wild, always legal); ignored otherwise, since a
-          non-8's own :card/suit becomes the new thing to match against
-          instead. If this empties the player's hand, they've won --
-          :scene/crazy-eights-winner is set and the turn index is left
-          alone (the game is over, not paused); otherwise the turn
-          unconditionally advances to the next active player. A no-op
-          if it isn't `player-id`'s turn, or the card isn't theirs, or
-          isn't currently legal to play. The 'next' index is computed
-          from the PLAYER's own resolved position in `players` -- never
-          from the raw stored :scene/crazy-eights-turn-index -- for the
-          same stale-index reason :old-maid/draw's fix applies: that
-          stored index can go stale relative to the actual (skip-
-          inactive) current player when someone is benched externally
-          between turns."}
+  ^{:doc "The core Crazy 8s turn action within `minigame-id`: `player-
+          id` plays `card-id` from their own hand face up onto the
+          discard pile, legal only per ogres.app.crazy-eights/playable?
+          (checked here, server-side -- the panel's disabled state is
+          convenience, not enforcement). `suit` names the suit to
+          declare when `card-id` is an 8 (a wild, always legal);
+          ignored otherwise, since a non-8's own :card/suit becomes the
+          new thing to match against instead. If this empties the
+          player's hand, they've won -- :minigame/winner is set and the
+          turn index is left alone (the game is over, not paused);
+          otherwise the turn unconditionally advances to the next
+          active player. A no-op if it isn't `player-id`'s turn, or the
+          card isn't theirs, or isn't currently legal to play. The
+          'next' index is computed from the PLAYER's own resolved
+          position among the session's seats -- never from the raw
+          stored :minigame/turn-index -- for the same stale-index
+          reason :old-maid/draw's fix applies: that stored index can go
+          stale relative to the actual (skip-inactive) current player
+          when someone is benched externally between turns."}
   event-tx-fn :crazy-eights/play
-  [data _ player-id card-id suit]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
-    (if (and (nil? (:scene/crazy-eights-winner scene))
-             (crazy-eights-authorized-for-turn? data)
-             (= (:db/id (crazy-eights-turn-player data)) player-id))
-      (let [deck-id (:db/id (:scene/crazy-eights-deck scene))
+  [data _ minigame-id player-id card-id suit]
+  (let [minigame (ds/entity data minigame-id)]
+    (if (and minigame
+             (nil? (:minigame/winner minigame))
+             (crazy-eights-authorized-for-turn? data minigame)
+             (= (:db/id (crazy-eights-turn-player data minigame)) player-id))
+      (let [deck-id (:db/id (:minigame/deck minigame))
             deck (ds/entity data deck-id)
             hand (cards/cards-of-holder (:deck/cards deck) player-id)
             card (some #(if (= (:db/id %) card-id) %) hand)
             discard (pile deck :discard)
             top (top-card discard)
-            declared-suit (:scene/crazy-eights-suit scene)]
+            declared-suit (:minigame/suit minigame)]
         (if (and card (crazy-eights/playable? card top declared-suit))
           (let [remaining-hand (remove (comp #{card-id} :db/id) hand)
                 new-suit (if (= (:card/rank card) :eight) suit (:card/suit card))
-                players (:scene/crazy-eights-players scene)
+                players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
                 active? (partial crazy-eights-player-active? data)
                 player-index (first (keep-indexed (fn [i id] (if (= id player-id) i)) players))
                 next-index (turn-order/next-turn-index players active? player-index)]
             (concat
              (move-card-tx card-id :discard (next-position discard) nil)
-             [[:db.fn/call assoc-scene :scene/crazy-eights-suit new-suit]]
+             [{:db/id minigame-id :minigame/suit new-suit}]
              (if (empty? remaining-hand)
-               [[:db.fn/call assoc-scene :scene/crazy-eights-winner player-id]]
+               [{:db/id minigame-id :minigame/winner player-id}]
                (if next-index
-                 [[:db.fn/call assoc-scene :scene/crazy-eights-turn-index next-index]]
+                 [{:db/id minigame-id :minigame/turn-index next-index}]
                  []))))
           []))
       [])))
 
 (defmethod
-  ^{:doc "Draws exactly one card into `player-id`'s hand -- legal only
-          when they currently hold NO playable card (see ogres.app.
-          crazy-eights/playable-cards; drawing is never an optional
-          escape hatch when a real play exists). Does NOT advance the
-          turn -- one click, one card, same player's turn continues
-          (they either draw again or, once able, play -- both separate
-          dispatches), the literal 'draw cards until you're able to
-          match or play an 8' rule rather than an auto-play. If the
-          draw pile is empty, reshuffles the discard pile EXCEPT its
-          live top card back into the draw pile first (effective-draw-
-          pile, shared with Rummy's own draw-from-pile action). In the
-          near-impossible case where even that leaves nothing to draw,
-          the turn passes instead of deadlocking on a player who can
-          neither play nor draw. A no-op once the game's already been
-          won."}
+  ^{:doc "Draws exactly one card into `player-id`'s hand within
+          `minigame-id` -- legal only when they currently hold NO
+          playable card (see ogres.app.crazy-eights/playable-cards;
+          drawing is never an optional escape hatch when a real play
+          exists). Does NOT advance the turn -- one click, one card,
+          same player's turn continues (they either draw again or, once
+          able, play -- both separate dispatches), the literal 'draw
+          cards until you're able to match or play an 8' rule rather
+          than an auto-play. If the draw pile is empty, reshuffles the
+          discard pile EXCEPT its live top card back into the draw pile
+          first (effective-draw-pile, shared with Rummy's own draw-
+          from-pile action). In the near-impossible case where even
+          that leaves nothing to draw, the turn passes instead of
+          deadlocking on a player who can neither play nor draw. A
+          no-op once the game's already been won."}
   event-tx-fn :crazy-eights/draw
-  [data _ player-id]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
-    (if (and (nil? (:scene/crazy-eights-winner scene))
-             (crazy-eights-authorized-for-turn? data)
-             (= (:db/id (crazy-eights-turn-player data)) player-id))
-      (let [deck-id (:db/id (:scene/crazy-eights-deck scene))
+  [data _ minigame-id player-id]
+  (let [minigame (ds/entity data minigame-id)]
+    (if (and minigame
+             (nil? (:minigame/winner minigame))
+             (crazy-eights-authorized-for-turn? data minigame)
+             (= (:db/id (crazy-eights-turn-player data minigame)) player-id))
+      (let [deck-id (:db/id (:minigame/deck minigame))
             deck (ds/entity data deck-id)
             hand (cards/cards-of-holder (:deck/cards deck) player-id)
             discard (pile deck :discard)
             top (top-card discard)
-            declared-suit (:scene/crazy-eights-suit scene)]
+            declared-suit (:minigame/suit minigame)]
         (if (seq (crazy-eights/playable-cards hand top declared-suit))
           []
           (let [{:keys [cards reshuffle-tx]} (effective-draw-pile deck)]
             (if (seq cards)
               (let [drawn (apply max-key :card/position cards)]
                 (concat reshuffle-tx (move-card-tx (:db/id drawn) :hand (next-position hand) player-id)))
-              (let [players (:scene/crazy-eights-players scene)
+              (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
                     active? (partial crazy-eights-player-active? data)
                     player-index (first (keep-indexed (fn [i id] (if (= id player-id) i)) players))
                     next-index (turn-order/next-turn-index players active? player-index)]
                 (if next-index
-                  [[:db.fn/call assoc-scene :scene/crazy-eights-turn-index next-index]]
+                  [{:db/id minigame-id :minigame/turn-index next-index}]
                   []))))))
       [])))
-
-(defmethod
-  ^{:doc "Ends the current Crazy 8s game: retracts the deck (and every
-          card in it, via :deck/cards' :db/isComponent cascade), clears
-          the :scene/crazy-eights-* attributes, and clears :scene/
-          neutral-authority? back to false -- directly mirrors
-          :old-maid/end/:go-fish/end."}
-  event-tx-fn :crazy-eights/end
-  [data _]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        scene-id (:db/id scene)
-        deck-id (:db/id (:scene/crazy-eights-deck scene))]
-    (cond-> [[:db/retract scene-id :scene/crazy-eights-players]
-             [:db/retract scene-id :scene/crazy-eights-turn-index]
-             [:db/retract scene-id :scene/crazy-eights-deck]
-             [:db/retract scene-id :scene/crazy-eights-suit]
-             [:db/retract scene-id :scene/crazy-eights-winner]
-             [:db/add scene-id :scene/neutral-authority? false]]
-      deck-id (conj [:db/retractEntity deck-id]))))
 
 ;; --- Rummy (example game) ---
 ;; A fifth demonstration of the generic card/deck system -- the first
@@ -3211,6 +3334,10 @@
 ;; the shape turn-order/winners was built for and has had no real
 ;; consumer since Go Fish. See ogres.app.rummy for the pure set/run
 ;; detection logic.
+;;
+;; The FIFTH game ported onto the generic mini-game session scaffolding
+;; (see :scene/minigames, above the Players section) -- see :old-maid/
+;; start's own docstring for the shape every ported game now shares.
 
 (defn ^:private rummy-player-active?
   "True if roster player-id refers to a still-existing, still-active
@@ -3223,31 +3350,32 @@
     (boolean (and entity (:player/active entity)))))
 
 (defn ^:private rummy-turn-player
-  "The roster player entity whose turn it currently is, or nil if no
-   Rummy game is in progress, or if every seated player has since been
-   benched/removed -- resolves the corrected index the same way every
-   prior game's turn-player fn does, see ogres.app.turn-order/valid-
-   turn-index."
-  [data]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        players (:scene/rummy-players scene)
-        idx (:scene/rummy-turn-index scene)]
+  "The roster player entity whose turn it currently is at `minigame`,
+   or nil if every seated player has since been benched/removed --
+   resolves the corrected index the same way every prior game's
+   turn-player fn does, see ogres.app.turn-order/valid-turn-index."
+  [data minigame]
+  (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+        idx (:minigame/turn-index minigame)]
     (if (seq players)
       (let [corrected (turn-order/valid-turn-index players (partial rummy-player-active? data) idx)]
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
 (defn ^:private rummy-authorized-for-turn?
-  "True if the local viewer speaks for the current Rummy turn player --
-   same player/authority? primitive every prior game's authorized-for-
-   turn? uses, deliberately still just host-only fallback (not
-   suppressed by :scene/neutral-authority?) for the same turn-
-   continuity-safety-net reason theirs are."
-  [data]
+  "True if the local viewer speaks for `minigame`'s current turn player
+   -- same player/authority? primitive every prior game's authorized-
+   for-turn? uses, fed the current turn seat's effective controller
+   (see minigame-controller-uuid), deliberately still just host-only
+   fallback (not suppressed by :minigame/neutral-authority?) for the
+   same turn-continuity-safety-net reason theirs are."
+  [data minigame]
   (let [user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (rummy-turn-player data) [:player/controller :user/uuid])]
-    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+        turn-player-id (:db/id (rummy-turn-player data minigame))
+        seat (some #(if (= (:db/id (:seat/player %)) turn-player-id) %) (:minigame/seats minigame))]
+    (player/authority? (:user/uuid user) (:user/host user) connected
+                        (if seat (minigame-controller-uuid seat)))))
 
 (defn ^:private rummy-finished?
   "True once ANY of `players`' hands has emptied -- Rummy ends outright
@@ -3260,85 +3388,90 @@
   (boolean (some (fn [id] (empty? (cards/cards-of-holder (:deck/cards deck) id))) players)))
 
 (defmethod
-  ^{:doc "Starts a new Rummy game: creates a fresh 52-card deck (the
-          standard deck, completely unmodified -- the purest reuse
-          case yet, see game-type.games.rummy), adds it to :scene/
-          decks, deals 6 cards to each currently-active roster player
-          (deal-assignment with n 6, same as Go Fish/Crazy 8s), then
-          flips the topmost remaining card face up onto the discard
-          pile as the starting card -- any rank is fine here, unlike
-          Crazy 8s' starter pick, since Rummy has no wild/suit-less
-          card to skip past. Sets :scene/rummy-players/-turn-index
-          0/-drawn? false and :scene/neutral-authority? true -- no
-          :scene/rummy-winner/-scores at all: unlike Crazy 8s' single
-          stored winner, Rummy's tally is derived live from :card/
-          holder on every :scored card (see rummy-finished?/panel_
-          rummy.cljs), since the game-ending player and the eventual
-          winner are often different people here. Host-driven like
-          every other setup action in this app -- UI-gated, not
-          enforced here."}
+  ^{:doc "Starts a new Rummy session seated by exactly
+          `participant-ids` -- rejected if fewer than 2 are given, or
+          if :rummy/game isn't actually enabled on the scene's own
+          game-type (checked here, not just gated in the UI, since any
+          connected participant may dispatch this). Creates a fresh
+          52-card deck (the standard deck, completely unmodified --
+          the purest reuse case yet, see game-type.games.rummy), deals
+          6 cards to each participant (deal-assignment with n 6, same
+          as Go Fish/Crazy 8s), then flips the topmost remaining card
+          face up onto the discard pile as the starting card -- any
+          rank is fine here, unlike Crazy 8s' starter pick, since
+          Rummy has no wild/suit-less card to skip past. The new
+          session (see minigame-create-tx) starts at :minigame/turn-
+          index 0, :minigame/drawn? false, and :minigame/neutral-
+          authority? true -- no :minigame/winner/-scores at all:
+          unlike Crazy 8s' single stored winner, Rummy's tally is
+          derived live from :card/holder on every :scored card (see
+          rummy-finished?/panel_rummy.cljs), since the game-ending
+          player and the eventual winner are often different people
+          here. Anyone, not just the host, may start a table, same as
+          :old-maid/start."}
   event-tx-fn :rummy/start
-  [data _]
-  (let [root (ds/entity data [:db/ident :root])
-        active (->> (:root/players root)
-                    (filter :player/active)
-                    (sort-by :db/id)
-                    (mapv :db/id))
-        [deck-id deck-tx] (deck-create-tx :standard-52 {})
-        deck-map (first deck-tx)
-        cards (filter :card/rank deck-tx)
-        hands (deal-assignment cards active 6)
-        dealt-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id hand))) hands)
-        hand-tx (mapcat (fn [[holder-id hand]]
-                           (map-indexed
-                            (fn [i card] {:db/id (:db/id card) :card/location :hand
-                                          :card/holder holder-id :card/position i})
-                            hand))
-                         hands)
-        remaining (remove (comp dealt-ids :db/id) cards)
-        starter (top-card remaining)
-        discard-tx [{:db/id (:db/id starter) :card/location :discard :card/position 0}]]
-    (concat
-     [deck-map]
-     cards
-     hand-tx
-     discard-tx
-     [[:db.fn/call assoc-scene
-       :scene/decks deck-id
-       :scene/rummy-deck deck-id
-       :scene/rummy-players active
-       :scene/rummy-turn-index 0
-       :scene/rummy-drawn? false
-       :scene/neutral-authority? true]])))
+  [data _ participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :rummy/game) (>= (count participant-ids) 2))
+      (let [[deck-id deck-tx] (deck-create-tx :standard-52 {})
+            deck-map (first deck-tx)
+            cards (filter :card/rank deck-tx)
+            hands (deal-assignment cards participant-ids 6)
+            dealt-ids (into #{} (mapcat (fn [[_ hand]] (map :db/id hand))) hands)
+            hand-tx (mapcat (fn [[holder-id hand]]
+                               (map-indexed
+                                (fn [i card] {:db/id (:db/id card) :card/location :hand
+                                              :card/holder holder-id :card/position i})
+                                hand))
+                             hands)
+            remaining (remove (comp dealt-ids :db/id) cards)
+            starter (top-card remaining)
+            discard-tx [{:db/id (:db/id starter) :card/location :discard :card/position 0}]
+            label (minigame-label (:scene/minigames scene) :rummy "Rummy")
+            minigame-id (dec deck-id)
+            shell-tx (minigame-create-tx minigame-id :rummy label deck-id participant-ids)]
+        (concat
+         [deck-map]
+         cards
+         hand-tx
+         discard-tx
+         shell-tx
+         [{:db/id minigame-id :minigame/drawn? false}]
+         (minigame-attach-tx (:db/id scene) minigame-id)))
+      [])))
 
 (defmethod
-  ^{:doc "The first half of the core Rummy turn action: draws the top
-          of the draw pile into `player-id`'s hand -- legal only once
-          per turn (:scene/rummy-drawn? must still be false) and only
-          on their own turn. Reuses effective-draw-pile (shared with
-          Crazy 8s' :crazy-eights/draw) for 'reshuffle the discard pile
-          minus its live top card when the draw pile runs dry'. Sets
-          :scene/rummy-drawn? true -- :rummy/discard checks this
-          before allowing the mandatory end-of-turn discard, and
-          clears it again once that fires. A no-op if the game's
-          already finished, they've already drawn this turn, or
+  ^{:doc "The first half of the core Rummy turn action within
+          `minigame-id`: draws the top of the draw pile into `player-
+          id`'s hand -- legal only once per turn (:minigame/drawn? must
+          still be false) and only on their own turn. Reuses effective-
+          draw-pile (shared with Crazy 8s' :crazy-eights/draw) for
+          'reshuffle the discard pile minus its live top card when the
+          draw pile runs dry'. Sets :minigame/drawn? true -- :rummy/
+          discard checks this before allowing the mandatory end-of-turn
+          discard, and clears it again once that fires. A no-op if the
+          game's already finished, they've already drawn this turn, or
           there's truly nothing left to draw."}
   event-tx-fn :rummy/draw-from-pile
-  [data _ player-id]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        deck-id (:db/id (:scene/rummy-deck scene))
-        deck (ds/entity data deck-id)]
-    (if (and (not (rummy-finished? deck (:scene/rummy-players scene)))
-             (not (:scene/rummy-drawn? scene))
-             (rummy-authorized-for-turn? data)
-             (= (:db/id (rummy-turn-player data)) player-id))
+  [data _ minigame-id player-id]
+  (let [minigame (ds/entity data minigame-id)
+        deck-id (if minigame (:db/id (:minigame/deck minigame)))
+        deck (if deck-id (ds/entity data deck-id))]
+    (if (and minigame
+             (not (rummy-finished? deck (mapv (comp :db/id :seat/player) (minigame-seats minigame))))
+             (not (:minigame/drawn? minigame))
+             (rummy-authorized-for-turn? data minigame)
+             (= (:db/id (rummy-turn-player data minigame)) player-id))
       (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
             {:keys [cards reshuffle-tx]} (effective-draw-pile deck)]
         (if (seq cards)
           (let [drawn (apply max-key :card/position cards)]
             (concat reshuffle-tx
                     (move-card-tx (:db/id drawn) :hand (next-position hand) player-id)
-                    [[:db.fn/call assoc-scene :scene/rummy-drawn? true]]))
+                    [{:db/id minigame-id :minigame/drawn? true}]))
           []))
       [])))
 
@@ -3349,52 +3482,55 @@
           guards as :rummy/draw-from-pile. A no-op if the discard pile
           is (momentarily) empty."}
   event-tx-fn :rummy/draw-from-discard
-  [data _ player-id]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        deck-id (:db/id (:scene/rummy-deck scene))
-        deck (ds/entity data deck-id)]
-    (if (and (not (rummy-finished? deck (:scene/rummy-players scene)))
-             (not (:scene/rummy-drawn? scene))
-             (rummy-authorized-for-turn? data)
-             (= (:db/id (rummy-turn-player data)) player-id))
+  [data _ minigame-id player-id]
+  (let [minigame (ds/entity data minigame-id)
+        deck-id (if minigame (:db/id (:minigame/deck minigame)))
+        deck (if deck-id (ds/entity data deck-id))]
+    (if (and minigame
+             (not (rummy-finished? deck (mapv (comp :db/id :seat/player) (minigame-seats minigame))))
+             (not (:minigame/drawn? minigame))
+             (rummy-authorized-for-turn? data minigame)
+             (= (:db/id (rummy-turn-player data minigame)) player-id))
       (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
             discard (pile deck :discard)]
         (if (seq discard)
           (let [top (top-card discard)]
             (concat (move-card-tx (:db/id top) :hand (next-position hand) player-id)
-                    [[:db.fn/call assoc-scene :scene/rummy-drawn? true]]))
+                    [{:db/id minigame-id :minigame/drawn? true}]))
           []))
       [])))
 
 (defmethod
-  ^{:doc "Lays down a scored set from `player-id`'s own hand for
-          `rank`, gated by player/authority? over that specific seat
-          (same explicit player-id-arg pattern :go-fish/score uses)
-          and NOT turn-gated -- laying down a completed set (or laying
-          off the 4th onto an existing one) is bookkeeping any
-          authorized player can do any time, the same call Go Fish
-          already made for the identical reason. How many cards move
-          depends on how many of `rank` are ALREADY scored on the
-          table (ogres.app.rummy/scoreable-set): a fresh set takes
-          everything the player holds (3 or 4 at once); once exactly 3
-          are already down, ANY player -- not just whoever scored the
-          original 3 -- laying off the 4th needs just that one card.
-          :card/holder still records who gets individual credit for
-          each card laid down -- the win condition is 'most scored
-          cards', not 'most complete sets', so who contributed which
-          specific card is what matters, not who 'owns' a shared table
-          group. A no-op if the game's finished or `player-id` doesn't
-          have an eligible set for `rank` right now."}
+  ^{:doc "Lays down a scored set from `player-id`'s own hand for `rank`
+          within `minigame-id`, gated by player/authority? over that
+          specific seat's effective controller (see minigame-
+          controller-uuid, same explicit player-id-arg pattern :go-
+          fish/score uses) and NOT turn-gated -- laying down a
+          completed set (or laying off the 4th onto an existing one)
+          is bookkeeping any authorized player can do any time, the
+          same call Go Fish already made for the identical reason. How
+          many cards move depends on how many of `rank` are ALREADY
+          scored on the table (ogres.app.rummy/scoreable-set): a fresh
+          set takes everything the player holds (3 or 4 at once); once
+          exactly 3 are already down, ANY player -- not just whoever
+          scored the original 3 -- laying off the 4th needs just that
+          one card. :card/holder still records who gets individual
+          credit for each card laid down -- the win condition is 'most
+          scored cards', not 'most complete sets', so who contributed
+          which specific card is what matters, not who 'owns' a shared
+          table group. A no-op if the game's finished, `player-id`
+          isn't actually seated at this session, or they don't have an
+          eligible set for `rank` right now."}
   event-tx-fn :rummy/score
-  [data _ player-id rank]
-  (let [user (ds/entity data [:db/ident :user])
+  [data _ minigame-id player-id rank]
+  (let [minigame (ds/entity data minigame-id)
+        user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
-    (if (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)
-      (let [scene (:camera/scene (:user/camera user))
-            deck-id (:db/id (:scene/rummy-deck scene))
+        seat (if minigame (some #(if (= (:db/id (:seat/player %)) player-id) %) (:minigame/seats minigame)))]
+    (if (and seat (player/authority? (:user/uuid user) (:user/host user) connected (minigame-controller-uuid seat)))
+      (let [deck-id (:db/id (:minigame/deck minigame))
             deck (ds/entity data deck-id)]
-        (if (rummy-finished? deck (:scene/rummy-players scene))
+        (if (rummy-finished? deck (mapv (comp :db/id :seat/player) (minigame-seats minigame)))
           []
           (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
                 group (cards/cards-of-rank hand rank)
@@ -3411,30 +3547,33 @@
 
 (defmethod
   ^{:doc "Lays down a run (3+ consecutive ranks, one suit) from
-          `player-id`'s own hand -- only reachable when :rummy/runs is
-          enabled (checked here server-side, the same live-from-
-          enabled-elements pattern :go-fish/ask-anyone etc. use), and
-          only for the EXACT `card-ids` given (validated directly
-          against ogres.app.rummy/runs on the player's own hand right
-          now, not re-derived from a suit/range -- the same 'explicit
-          ids, not re-derived' idiom :crazy-eights/play already uses).
-          Same authority (not turn-gated) as :rummy/score. No lay-off-
-          the-4th equivalent for runs -- out of scope, the user's own
-          description of that rule was specific to sets. A no-op if
-          the game's finished, the element's disabled, or `card-ids`
-          doesn't exactly match one of the player's own current runs."}
+          `player-id`'s own hand within `minigame-id` -- only reachable
+          when :rummy/runs is enabled (checked here server-side, the
+          same live-from-enabled-elements pattern :go-fish/ask-anyone
+          etc. use), and only for the EXACT `card-ids` given (validated
+          directly against ogres.app.rummy/runs on the player's own
+          hand right now, not re-derived from a suit/range -- the same
+          'explicit ids, not re-derived' idiom :crazy-eights/play
+          already uses). Same authority (not turn-gated) as :rummy/
+          score. No lay-off-the-4th equivalent for runs -- out of
+          scope, the user's own description of that rule was specific
+          to sets. A no-op if the game's finished, the element's
+          disabled, `player-id` isn't seated at this session, or
+          `card-ids` doesn't exactly match one of the player's own
+          current runs."}
   event-tx-fn :rummy/score-run
-  [data _ player-id card-ids]
-  (let [user (ds/entity data [:db/ident :user])
+  [data _ minigame-id player-id card-ids]
+  (let [minigame (ds/entity data minigame-id)
+        user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
-    (if (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)
+        seat (if minigame (some #(if (= (:db/id (:seat/player %)) player-id) %) (:minigame/seats minigame)))]
+    (if (and seat (player/authority? (:user/uuid user) (:user/host user) connected (minigame-controller-uuid seat)))
       (let [scene (:camera/scene (:user/camera user))
             enabled (:game-type/enabled-elements (:scene/game-type scene))
-            deck-id (:db/id (:scene/rummy-deck scene))
+            deck-id (:db/id (:minigame/deck minigame))
             deck (ds/entity data deck-id)]
         (if (and (contains? enabled :rummy/runs)
-                 (not (rummy-finished? deck (:scene/rummy-players scene))))
+                 (not (rummy-finished? deck (mapv (comp :db/id :seat/player) (minigame-seats minigame)))))
           (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
                 id-set (set card-ids)
                 valid? (some #(= (set (map :db/id %)) id-set) (rummy/runs hand))]
@@ -3449,62 +3588,45 @@
       [])))
 
 (defmethod
-  ^{:doc "Ends `player-id`'s turn: discards `card-id` from their own
-          hand face up onto the discard pile -- legal only once
-          they've already drawn this turn (:scene/rummy-drawn? true,
-          the mandatory 'you must draw before you may discard'
-          sequencing) and it's their turn. Clears :scene/rummy-drawn?
-          back to false and advances the turn unconditionally to the
-          next active player -- resolved from the PLAYER's own
-          resolved position in `players`, never the raw stored
-          :scene/rummy-turn-index, the same stale-index-safe pattern
-          :old-maid/draw's fix and :crazy-eights/play both already
-          apply. A no-op if the game's already finished, it isn't
-          `player-id`'s turn, they haven't drawn yet, or `card-id`
-          isn't actually in their hand."}
+  ^{:doc "Ends `player-id`'s turn within `minigame-id`: discards
+          `card-id` from their own hand face up onto the discard pile
+          -- legal only once they've already drawn this turn
+          (:minigame/drawn? true, the mandatory 'you must draw before
+          you may discard' sequencing) and it's their turn. Clears
+          :minigame/drawn? back to false and advances the turn
+          unconditionally to the next active player -- resolved from
+          the PLAYER's own resolved position among the session's seats,
+          never the raw stored :minigame/turn-index, the same stale-
+          index-safe pattern :old-maid/draw's fix and :crazy-eights/
+          play both already apply. A no-op if the game's already
+          finished, it isn't `player-id`'s turn, they haven't drawn
+          yet, or `card-id` isn't actually in their hand."}
   event-tx-fn :rummy/discard
-  [data _ player-id card-id]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        deck-id (:db/id (:scene/rummy-deck scene))
-        deck (ds/entity data deck-id)]
-    (if (and (not (rummy-finished? deck (:scene/rummy-players scene)))
-             (:scene/rummy-drawn? scene)
-             (rummy-authorized-for-turn? data)
-             (= (:db/id (rummy-turn-player data)) player-id))
+  [data _ minigame-id player-id card-id]
+  (let [minigame (ds/entity data minigame-id)
+        deck-id (if minigame (:db/id (:minigame/deck minigame)))
+        deck (if deck-id (ds/entity data deck-id))]
+    (if (and minigame
+             (not (rummy-finished? deck (mapv (comp :db/id :seat/player) (minigame-seats minigame))))
+             (:minigame/drawn? minigame)
+             (rummy-authorized-for-turn? data minigame)
+             (= (:db/id (rummy-turn-player data minigame)) player-id))
       (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
             card (some #(if (= (:db/id %) card-id) %) hand)]
         (if card
           (let [discard (pile deck :discard)
-                players (:scene/rummy-players scene)
+                players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
                 active? (partial rummy-player-active? data)
                 player-index (first (keep-indexed (fn [i id] (if (= id player-id) i)) players))
                 next-index (turn-order/next-turn-index players active? player-index)]
             (concat
              (move-card-tx card-id :discard (next-position discard) nil)
-             [[:db.fn/call assoc-scene :scene/rummy-drawn? false]]
+             [{:db/id minigame-id :minigame/drawn? false}]
              (if next-index
-               [[:db.fn/call assoc-scene :scene/rummy-turn-index next-index]]
+               [{:db/id minigame-id :minigame/turn-index next-index}]
                [])))
           []))
       [])))
-
-(defmethod
-  ^{:doc "Ends the current Rummy game: retracts the deck (and every
-          card in it, via :deck/cards' :db/isComponent cascade), clears
-          the :scene/rummy-* attributes, and clears :scene/neutral-
-          authority? back to false -- directly mirrors :crazy-eights/
-          end/:old-maid/end/:go-fish/end."}
-  event-tx-fn :rummy/end
-  [data _]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        scene-id (:db/id scene)
-        deck-id (:db/id (:scene/rummy-deck scene))]
-    (cond-> [[:db/retract scene-id :scene/rummy-players]
-             [:db/retract scene-id :scene/rummy-turn-index]
-             [:db/retract scene-id :scene/rummy-deck]
-             [:db/retract scene-id :scene/rummy-drawn?]
-             [:db/add scene-id :scene/neutral-authority? false]]
-      deck-id (conj [:db/retractEntity deck-id]))))
 
 ;; --- War (example game) ---
 ;; A sixth demonstration of the generic card/deck system -- and the
@@ -3513,6 +3635,13 @@
 ;; order (every active player plays simultaneously, every round --
 ;; ogres.app.turn-order is genuinely unused here, unlike every prior
 ;; game). See ogres.app.war for the pure tie-detection logic.
+;;
+;; The SIXTH and last game ported onto the generic mini-game session
+;; scaffolding (see :scene/minigames, above the Players section) -- see
+;; :old-maid/start's own docstring for the shape every ported game now
+;; shares. War's own :scene/war-contenders/-last-round become
+;; :minigame/contenders/-last-round, plain scalars on the session
+;; entity exactly like every other game's own extra state.
 
 (defn ^:private player-cards
   "`player-id`'s cards in `deck` currently at `location` (:draw or
@@ -3587,57 +3716,62 @@
           piles))
 
 (defmethod
-  ^{:doc "Starts a new War game: creates a fresh 52-card deck (the
-          standard deck, completely unmodified -- same reuse tier as
-          Rummy), adds it to :scene/decks, and deals the ENTIRE deck
-          to every currently-active roster player (deal-assignment
+  ^{:doc "Starts a new War session seated by exactly `participant-ids`
+          -- rejected if fewer than 2 are given, or if :war/game isn't
+          actually enabled on the scene's own game-type (checked here,
+          not just gated in the UI, since any connected participant may
+          dispatch this). Creates a fresh 52-card deck (the standard
+          deck, completely unmodified -- same reuse tier as Rummy), and
+          deals the ENTIRE deck to every participant (deal-assignment
           with n nil, Old Maid's exact call) straight into :card/
           location :draw -- no starting flip, since War has no shared
-          discard pile at all. Sets :scene/war-players -- leaves
-          :scene/war-contenders/-last-round unset (DataScript rejects
-          storing a literal nil via map-form assertion; :war/end
-          already retracts them, and a fresh scene never had them to
-          begin with). Host-driven like
-          every other setup action in this app -- UI-gated, not
-          enforced here."}
+          discard pile at all. The new session (see minigame-create-tx)
+          leaves :minigame/contenders/-last-round unset (DataScript
+          rejects storing a literal nil via map-form assertion;
+          :minigame/remove retracts the whole session anyway, so
+          there's nothing to separately clear). Anyone, not just the
+          host, may start a table, same as :old-maid/start."}
   event-tx-fn :war/start
-  [data _]
-  (let [root (ds/entity data [:db/ident :root])
-        active (->> (:root/players root)
-                    (filter :player/active)
-                    (sort-by :db/id)
-                    (mapv :db/id))
-        [deck-id deck-tx] (deck-create-tx :standard-52 {})
-        deck-map (first deck-tx)
-        cards (filter :card/rank deck-tx)
-        hands (deal-assignment cards active nil)
-        hand-tx (mapcat (fn [[holder-id hand]]
-                           (map-indexed
-                            (fn [i card] {:db/id (:db/id card) :card/location :draw
-                                          :card/holder holder-id :card/position i})
-                            hand))
-                         hands)]
-    (concat
-     [deck-map]
-     cards
-     hand-tx
-     [[:db.fn/call assoc-scene
-       :scene/decks deck-id
-       :scene/war-deck deck-id
-       :scene/war-players active]])))
+  [data _ participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :war/game) (>= (count participant-ids) 2))
+      (let [[deck-id deck-tx] (deck-create-tx :standard-52 {})
+            deck-map (first deck-tx)
+            cards (filter :card/rank deck-tx)
+            hands (deal-assignment cards participant-ids nil)
+            hand-tx (mapcat (fn [[holder-id hand]]
+                               (map-indexed
+                                (fn [i card] {:db/id (:db/id card) :card/location :draw
+                                              :card/holder holder-id :card/position i})
+                                hand))
+                             hands)
+            label (minigame-label (:scene/minigames scene) :war "War")
+            minigame-id (dec deck-id)
+            shell-tx (minigame-create-tx minigame-id :war label deck-id participant-ids)]
+        (concat
+         [deck-map]
+         cards
+         hand-tx
+         shell-tx
+         (minigame-attach-tx (:db/id scene) minigame-id)))
+      [])))
 
 (defmethod
-  ^{:doc "The only human action in the whole game: advances War by one
-          comparison step. No per-seat authorization at all -- there's
-          nothing to authorize (nobody chooses a card), the same trust
-          -the-UI-to-gate-it precedent :*/start/:*/end already set.
-          Contenders are :scene/war-contenders if a war is already in
-          progress (a prior tie), else every currently-active player --
-          this is what makes a tie resolve ONE ESCALATION PER CALL
-          rather than looping the whole chain internally: a second
-          :war/play-round dispatch is required to continue it,
-          matching a real game of War actually feeling like several
-          rounds rather than one silent jump to the result.
+  ^{:doc "The only human action in the whole game: advances `minigame-
+          id`'s War table by one comparison step. No per-seat
+          authorization at all -- there's nothing to authorize (nobody
+          chooses a card), the same trust-the-UI-to-gate-it precedent
+          :*/start/:minigame/remove already set. Contenders are
+          :minigame/contenders if a war is already in progress (a prior
+          tie), else every currently-active seat -- this is what makes
+          a tie resolve ONE ESCALATION PER CALL rather than looping the
+          whole chain internally: a second :war/play-round dispatch is
+          required to continue it, matching a real game of War actually
+          feeling like several rounds rather than one silent jump to
+          the result.
 
           Each contender draws their own top :draw card (reshuffling
           their own :won pile into a fresh :draw first if empty, see
@@ -3649,73 +3783,57 @@
             - a unique highest card sweeps the ENTIRE :war pile (this
               click's cards plus everything already sitting there from
               earlier escalations) to that player's :won pile,
-              :scene/war-contenders clears, and :scene/war-last-round
+              :minigame/contenders clears, and :minigame/last-round
               records the winner and how many cards they just won;
-            - 2+ tied for highest sets :scene/war-contenders to
-              exactly that tied set, leaving the pot in place for the
-              next call to continue;
+            - 2+ tied for highest sets :minigame/contenders to exactly
+              that tied set, leaving the pot in place for the next call
+              to continue;
             - nobody could draw at all (every remaining contender
               simultaneously out of cards -- fully degenerate) is a
-              no-op, left for a human to notice and End the game."}
+              no-op, left for a human to notice and end the table."}
   event-tx-fn :war/play-round
-  [data _]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        players (:scene/war-players scene)
-        deck-id (:db/id (:scene/war-deck scene))
-        deck (ds/entity data deck-id)
-        active? (partial war-player-active? data deck)
-        contenders (let [c (:scene/war-contenders scene)] (if (seq c) c (filter active? players)))]
-    (if (<= (count contenders) 1)
+  [data _ minigame-id]
+  (let [minigame (ds/entity data minigame-id)]
+    (if (nil? minigame)
       []
-      (let [piles0 (initial-piles deck contenders)
-            {:keys [piles drawn]}
-            (reduce (fn [{:keys [piles drawn]} pid]
-                      (let [[card piles'] (draw-one piles pid)]
-                        {:piles piles' :drawn (if card (assoc drawn pid card) drawn)}))
-                    {:piles piles0 :drawn {}}
-                    contenders)
-            remaining-pile-tx (piles-tx piles)]
-        (if (empty? drawn)
+      (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+            deck-id (:db/id (:minigame/deck minigame))
+            deck (ds/entity data deck-id)
+            active? (partial war-player-active? data deck)
+            contenders (let [c (:minigame/contenders minigame)] (if (seq c) c (filter active? players)))]
+        (if (<= (count contenders) 1)
           []
-          (let [war-pile (pile deck :war)
-                war-start (next-position war-pile)
-                move-to-war-tx (map-indexed
-                                 (fn [i [pid card]] {:db/id (:db/id card) :card/location :war
-                                                      :card/holder pid :card/position (+ war-start i)})
-                                 drawn)
-                tied (war/tied-for-highest drawn)]
-            (if (= (count tied) 1)
-              (let [winner-id (first tied)
-                    whole-pot (concat war-pile (vals drawn))
-                    won-start (count (:won (get piles winner-id)))
-                    award-tx (map-indexed
-                              (fn [i card] {:db/id (:db/id card) :card/location :won
-                                            :card/holder winner-id :card/position (+ won-start i)})
-                              whole-pot)]
-                (concat remaining-pile-tx move-to-war-tx award-tx
-                        [[:db/retract (:db/id scene) :scene/war-contenders]
-                         [:db.fn/call assoc-scene
-                          :scene/war-last-round {:winner-id winner-id :cards-won (count whole-pot)}]]))
-              (concat remaining-pile-tx move-to-war-tx
-                      [[:db.fn/call assoc-scene :scene/war-contenders (vec tied)]]))))))))
-
-(defmethod
-  ^{:doc "Ends the current War game: retracts the deck (and every card
-          in it, via :deck/cards' :db/isComponent cascade) and clears
-          the :scene/war-* attributes. Never touches :scene/neutral-
-          authority? at all -- unlike every other example game, War
-          has no privacy concept worth the name (nobody ever chooses
-          anything, so there's nothing a hidden hand would protect)."}
-  event-tx-fn :war/end
-  [data _]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))
-        scene-id (:db/id scene)
-        deck-id (:db/id (:scene/war-deck scene))]
-    (cond-> [[:db/retract scene-id :scene/war-players]
-             [:db/retract scene-id :scene/war-contenders]
-             [:db/retract scene-id :scene/war-last-round]
-             [:db/retract scene-id :scene/war-deck]]
-      deck-id (conj [:db/retractEntity deck-id]))))
+          (let [piles0 (initial-piles deck contenders)
+                {:keys [piles drawn]}
+                (reduce (fn [{:keys [piles drawn]} pid]
+                          (let [[card piles'] (draw-one piles pid)]
+                            {:piles piles' :drawn (if card (assoc drawn pid card) drawn)}))
+                        {:piles piles0 :drawn {}}
+                        contenders)
+                remaining-pile-tx (piles-tx piles)]
+            (if (empty? drawn)
+              []
+              (let [war-pile (pile deck :war)
+                    war-start (next-position war-pile)
+                    move-to-war-tx (map-indexed
+                                     (fn [i [pid card]] {:db/id (:db/id card) :card/location :war
+                                                          :card/holder pid :card/position (+ war-start i)})
+                                     drawn)
+                    tied (war/tied-for-highest drawn)]
+                (if (= (count tied) 1)
+                  (let [winner-id (first tied)
+                        whole-pot (concat war-pile (vals drawn))
+                        won-start (count (:won (get piles winner-id)))
+                        award-tx (map-indexed
+                                  (fn [i card] {:db/id (:db/id card) :card/location :won
+                                                :card/holder winner-id :card/position (+ won-start i)})
+                                  whole-pot)]
+                    (concat remaining-pile-tx move-to-war-tx award-tx
+                            [[:db/retract minigame-id :minigame/contenders]
+                             {:db/id minigame-id
+                              :minigame/last-round {:winner-id winner-id :cards-won (count whole-pot)}}]))
+                  (concat remaining-pile-tx move-to-war-tx
+                          [{:db/id minigame-id :minigame/contenders (vec tied)}]))))))))))
 
 ;; --- Board ---
 

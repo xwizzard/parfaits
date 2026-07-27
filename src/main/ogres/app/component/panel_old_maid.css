@@ -4,3 +4,22 @@
   font-weight: 600;
   margin-bottom: 6px;
 }
+
+.old-maid-seats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.old-maid-seat-controller {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.old-maid-seat-controller-name {
+  color: var(--color-black-500);
+  font-size: 12px;
+}
