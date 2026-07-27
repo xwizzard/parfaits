@@ -35,12 +35,23 @@
    attached effect (see ogres.app.attack-deck/effect-kinds)."
   [:minus-2 :minus-1 :plus-0 :plus-1 :plus-2 :null :times-2])
 
+(def ^:private reduced-randomness-label
+  "Reduced Randomness variant (p.49) display overrides -- :times-2/
+   :bless read as a flat '+2', :null/:curse as a flat '-2', when the
+   variant is on. Purely cosmetic (see :attack-deck/toggle-reduced-
+   randomness's own docstring) -- comparison/shuffle-triggering logic
+   never consults this."
+  {:times-2 "+2" :bless "+2" :null "-2" :curse "-2"})
+
 (defn ^:private draw-text
-  "Display text for one drawn kind + its optional attached effect, e.g.
-   \"+1\" or \"+1 Push 2\"."
-  [kind effect amount]
-  (let [effect-text (attack-deck/effect-label effect amount)]
-    (if effect-text (str (kind-label kind) " " effect-text) (kind-label kind))))
+  "Display text for one drawn/held kind + its optional attached effect,
+   e.g. \"+1\" or \"+1 Push 2\" -- \"-2\" instead of \"Null\"/\"CURSE\"
+   or \"+2\" instead of \"2x\"/\"BLESS\" when `reduced?` (the Reduced
+   Randomness variant) is on."
+  [kind effect amount reduced?]
+  (let [label (if reduced? (get reduced-randomness-label kind (kind-label kind)) (kind-label kind))
+        effect-text (attack-deck/effect-label effect amount)]
+    (if effect-text (str label " " effect-text) label)))
 
 (defn ^:private effect-card-groups
   "The deck's current effect cards, grouped by their exact (kind, effect,
@@ -55,6 +66,21 @@
               {:kind kind :effect effect :amount amount :count (count group)}))
        (sort-by (juxt :kind :effect))))
 
+(defn ^:private temporary-card-groups
+  "The deck's current :card/temporary? cards (BLESS/CURSE plus any item/
+   scenario-added plain or effect card), grouped the same way effect-
+   card-groups is -- what an :attack-deck/end-scenario sweep would
+   currently clear from this deck. Overlaps with effect-card-groups
+   whenever a card is both temporary AND carries an effect; shown as two
+   separate lenses rather than one combined view."
+  [cards]
+  (->> cards
+       (filter :card/temporary?)
+       (group-by (juxt :card/rank :card/effect :card/effect-amount))
+       (map (fn [[[kind effect amount] group]]
+              {:kind kind :effect effect :amount amount :count (count group)}))
+       (sort-by (juxt :kind :effect))))
+
 (def ^:private query
   [{:root/user
     [:user/uuid
@@ -62,11 +88,14 @@
      {:user/camera
       [{:camera/scene
         [[:scene/attack-deck-shuffle-icons? :default true]
+         [:scene/attack-deck-reduced-randomness? :default false]
          {:scene/attack-decks
           [:db/id :deck/name
            [:deck/needs-reshuffle? :default false]
            {:deck/owner [:db/id :player/name :player/color {:player/controller [:user/uuid]}]}
-           {:deck/cards [:card/rank :card/location [:card/effect :default nil] [:card/effect-amount :default nil]]}]}
+           {:deck/cards [:card/rank :card/location
+                         [:card/effect :default nil] [:card/effect-amount :default nil]
+                         [:card/temporary? :default nil]]}]}
          {:scene/attack-draws
           [:db/id
            [:draw/mode :default nil]
@@ -102,19 +131,21 @@
            (group-by (comp :db/id :draw/deck) draws))
      :authorized? authorized?
      :shuffle-icons? (:scene/attack-deck-shuffle-icons? scene)
+     :reduced-randomness? (:scene/attack-deck-reduced-randomness? scene)
      :has-monster? (some (comp nil? :deck/owner) decks)
      :players-without-deck (remove (comp owned-ids :db/id) (:root/players result))}))
 
 (defui ^:private composition-form
   [{:keys [dispatch deck-id disabled?]}]
-  (let [[deltas set-deltas] (uix/use-state {})]
+  (let [[deltas set-deltas] (uix/use-state {})
+        [temporary? set-temporary] (uix/use-state false)]
     ($ :form.attack-deck-composition-form
       {:on-submit
        (fn [event]
          (.preventDefault event)
          (doseq [[kind n] deltas]
            (cond
-             (pos? n) (dispatch :attack-deck/add-cards deck-id kind n)
+             (pos? n) (dispatch :attack-deck/add-cards deck-id kind n temporary?)
              (neg? n) (dispatch :attack-deck/remove-cards deck-id kind (- n))))
          (set-deltas {}))}
       ($ :fieldset.fieldset.attack-deck-composition-rows
@@ -130,6 +161,11 @@
                (fn [event]
                  (let [n (js/Number (.. event -target -value))]
                    (set-deltas (fn [d] (if (zero? n) (dissoc d kind) (assoc d kind n))))))}))))
+      ($ :label.checkbox.attack-deck-temporary-toggle
+        ($ :input
+          {:type "checkbox" :disabled disabled? :checked temporary?
+           :on-change (fn [event] (set-temporary (.. event -target -checked)))})
+        "Mark additions as temporary (item/scenario, removed at end of scenario)")
       ($ :button.button.button-neutral
         {:type "submit" :disabled (or disabled? (empty? deltas))}
         "Apply")
@@ -145,17 +181,41 @@
   "The deck's current special-effect cards (grouped, see effect-card-
    groups), each with a Remove button dispatching :attack-deck/remove-
    effect-cards for that exact (kind, effect, amount) triple."
-  [{:keys [dispatch deck-id cards disabled?]}]
+  [{:keys [dispatch deck-id cards disabled? reduced?]}]
   (let [groups (effect-card-groups cards)]
     (if (seq groups)
       ($ :ul.attack-deck-effect-list
         (for [{:keys [kind effect amount count]} groups]
           ($ :li.attack-deck-effect-item {:key (str kind "-" effect "-" amount)}
-            ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount) " x" count))
+            ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount reduced?) " x" count))
             ($ :button.button.button-danger
               {:type "button" :disabled disabled?
                :on-click #(dispatch :attack-deck/remove-effect-cards deck-id kind effect amount 1)}
               ($ icon {:name "trash3-fill" :size 14}))))))))
+
+(defui ^:private temporary-card-list
+  "The deck's current :card/temporary? cards (see temporary-card-groups)
+   -- what an :attack-deck/end-scenario sweep would clear from THIS
+   deck. Removal here is per-group (same shape as effect-card-list), via
+   whichever of :attack-deck/remove-cards/remove-effect-cards actually
+   matches (plain vs effect-bearing)."
+  [{:keys [dispatch deck-id cards disabled? reduced?]}]
+  (let [groups (temporary-card-groups cards)]
+    (if (seq groups)
+      ($ :<>
+        ($ :h3.attack-deck-temporary-heading "Temporary Cards")
+        ($ :ul.attack-deck-effect-list
+          (for [{:keys [kind effect amount count]} groups]
+            ($ :li.attack-deck-effect-item {:key (str "temp-" kind "-" effect "-" amount)}
+              ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount reduced?) " x" count))
+              ($ :button.button.button-danger
+                {:type "button" :disabled disabled?
+                 :on-click
+                 (fn []
+                   (if effect
+                     (dispatch :attack-deck/remove-effect-cards deck-id kind effect amount 1)
+                     (dispatch :attack-deck/remove-cards deck-id kind 1)))}
+                ($ icon {:name "trash3-fill" :size 14})))))))))
 
 (defui ^:private effect-card-form
   "Adds a special-effect card (a base kind plus an attached effect, e.g.
@@ -168,12 +228,13 @@
         [effect set-effect] (uix/use-state :push)
         [amount set-amount] (uix/use-state 1)
         [count-n set-count] (uix/use-state 1)
+        [temporary? set-temporary] (uix/use-state false)
         amount? (:amount? (get attack-deck/effect-kinds effect))]
     ($ :form.attack-deck-effect-form
       {:on-submit
        (fn [event]
          (.preventDefault event)
-         (dispatch :attack-deck/add-effect-cards deck-id kind effect (if amount? amount) count-n))}
+         (dispatch :attack-deck/add-effect-cards deck-id kind effect (if amount? amount) count-n temporary?))}
       ($ :select.attack-deck-effect-kind-select
         {:value (name kind) :disabled disabled?
          :on-change (fn [event] (set-kind (keyword (.. event -target -value))))}
@@ -191,6 +252,11 @@
       ($ :input.text.attack-deck-effect-count
         {:type "number" :min 1 :disabled disabled?
          :value count-n :on-change (fn [event] (set-count (js/Number (.. event -target -value))))})
+      ($ :label.checkbox.attack-deck-temporary-toggle
+        ($ :input
+          {:type "checkbox" :disabled disabled? :checked temporary?
+           :on-change (fn [event] (set-temporary (.. event -target -checked)))})
+        "Temporary")
       ($ :button.button.button-neutral {:type "submit" :disabled disabled?} "Add Special Card"))))
 
 (defui ^:private draw-form
@@ -214,7 +280,7 @@
         ($ icon {:name "suit-spade-fill" :size 16})
         "Draw"))))
 
-(defui ^:private deck-row [{:keys [deck dispatch authorized? latest-draw]}]
+(defui ^:private deck-row [{:keys [deck dispatch authorized? latest-draw reduced?]}]
   (let [[editing? set-editing] (uix/use-state false)
         {id :db/id name :deck/name owner :deck/owner cards :deck/cards
          flagged :deck/needs-reshuffle?} deck
@@ -229,7 +295,7 @@
         ($ :.attack-deck-row-last-drawn
           "Last drawn: "
           (if (:draw/mode latest-draw) (str (name (:draw/mode latest-draw)) " -- "))
-          (draw-text (:draw/kind latest-draw) (:draw/effect latest-draw) (:draw/effect-amount latest-draw))))
+          (draw-text (:draw/kind latest-draw) (:draw/effect latest-draw) (:draw/effect-amount latest-draw) reduced?)))
       ($ draw-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
       ($ :button.button.button-neutral
         {:type "button" :on-click #(set-editing not)}
@@ -237,10 +303,11 @@
       (if editing?
         ($ :<>
           ($ composition-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
-          ($ effect-card-list {:dispatch dispatch :deck-id id :cards cards :disabled? (not authorized?)})
-          ($ effect-card-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)}))))))
+          ($ effect-card-list {:dispatch dispatch :deck-id id :cards cards :disabled? (not authorized?) :reduced? reduced?})
+          ($ effect-card-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
+          ($ temporary-card-list {:dispatch dispatch :deck-id id :cards cards :disabled? (not authorized?) :reduced? reduced?}))))))
 
-(defui ^:private draw-item [{:keys [draw]}]
+(defui ^:private draw-item [{:keys [draw reduced?]}]
   (let [{deck :draw/deck mode :draw/mode kind :draw/kind other :draw/discarded-kind
          effect :draw/effect amount :draw/effect-amount
          other-effect :draw/discarded-effect other-amount :draw/discarded-effect-amount} draw]
@@ -248,9 +315,9 @@
       ($ :.attack-deck-draw-header
         ($ :span.attack-deck-draw-owner (:deck/name deck))
         (if mode ($ :span.attack-deck-draw-mode (name mode)))
-        ($ :span.attack-deck-draw-kind (draw-text kind effect amount)))
+        ($ :span.attack-deck-draw-kind (draw-text kind effect amount reduced?)))
       (if other
-        ($ :.attack-deck-draw-discarded (str "discarded: " (draw-text other other-effect other-amount)))))))
+        ($ :.attack-deck-draw-discarded (str "discarded: " (draw-text other other-effect other-amount reduced?)))))))
 
 (defui ^:private new-deck-controls
   [{:keys [dispatch players-without-deck has-monster? host?]}]
@@ -269,26 +336,34 @@
 (defui ^:memo panel []
   (let [dispatch (hooks/use-dispatch)
         result (hooks/use-query query [:db/ident :root])
-        {:keys [host decks draws draws-by-deck authorized? shuffle-icons?
+        {:keys [host decks draws draws-by-deck authorized? shuffle-icons? reduced-randomness?
                 has-monster? players-without-deck]}
         (attack-decks-state result)]
     ($ :.form-attack-deck
       ($ :header
         ($ :h2 "Attack Modifier Decks")
         (if host
-          ($ :label.checkbox.attack-deck-shuffle-icons-toggle
-            ($ :input
-              {:type "checkbox"
-               :checked shuffle-icons?
-               :on-change (fn [event] (dispatch :attack-deck/toggle-shuffle-icons (.. event -target -checked)))})
-            "Reshuffle on Null/2x")))
+          ($ :<>
+            ($ :label.checkbox.attack-deck-shuffle-icons-toggle
+              ($ :input
+                {:type "checkbox"
+                 :checked shuffle-icons?
+                 :on-change (fn [event] (dispatch :attack-deck/toggle-shuffle-icons (.. event -target -checked)))})
+              "Reshuffle on Null/2x")
+            ($ :label.checkbox.attack-deck-shuffle-icons-toggle
+              ($ :input
+                {:type "checkbox"
+                 :checked reduced-randomness?
+                 :on-change (fn [event] (dispatch :attack-deck/toggle-reduced-randomness (.. event -target -checked)))})
+              "Reduced Randomness"))))
       (if (seq decks)
         ($ :ul.attack-deck-list
           (for [deck decks]
             ($ deck-row
               {:key (:db/id deck) :deck deck :dispatch dispatch
                :authorized? (authorized? (:deck/owner deck))
-               :latest-draw (get draws-by-deck (:db/id deck))})))
+               :latest-draw (get draws-by-deck (:db/id deck))
+               :reduced? reduced-randomness?})))
         ($ :.form-notice "No decks yet -- create one below."))
       ($ new-deck-controls
         {:dispatch dispatch :players-without-deck players-without-deck
@@ -296,15 +371,21 @@
       (if (seq draws)
         ($ :ul.attack-deck-draw-list
           (for [draw draws]
-            ($ draw-item {:key (:db/id draw) :draw draw})))))))
+            ($ draw-item {:key (:db/id draw) :draw draw :reduced? reduced-randomness?})))))))
 
 (defui ^:memo actions []
   (let [dispatch (hooks/use-dispatch)
         result (hooks/use-query query [:db/ident :root])
         {:keys [host decks]} (attack-decks-state result)
-        flagged? (boolean (some :deck/needs-reshuffle? decks))]
+        flagged? (boolean (some :deck/needs-reshuffle? decks))
+        has-temporary? (boolean (some (fn [d] (some :card/temporary? (:deck/cards d))) decks))]
     (if host
-      ($ :button.button.button-danger
-        {:type "button" :disabled (not flagged?) :on-click #(dispatch :attack-deck/reshuffle-flagged)}
-        ($ icon {:name "arrow-counterclockwise" :size 16})
-        "Reshuffle Flagged Decks"))))
+      ($ :<>
+        ($ :button.button.button-danger
+          {:type "button" :disabled (not flagged?) :on-click #(dispatch :attack-deck/reshuffle-flagged)}
+          ($ icon {:name "arrow-counterclockwise" :size 16})
+          "Reshuffle Flagged Decks")
+        ($ :button.button.button-danger
+          {:type "button" :disabled (not has-temporary?) :on-click #(dispatch :attack-deck/end-scenario)}
+          ($ icon {:name "trash3-fill" :size 16})
+          "End Scenario")))))

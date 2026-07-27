@@ -1795,14 +1795,35 @@
   [_ _ enabled]
   [[:db.fn/call assoc-scene :scene/attack-deck-shuffle-icons? enabled]])
 
+(defmethod
+  ^{:doc "Updates the 'Reduced Randomness' variant (p.49) --
+          :scene/attack-deck-reduced-randomness?, absent/false = normal.
+          Purely a display simplification: parfaits never automates
+          damage math for any mechanic, so there's nothing to actually
+          recompute -- component/panel_attack_deck.cljs just labels a
+          drawn/last-drawn :times-2/:bless as '+2' and :null/:curse as
+          '-2' instead of their normal presentation when this is on.
+          Draw/reshuffle/Advantage-Disadvantage logic is completely
+          unaffected -- the rulebook is explicit decks still reshuffle
+          at end of round after one of these cards is drawn regardless
+          of this toggle. Same trust-the-UI shape as :scene/toggle-
+          neutral-authority, since this is cosmetic, not destructive."}
+  event-tx-fn :attack-deck/toggle-reduced-randomness
+  [_ _ enabled]
+  [[:db.fn/call assoc-scene :scene/attack-deck-reduced-randomness? enabled]])
+
 (defn ^:private attack-deck-new-cards-tx
   "Tx-data adding `n` fresh cards of `kind` (optionally carrying
    `effect`/`amount`, both nil for a plain card) to `deck`'s draw pile,
    reshuffling the whole draw pile's positions afterward so the new
    cards land somewhere random rather than always on top -- the shared
    card-construction helper both :attack-deck/add-cards and :attack-
-   deck/add-effect-cards build on."
-  [deck kind n effect amount]
+   deck/add-effect-cards build on. `temporary?` marks the new cards
+   :card/temporary? -- scenario-scoped (item/scenario-effect-added, or
+   BLESS/CURSE -- see :attack-deck/end-scenario), swept at end of
+   scenario regardless of whether they were ever drawn, unlike a
+   permanent perk-added card."
+  [deck kind n effect amount temporary?]
   (let [existing-ids (map :db/id (pile deck :draw))
         new-ids (mapv - (range 1 (inc n)))
         all-ids (into (vec existing-ids) new-ids)
@@ -1810,7 +1831,8 @@
         new-cards (for [id new-ids]
                     (cond-> {:db/id id :card/rank kind :card/location :draw :card/position (get positions id)}
                       effect (assoc :card/effect effect)
-                      amount (assoc :card/effect-amount amount)))
+                      amount (assoc :card/effect-amount amount)
+                      temporary? (assoc :card/temporary? true)))
         reposition (for [id existing-ids] {:db/id id :card/position (get positions id)})]
     (concat new-cards reposition [{:db/id (:db/id deck) :deck/cards new-ids}])))
 
@@ -1820,15 +1842,18 @@
           cards land somewhere random rather than always on top -- the
           generic perk/item deck-edit primitive ('add two +1 cards').
           Always a PLAIN card (no attached effect) -- see :attack-deck/
-          add-effect-cards for cards carrying one."}
+          add-effect-cards for cards carrying one. `temporary?` marks
+          the new cards scenario-scoped (an item/scenario-effect grant,
+          e.g. 'add one -1 card' from an item -- see :attack-deck/
+          end-scenario); a permanent perk edit passes false."}
   event-tx-fn :attack-deck/add-cards
-  [data _ deck-id kind n]
+  [data _ deck-id kind n temporary?]
   (let [user (ds/entity data [:db/ident :user])
         deck (ds/entity data deck-id)
         owner-id (:db/id (:deck/owner deck))]
     (if (or (<= n 0) (not (attack-deck-authorized? data user owner-id)))
       []
-      (attack-deck-new-cards-tx deck kind n nil nil))))
+      (attack-deck-new-cards-tx deck kind n nil nil temporary?))))
 
 (defmethod
   ^{:doc "Adds `n` fresh copies of `kind` carrying an attached `effect`
@@ -1837,17 +1862,19 @@
           deck-edit primitive for the majority of real class perks,
           which add a card that does more than a plain ±N ('add three
           PUSH 1 cards', 'add one STUN card'). `amount` is only stored
-          for effects whose :amount? is true, ignored otherwise. A no-op
-          if `effect` isn't a recognized kind."}
+          for effects whose :amount? is true, ignored otherwise.
+          `temporary?` marks the new cards scenario-scoped, same as
+          :attack-deck/add-cards. A no-op if `effect` isn't a recognized
+          kind."}
   event-tx-fn :attack-deck/add-effect-cards
-  [data _ deck-id kind effect amount n]
+  [data _ deck-id kind effect amount n temporary?]
   (let [user (ds/entity data [:db/ident :user])
         deck (ds/entity data deck-id)
         owner-id (:db/id (:deck/owner deck))
         effect-def (get attack-deck/effect-kinds effect)]
     (if (or (<= n 0) (nil? effect-def) (not (attack-deck-authorized? data user owner-id)))
       []
-      (attack-deck-new-cards-tx deck kind n effect (if (:amount? effect-def) amount)))))
+      (attack-deck-new-cards-tx deck kind n effect (if (:amount? effect-def) amount) temporary?))))
 
 (defmethod
   ^{:doc "Removes up to `n` PLAIN copies of `kind` from `deck-id`
@@ -1891,8 +1918,10 @@
 (defmethod
   ^{:doc "Removes one `from-kind` card and adds one `to-kind` card in its
           place -- the generic perk/item deck-edit primitive ('replace
-          one -2 card with one -1 card'). A no-op if `deck-id` has no
-          `from-kind` card to remove."}
+          one -2 card with one -1 card'). The replacement is always a
+          PERMANENT card (perk edits, unlike item/scenario grants, don't
+          expire -- see :attack-deck/add-cards' own `temporary?`). A
+          no-op if `deck-id` has no `from-kind` card to remove."}
   event-tx-fn :attack-deck/replace-card
   [data _ deck-id from-kind to-kind]
   (let [deck (ds/entity data deck-id)]
@@ -1900,36 +1929,60 @@
                          (:deck/cards deck)))
       []
       [[:db.fn/call event-tx-fn :attack-deck/remove-cards deck-id from-kind 1]
-       [:db.fn/call event-tx-fn :attack-deck/add-cards deck-id to-kind 1]])))
+       [:db.fn/call event-tx-fn :attack-deck/add-cards deck-id to-kind 1 false]])))
 
 (defn ^:private attack-deck-kind-count
   [deck kind]
   (count (filter (comp #{kind} :card/rank) (:deck/cards deck))))
 
+(defn ^:private attack-deck-curse-pool-total
+  "The combined CURSE count across every PERSONAL (owned) attack modifier
+   deck on the current scene -- the shared pool of 10 available for
+   distribution to players (rulebook errata p.55: 'The curse deck is
+   split into two equal decks of 10 cards each. One deck is exclusively
+   for putting curse cards into the players' attack modifier decks...'
+   -- ALL player decks draw from that SAME 10, not 10 each; the monster
+   deck has its own separate, independent pool of 10, checked directly
+   via attack-deck-kind-count since only one such deck ever exists).
+   Computed live from the decks themselves rather than tracked as a
+   separate counter, so it can never drift out of sync with what's
+   actually in play."
+  [data]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
+    (apply + (map #(attack-deck-kind-count % :curse) (filter :deck/owner (:scene/attack-decks scene))))))
+
 (defmethod
   ^{:doc "Adds `n` BLESS cards to `deck-id` -- shorthand for :attack-deck/
-          add-cards with :bless, capped at 10 BLESS cards total in this
-          one deck (gloomycompanion's own code comment reads the rule
-          this way: a per-deck cap, not a pool shared across every deck
-          on the scene). The whole dispatch is rejected outright, never
-          partially applied, if `n` would push this deck's own BLESS
-          count past 10."}
+          add-cards with :bless, always :card/temporary? true (BLESS is
+          scenario-scoped -- see :attack-deck/end-scenario -- on top of
+          its existing removed-on-draw behavior). Uncapped: this
+          rulebook has no confirmed pool-size errata for BLESS the way
+          it does for CURSE (see attack-deck-curse-pool-total) -- an
+          earlier per-deck cap of 10 here was an unconfirmed assumption
+          (symmetry with curse) and has been removed rather than
+          enforcing a guessed number."}
   event-tx-fn :attack-deck/add-bless
-  [data _ deck-id n]
-  (let [deck (ds/entity data deck-id)]
-    (if (> (+ (attack-deck-kind-count deck :bless) n) 10)
-      []
-      [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :bless n]])))
+  [_ _ deck-id n]
+  [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :bless n true]])
 
 (defmethod
   ^{:doc "Adds `n` CURSE cards to `deck-id` -- shorthand for :attack-deck/
-          add-cards with :curse, same per-deck cap of 10 as add-bless."}
+          add-cards with :curse, always :card/temporary? true (same
+          scenario-scoped reasoning as add-bless). Capped by
+          attack-deck-curse-pool-total: adding to a PERSONAL deck is
+          rejected outright (never partially applied) if it would push
+          the SHARED total across every player's deck combined past 10;
+          adding to the shared monster deck instead checks that one
+          deck's own count, its own separate pool of 10."}
   event-tx-fn :attack-deck/add-curse
   [data _ deck-id n]
-  (let [deck (ds/entity data deck-id)]
-    (if (> (+ (attack-deck-kind-count deck :curse) n) 10)
+  (let [deck (ds/entity data deck-id)
+        current (if (:deck/owner deck)
+                  (attack-deck-curse-pool-total data)
+                  (attack-deck-kind-count deck :curse))]
+    (if (> (+ current n) 10)
       []
-      [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :curse n]])))
+      [[:db.fn/call event-tx-fn :attack-deck/add-cards deck-id :curse n true]])))
 
 (defmethod
   ^{:doc "Reshuffles the whole of `deck-id` (draw + discard together) into
@@ -1965,6 +2018,27 @@
         (apply concat
                (for [deck flagged]
                  [[:db.fn/call event-tx-fn :attack-deck/reshuffle (:db/id deck)]]))))))
+
+(defmethod
+  ^{:doc "Host-only: removes every card still flagged :card/temporary?
+          true from EVERY attack modifier deck on the current scene,
+          drawn-or-not -- BLESS/CURSE cards that were never drawn, plus
+          any item/scenario-added plain or effect card (see :attack-
+          deck/add-cards/add-effect-cards' own `temporary?` and
+          add-bless/add-curse, which always set it). The FAQ (p.78) is
+          explicit these 'should be removed from your deck at the end of
+          a scenario' -- applied scene-wide in one sweep, the same shape
+          :attack-deck/reshuffle-flagged already established for its own
+          'sweep every deck on the scene' action."}
+  event-tx-fn :attack-deck/end-scenario
+  [data _]
+  (let [user (ds/entity data [:db/ident :user])]
+    (if-not (:user/host user)
+      []
+      (let [scene (:camera/scene (:user/camera user))
+            targets (mapcat (fn [deck] (filter :card/temporary? (:deck/cards deck)))
+                             (:scene/attack-decks scene))]
+        (mapv (fn [c] [:db/retractEntity (:db/id c)]) targets)))))
 
 (defmethod
   ^{:doc "Resets `deck-id` all the way back to a fresh
