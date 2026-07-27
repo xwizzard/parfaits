@@ -110,4 +110,16 @@
             (fn []
               (dispatch :initiative/assign-ranks
                         (zipmap (map :db/id eligible) (random-rolls))))}
-           ($ widgets/icon {:name "dice-5-fill" :size 16}) "Roll Initiative for NPCs")))}}})
+           ($ widgets/icon {:name "dice-5-fill" :size 16}) "Roll Initiative for NPCs")))}}
+
+   ;; A pure gate flag, same shape as :old-maid/game -- checked live by
+   ;; component/panel_dice.cljs (via :game-type/enabled-elements) to
+   ;; unlock advantage/disadvantage and per-player roll ownership on top
+   ;; of the generic :tool/dice primitive (see ogres.app.dice and
+   ;; events.cljs's :dice/roll), rather than replacing it with a
+   ;; separate D&D-only roller. Distinct from :dnd5e/initiative-roll,
+   ;; which stays exactly what it always was -- a d20-only shortcut for
+   ;; filling :initiative/rank, untouched by this.
+   :dnd5e/dice-roller
+   {:label "Advantage/Disadvantage & Per-Player Rolls"
+    :icon  "dice-5-fill"}})

@@ -24,6 +24,21 @@
   (is (= (get-in core/elements [:tool/cards :label]) "Cards"))
   (is (string? (get-in core/elements [:tool/cards :icon]))))
 
+(deftest test-dice-registry-entry
+  (is (= (get-in core/elements [:tool/dice :label]) "Dice"))
+  (is (string? (get-in core/elements [:tool/dice :icon])))
+  (is (contains? game-type/dnd5e-enabled-elements :tool/dice)
+      "the seeded D&D 5e template pulls in the generic dice primitive
+       explicitly, same as :tool/measurement/:tool/mask/:tool/shapes"))
+
+(deftest test-dnd5e-dice-roller-registry-entry
+  (is (= (get-in dnd5e/elements [:dnd5e/dice-roller :label])
+         "Advantage/Disadvantage & Per-Player Rolls"))
+  (is (string? (get-in dnd5e/elements [:dnd5e/dice-roller :icon])))
+  (is (contains? game-type/dnd5e-enabled-elements :dnd5e/dice-roller)
+      "the seeded D&D 5e template actually enables its own dice-roller
+       extension, same as every other element dnd5e.cljs contributes"))
+
 (deftest test-deck-definitions
   (is (contains? game-type/deck-definitions :standard-52))
   (let [standard (get game-type/deck-definitions :standard-52)]

@@ -3,6 +3,7 @@
             [ogres.app.component.panel-crazy-eights :as crazy-eights]
             [ogres.app.component.panel-data :as data]
             [ogres.app.component.panel-decks :as decks]
+            [ogres.app.component.panel-dice :as dice]
             [ogres.app.component.panel-game-type-builder :as game-type-builder]
             [ogres.app.component.panel-go-fish :as go-fish]
             [ogres.app.component.panel-initiative :as initiative]
@@ -68,6 +69,7 @@
    :tokens     {:icon "pawn" :label "Token images"}
    :props      {:icon "rock" :label "Prop images" :size 26}
    :decks      {:icon "suit-spade-fill" :label "Decks"}
+   :dice       {:icon "dice-5-fill" :label "Dice"}
    :roster     {:icon "person-circle" :label "Players"}
    :memory     {:icon "card-front" :label "Memory"}
    :go-fish    {:icon "suit-heart-fill" :label "Go Fish"}
@@ -85,6 +87,7 @@
    :tokens     {:form tokens/panel :footer tokens/actions}
    :props      {:form props/panel :footer props/actions}
    :decks      {:form decks/panel :footer decks/actions}
+   :dice       {:form dice/panel :footer dice/actions}
    :roster     {:form roster/panel :footer roster/actions}
    :memory     {:form memory/panel :footer memory/actions}
    :go-fish    {:form go-fish/panel :footer go-fish/actions}
@@ -123,9 +126,16 @@
    templates and any custom template that enables them. Unlike
    Roster, all six are visible to guests as well: seeing turn order
    and scores, and acting on your own turn, is exactly what every
-   connected participant needs, not just the host."
+   connected participant needs, not just the host. The Dice tab, gated
+   on :tool/dice, is Play-mode-only (and guest-visible, same as the six
+   card games) -- deliberately absent from Setup, unlike Decks, since
+   rolling dice is a play-time action, not a scenario-construction one;
+   D&D 5e's own advantage/disadvantage/per-player controls layer onto
+   this SAME tab (see component/panel_dice.cljs), gated on its own
+   :dnd5e/dice-roller element rather than getting a tab of their own."
   [host mode enabled-elements]
   (let [cards?       (contains? enabled-elements :tool/cards)
+        dice?        (contains? enabled-elements :tool/dice)
         memory?      (contains? enabled-elements :memory/game)
         go-fish?     (contains? enabled-elements :go-fish/game)
         old-maid?    (contains? enabled-elements :old-maid/game)
@@ -134,12 +144,14 @@
         war?         (contains? enabled-elements :war/game)]
     (cond
       (not host) (cond-> [:tokens :initiative :lobby]
+                   dice? (conj :dice)
                    memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
                    crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war))
       (= mode :builder) [:game-type-builder :data]
       (= mode :play)
       (into (cond-> [:tokens :roster :props]
-              cards? (conj :decks) memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
+              cards? (conj :decks) dice? (conj :dice)
+              memory? (conj :memory) go-fish? (conj :go-fish) old-maid? (conj :old-maid)
               crazy-eights? (conj :crazy-eights) rummy? (conj :rummy) war? (conj :war))
             (if (contains? enabled-elements :unit/initiative)
               [:initiative :lobby]

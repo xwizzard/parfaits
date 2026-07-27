@@ -61,6 +61,15 @@
    ;; :deck/* methods). Not enabled by any seeded template yet; proven by
    ;; a Standard 52-card deck any game-type can opt into via the Builder.
    :tool/cards       {:label "Cards" :icon "suit-spade-fill"}
+   ;; Gates the Dice panel/tab -- a generic n-sided-die primitive (see
+   ;; ogres.app.dice and events.cljs's :dice/* methods), independent of
+   ;; any game-type-specific rolling (e.g. D&D 5e's own :dnd5e/dice-
+   ;; roller, which layers advantage/disadvantage and per-player
+   ;; ownership onto this same primitive rather than replacing it). Not
+   ;; enabled by any seeded template yet except D&D 5e's own, which pulls
+   ;; it in explicitly alongside its own element (see game_type.cljs's
+   ;; dnd5e-enabled-elements).
+   :tool/dice        {:label "Dice" :icon "dice-5-fill"}
 
    ;; One entry per concrete :scene/grid-type value (see
    ;; component/panel_scene.cljs's `options-grid-type`, which this mirrors

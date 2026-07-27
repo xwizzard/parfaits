@@ -1,0 +1,100 @@
+.dice-pool-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.dice-pool-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.dice-pool-label {
+  flex: 0 0 auto;
+  width: 32px;
+}
+
+.dice-pool-count {
+  width: 64px;
+}
+
+.dice-mode-row {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  margin-bottom: 8px;
+
+  label.radio {
+    flex: 1;
+    width: auto;
+  }
+}
+
+.dice-owner-select {
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.dice-roll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dice-roll-item {
+  background-color: var(--color-paper-500);
+  border-radius: 3px;
+  border: 1px solid var(--color-blues-300);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.dice-roll-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.dice-roll-owner {
+  flex: 1;
+  font-weight: 600;
+}
+
+.dice-roll-owner[data-color]::before {
+  background-color: var(--color-context, var(--color-blues-900));
+  border-radius: 50%;
+  content: "";
+  display: inline-block;
+  height: 8px;
+  margin-right: 6px;
+  width: 8px;
+}
+
+.dice-roll-mode {
+  color: var(--color-blues-700);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.dice-roll-result {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dice-roll-dice {
+  color: var(--color-black-500);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.dice-roll-die[data-picked="true"] {
+  color: var(--color-blues-900);
+  font-weight: 700;
+}

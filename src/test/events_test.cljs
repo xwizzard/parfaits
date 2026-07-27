@@ -5,6 +5,7 @@
             [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size half-size hex-radius]]
             [ogres.app.crazy-eights :as crazy-eights]
+            [ogres.app.dice :as dice]
             [ogres.app.events :refer [event-tx-fn]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
@@ -1082,6 +1083,105 @@
       (is (:object/hidden (entity @conn id))
           "a controller ref pointing at someone no longer connected falls
            back to host-only, same as an unassigned object"))))
+
+;; --- Dice ---
+(defn ^:private scene-dice-rolls [conn]
+  (:scene/dice-rolls (current-scene conn)))
+
+(deftest test-dice-roll-neutral
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :dice/roll [20 6 6] nil nil)
+    (let [roll (first (scene-dice-rolls conn))]
+      (is (= (count (scene-dice-rolls conn)) 1)
+          "one new roll entity, whatever the pool size")
+      (is (= (count (:roll/dice roll)) 3) "one result per die in the pool")
+      (is (nil? (:roll/owner roll)) "no owner given, no D&D element enabled -- stays neutral")
+      (is (nil? (:roll/mode roll)) "no mode given -- a plain summed pool")
+      (is (= (:roll/result roll) (dice/sum (:roll/dice roll)))
+          "the stored result is the sum of the ACTUAL stored dice, not a fixed number"))))
+
+(deftest test-dice-roll-empty-pool-noop
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :dice/roll [] nil nil)
+    (is (empty? (scene-dice-rolls conn)) "nothing to roll, nothing is created")))
+
+(deftest test-dice-roll-mode-and-owner-dropped-without-dnd-element
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :dice/roll [20 20] :advantage player-id)
+      (let [roll (first (scene-dice-rolls conn))]
+        (is (nil? (:roll/mode roll))
+            ":dnd5e/dice-roller isn't enabled -- advantage is silently dropped")
+        (is (nil? (:roll/owner roll))
+            ":dnd5e/dice-roller isn't enabled -- the owner is silently dropped too")
+        (is (= (:roll/result roll) (dice/sum (:roll/dice roll)))
+            "downgraded all the way to a plain summed roll, not rejected outright")))))
+
+(deftest test-dice-roll-advantage
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:dnd5e/dice-roller})
+    (dispatch conn :dice/roll [20 20] :advantage nil)
+    (let [roll (first (scene-dice-rolls conn))]
+      (is (= (:roll/mode roll) :advantage))
+      (is (= (:roll/result roll) (:value (dice/best (:roll/dice roll))))
+          "the result is the best of the actual stored rolls, not the sum"))))
+
+(deftest test-dice-roll-disadvantage
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:dnd5e/dice-roller})
+    (dispatch conn :dice/roll [20 20] :disadvantage nil)
+    (let [roll (first (scene-dice-rolls conn))]
+      (is (= (:roll/mode roll) :disadvantage))
+      (is (= (:roll/result roll) (:value (dice/worst (:roll/dice roll))))
+          "the result is the worst of the actual stored rolls, not the sum"))))
+
+(deftest test-dice-roll-owner-rejected-without-authority
+  (let [conn (ds/conn-from-db (initial-data true))
+        guest-uuid (random-uuid)]
+    (set-enabled-elements! conn #{:dnd5e/dice-roller})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn guest-uuid)
+      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (dispatch conn :dice/roll [20] nil player-id)
+      (is (empty? (scene-dice-rolls conn))
+          "the host has no authority over a connected, assigned controller's
+           seat -- the whole dispatch no-ops, mirroring :go-fish/score's own
+           unauthorized-seat rejection, not just a dropped owner"))))
+
+(deftest test-dice-roll-owner-accepted-self-controlled
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (set-enabled-elements! conn #{:dnd5e/dice-roller})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn my-uuid)
+      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (dispatch conn :dice/roll [20] nil player-id)
+      (let [roll (first (scene-dice-rolls conn))]
+        (is (= (:db/id (:roll/owner roll)) player-id)
+            "a connected player rolling as the seat they themselves control succeeds")))))
+
+(deftest test-dice-roll-owner-accepted-host-fallback
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:dnd5e/dice-roller})
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :dice/roll [20] nil player-id)
+      (let [roll (first (scene-dice-rolls conn))]
+        (is (= (:db/id (:roll/owner roll)) player-id)
+            "an unassigned seat has no connected controller -- authority falls
+             back to the host, same as :objects/toggle-hidden's own fallback")))))
+
+(deftest test-dice-clear
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :dice/roll [20] nil nil)
+    (dispatch conn :dice/roll [6 6] nil nil)
+    (is (= (count (scene-dice-rolls conn)) 2))
+    (dispatch conn :dice/clear)
+    (is (empty? (scene-dice-rolls conn)) "every roll entity is retracted")))
 
 ;; --- Prop variables, copies, and physical piles ---
 (defn ^:private scene-props [conn]

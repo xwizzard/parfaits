@@ -29,6 +29,7 @@
    :player/controller    {:db/valueType :db.type/ref}
    :prop/image           {:db/valueType :db.type/ref}
    :prop/image-alt       {:db/valueType :db.type/ref}
+   :roll/owner           {:db/valueType :db.type/ref}
    :root/game-types      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/players         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scene-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
@@ -40,6 +41,7 @@
    :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/crazy-eights-deck {:db/valueType :db.type/ref}
    :scene/decks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/dice-rolls     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/game-type      {:db/valueType :db.type/ref}
    :scene/go-fish-deck   {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}

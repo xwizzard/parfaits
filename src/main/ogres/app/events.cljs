@@ -5,6 +5,7 @@
             [ogres.app.cards :as cards]
             [ogres.app.const :refer [grid-size hex-radius]]
             [ogres.app.crazy-eights :as crazy-eights]
+            [ogres.app.dice :as dice]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.go-fish :as go-fish]
@@ -1575,6 +1576,100 @@
   event-tx-fn :deck/remove
   [_ _ deck-id]
   [[:db/retractEntity deck-id]])
+
+;; --- Dice ---
+;; A generic n-sided-die primitive, independent of any game-type -- see
+;; ogres.app.dice for the pure roll/combine logic. One roll (however
+;; many dice were in the pool) is one entity in :scene/dice-rolls,
+;; mirroring :scene/decks' own component/cardinality-many shape. D&D 5e
+;; doesn't get a separate roller: its own :dnd5e/dice-roller element
+;; (see game_type/games/dnd5e.cljs) just unlocks two extra, optional
+;; arguments to this SAME event -- :roll/mode (advantage/disadvantage)
+;; and :roll/owner (a specific roster player instead of a shared/
+;; neutral roll) -- checked live against :game-type/enabled-elements,
+;; the same pattern :go-fish/ask's ask-anyone? and :rummy/score-run's
+;; runs-check already use for their own optional rules.
+
+(defn ^:private dice-roll-tx
+  "Tx-data (paired with the roll's own :db/id, as [roll-id tx-data])
+   creating one new roll entity from `sides-seq` (e.g. [20 6 6] for
+   1d20 + 2d6) -- the raw per-die results plus a single precomputed
+   headline number, so a caller never needs to re-derive it: :roll/
+   result is the sum of every die (`mode` nil, a plain multi-die pool)
+   or the single best/worst value among them (`mode` :advantage/
+   :disadvantage -- roll extra dice, take one, discard the rest).
+   `owner-id`, when given, is a roster player this roll belongs to;
+   nil leaves it a shared/neutral roll anyone can see, the default for
+   the bare universal primitive."
+  [sides-seq mode owner-id]
+  (let [rolled (dice/roll-dice sides-seq)
+        result (case mode
+                 :advantage (:value (dice/best rolled))
+                 :disadvantage (:value (dice/worst rolled))
+                 (dice/sum rolled))
+        roll-id -1]
+    [roll-id
+     [(cond-> {:db/id roll-id
+               :roll/dice rolled
+               :roll/result result
+               :roll/rolled-at (.now js/Date)}
+        mode (assoc :roll/mode mode)
+        owner-id (assoc :roll/owner owner-id))]]))
+
+(defmethod
+  ^{:doc "Rolls `sides-seq` (a seq of side-counts, any positive integers
+          -- the primitive itself isn't limited to the 7 standard D&D
+          sizes, only the panel's own picker is) as one new entry in
+          :scene/dice-rolls. A no-op if `sides-seq` is empty -- nothing
+          to roll.
+
+          `mode` (:advantage/:disadvantage/nil) and `owner-id` (a
+          roster player, or nil for a shared/neutral roll) are only
+          honored if :dnd5e/dice-roller is actually enabled on the
+          scene's own game-type (checked here server-side, not just
+          gated in the UI, since any connected participant may
+          dispatch this) -- otherwise silently downgraded to nil/nil
+          rather than rejecting the whole roll outright, so a stale
+          client is never left unable to roll at all. When `owner-id`
+          IS honored, the whole dispatch is rejected unless the viewer
+          has player/authority? over that specific roster player --
+          the same explicit-target-id-plus-authority-check shape :go-
+          fish/score/:rummy/score already use. A neutral roll (no
+          owner) needs no authority at all -- anyone may roll a shared
+          die, the same 'anyone may start a mini-game table' spirit
+          :old-maid/start's own docstring describes."}
+  event-tx-fn :dice/roll
+  [data _ sides-seq mode owner-id]
+  (if (seq sides-seq)
+    (let [user (ds/entity data [:db/ident :user])
+          scene (:camera/scene (:user/camera user))
+          enabled (:game-type/enabled-elements (:scene/game-type scene))
+          dnd-dice? (contains? enabled :dnd5e/dice-roller)
+          mode (if dnd-dice? mode)
+          owner-id (if dnd-dice? owner-id)]
+      (if (and owner-id
+               (let [connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+                     controller-uuid (get-in (ds/entity data owner-id) [:player/controller :user/uuid])]
+                 (not (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid))))
+        []
+        (let [[roll-id tx] (dice-roll-tx sides-seq mode owner-id)]
+          (conj (vec tx) [:db.fn/call assoc-scene :scene/dice-rolls roll-id]))))
+    []))
+
+(defmethod
+  ^{:doc "Clears the current scene's entire dice-roll history -- every
+          entity in :scene/dice-rolls is retracted individually
+          (isComponent means there's no single statement that clears a
+          cardinality-many ref collection wholesale the way there is
+          for a plain scalar attribute; :deck/remove's own
+          :db/retractEntity is the same precedent). Host-only in the
+          UI -- not enforced here, the same trust-the-UI convention
+          every other admin-flavored action in this app already
+          follows."}
+  event-tx-fn :dice/clear
+  [data _]
+  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
+    (mapv (fn [roll] [:db/retractEntity (:db/id roll)]) (:scene/dice-rolls scene))))
 
 ;; --- Mini-game sessions ---
 ;; Generic scaffolding for nested, opt-in mini-game sessions: an

@@ -92,13 +92,16 @@
   "The seeded 'D&D 5e' game-type's starting set -- the bare default (which
    already includes :unit/initiative, so the base turn tracker is on),
    plus the shared core primitives that game wants (measurement, masking,
-   shape drawing, size/light/aura), plus every element dnd5e.cljs
+   shape drawing, size/light/aura, and the generic dice tab -- :tool/dice,
+   pulled in explicitly since D&D's own :dnd5e/dice-roller only ADDS
+   advantage/disadvantage/ownership controls to that primitive, it
+   doesn't stand alone without it), plus every element dnd5e.cljs
    contributes -- including :dnd5e/initiative-roll, D&D's own opt-in d20
    mechanism for assigning that base system's turn order automatically
    (see ogres.app.game-type.games.dnd5e; the base order is otherwise
    manually assigned, see ogres.app.events/:initiative/move)."
   (into default-enabled-elements
-        (concat [:tool/measurement :tool/mask :tool/shapes
+        (concat [:tool/measurement :tool/mask :tool/shapes :tool/dice
                  :unit/size :unit/light :unit/aura]
                 (keys dnd5e/elements))))
 
