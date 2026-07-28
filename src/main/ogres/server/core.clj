@@ -226,9 +226,15 @@
                      "Access-Control-Allow-Origin" "*"
                      "Cache-Control" "public, max-age=86400"}
            :body    jpeg})
-        {:status 422 :body "Unsupported or corrupt image."})
-      {:status 502 :body "Failed to fetch image from that URL."})
-    {:status 400 :body "Missing or disallowed url parameter."}))
+        ;; Every branch below carries the same CORS header as the success
+        ;; case above -- otherwise a failure here (bad URL, dead link,
+        ;; corrupt image) surfaces to the browser as an opaque "blocked by
+        ;; CORS policy" console error instead of this response's own,
+        ;; actually-useful status/body, since the browser can't read a
+        ;; cross-origin error response missing that header at all.
+        {:status 422 :headers {"Access-Control-Allow-Origin" "*"} :body "Unsupported or corrupt image."})
+      {:status 502 :headers {"Access-Control-Allow-Origin" "*"} :body "Failed to fetch image from that URL."})
+    {:status 400 :headers {"Access-Control-Allow-Origin" "*"} :body "Missing or disallowed url parameter."}))
 
 (defn handle-root [_]
   {:status 405})
