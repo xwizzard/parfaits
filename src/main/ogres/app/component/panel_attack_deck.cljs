@@ -177,6 +177,27 @@
           {:type "button" :disabled disabled? :on-click #(dispatch :attack-deck/add-curse deck-id 1)}
           "Add CURSE")))))
 
+(defui ^:private replace-card-form
+  "Replaces one PLAIN card of `from-kind` with one of `to-kind` -- the
+   generic perk/item deck-edit primitive for 'replace one -2 card with
+   one -1 card' (see events.cljs's :attack-deck/replace-card)."
+  [{:keys [dispatch deck-id disabled?]}]
+  (let [[from-kind set-from] (uix/use-state :minus-2)
+        [to-kind set-to] (uix/use-state :minus-1)]
+    ($ :form.attack-deck-replace-form
+      {:on-submit (fn [event] (.preventDefault event) (dispatch :attack-deck/replace-card deck-id from-kind to-kind))}
+      ($ :legend "Replace Card")
+      ($ :select.attack-deck-replace-select
+        {:value (name from-kind) :disabled disabled?
+         :on-change (fn [event] (set-from (keyword (.. event -target -value))))}
+        (for [k standard-kinds] ($ :option {:key k :value (name k)} (kind-label k))))
+      ($ :span.attack-deck-replace-arrow "→")
+      ($ :select.attack-deck-replace-select
+        {:value (name to-kind) :disabled disabled?
+         :on-change (fn [event] (set-to (keyword (.. event -target -value))))}
+        (for [k standard-kinds] ($ :option {:key k :value (name k)} (kind-label k))))
+      ($ :button.button.button-neutral {:type "submit" :disabled disabled?} "Replace"))))
+
 (defui ^:private effect-card-list
   "The deck's current special-effect cards (grouped, see effect-card-
    groups), each with a Remove button dispatching :attack-deck/remove-
@@ -282,13 +303,17 @@
 
 (defui ^:private deck-row [{:keys [deck dispatch authorized? latest-draw reduced?]}]
   (let [[editing? set-editing] (uix/use-state false)
-        {id :db/id name :deck/name owner :deck/owner cards :deck/cards
+        ;; NOT `name` -- shadowing clojure.core/name here previously
+        ;; broke the (name (:draw/mode ...)) call below the instant a
+        ;; deck's last draw was an Advantage/Disadvantage, since the
+        ;; deck's own name STRING got called as if it were a function.
+        {id :db/id deck-name :deck/name owner :deck/owner cards :deck/cards
          flagged :deck/needs-reshuffle?} deck
         draw-count (count (filter (comp #{:draw} :card/location) cards))
         discard-count (count (filter (comp #{:discard} :card/location) cards))]
     ($ :li.attack-deck-row
       ($ :.attack-deck-row-header
-        ($ :span.attack-deck-row-name {:data-color (:player/color owner)} name)
+        ($ :span.attack-deck-row-name {:data-color (:player/color owner)} deck-name)
         (if flagged ($ :span.attack-deck-row-flag "Needs Reshuffle"))
         ($ :span.attack-deck-row-counts (str draw-count " draw / " discard-count " discard")))
       (if latest-draw
@@ -297,12 +322,21 @@
           (if (:draw/mode latest-draw) (str (name (:draw/mode latest-draw)) " -- "))
           (draw-text (:draw/kind latest-draw) (:draw/effect latest-draw) (:draw/effect-amount latest-draw) reduced?)))
       ($ draw-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
-      ($ :button.button.button-neutral
-        {:type "button" :on-click #(set-editing not)}
-        (if editing? "Hide Composition" "Edit Composition"))
+      ($ :.attack-deck-row-buttons
+        ($ :button.button.button-neutral
+          {:type "button" :on-click #(set-editing not)}
+          (if editing? "Hide Composition" "Edit Composition"))
+        ($ :button.button.button-danger
+          {:type "button" :disabled (not authorized?) :on-click #(dispatch :attack-deck/reset id)}
+          "Reset Deck")
+        ($ :button.button.button-danger
+          {:type "button" :disabled (not authorized?) :on-click #(dispatch :attack-deck/remove id)}
+          ($ icon {:name "trash3-fill" :size 14})
+          "Remove Deck"))
       (if editing?
         ($ :<>
           ($ composition-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
+          ($ replace-card-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
           ($ effect-card-list {:dispatch dispatch :deck-id id :cards cards :disabled? (not authorized?) :reduced? reduced?})
           ($ effect-card-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
           ($ temporary-card-list {:dispatch dispatch :deck-id id :cards cards :disabled? (not authorized?) :reduced? reduced?}))))))

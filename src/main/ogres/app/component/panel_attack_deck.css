@@ -97,6 +97,23 @@
   font-size: 12px;
 }
 
+.attack-deck-row-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attack-deck-replace-form {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attack-deck-replace-select {
+  width: auto;
+}
+
 .attack-deck-effect-list {
   display: flex;
   flex-direction: column;
