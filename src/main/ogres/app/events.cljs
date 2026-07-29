@@ -1123,6 +1123,22 @@
     (for [{:keys [db/id token/flags] :or {flags #{}}} tokens]
       {:db/id id :token/flags ((if add? conj disj) flags flag)})))
 
+(defmethod event-tx-fn :token/clear-flags
+  ;; Clears exactly the flags named in `values` -- the caller's whole
+  ;; vocabulary, see game-type.widgets/status-checklist's "clear all".
+  ;; Takes them explicitly rather than emptying :token/flags, because
+  ;; that one set also carries :player and :dead, which are toggled from
+  ;; the context menu's own toolbar and have nothing to do with a
+  ;; game-type's conditions -- wiping the set would silently strip a
+  ;; player token of its player-ness. Doing it in one transaction rather
+  ;; than a :token/change-flag per condition keeps it to a single undo
+  ;; step and a single broadcast to connected peers.
+  [data _ idxs values]
+  (let [tokens   (ds/pull-many data [:db/id :token/flags] idxs)
+        clearing (set values)]
+    (for [{:keys [db/id token/flags] :or {flags #{}}} tokens]
+      {:db/id id :token/flags (into #{} (remove clearing) flags)})))
+
 (defmethod event-tx-fn :token/change-label
   [_ _ idxs value]
   (for [id idxs]

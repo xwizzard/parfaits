@@ -19,10 +19,13 @@
    duplicated rather than shared for the leaf-namespace reason above.
    Public (unlike the other private helpers here) so a game module can
    render its own icon buttons directly -- see e.g.
-   ogres.app.game-type.games.dnd5e's initiative-roll triggers."
-  [{:keys [name size] :or {size 22}}]
+   ogres.app.game-type.games.dnd5e's initiative-roll triggers. `color`,
+   when given, overrides the icon's fill the same way the shared
+   component's own `color` prop does -- see status-checklist below,
+   whose vocabulary entries may carry their own meaningful :color."
+  [{:keys [name size color] :or {size 22}}]
   ($ :svg
-    {:fill "currentColor"
+    {:fill (or color "currentColor")
      :role "presentation"
      :class "icon"
      :width size
@@ -106,13 +109,24 @@
     (children input)))
 
 (defui status-checklist
-  "Renders `vocabulary` (a seq of {:value :icon :label} maps) as a list of
-   tri-state status-flag checkboxes -- checked/unchecked/indeterminate
-   across a multi-token selection -- each toggling its own :value in
-   :token/flags via the given `on-change` (typically bound to
-   :token/change-flag). Game-agnostic: this is the same UI shape D&D's
-   conditions and Gloomhaven's status effects both use, just with a
-   different vocabulary -- see ogres.app.game-type.games.dnd5e/gloomhaven.
+  "Renders `vocabulary` (a seq of {:value :icon :label :color} maps,
+   :color optional) as a list of tri-state status-flag checkboxes --
+   checked/unchecked/indeterminate across a multi-token selection --
+   each toggling its own :value in :token/flags via the given
+   `on-change` (typically bound to :token/change-flag). Game-agnostic:
+   this is the same UI shape D&D's conditions and Gloomhaven's status
+   effects both use, just with a different vocabulary -- see
+   ogres.app.game-type.games.dnd5e/gloomhaven. `:color`, when an entry
+   has one, overrides that glyph's fill; neither shipped vocabulary sets
+   it today (both are monotone silhouettes inheriting the surrounding
+   text color) but it stays supported for one that wants a glyph whose
+   color is part of its identity -- see ogres.app.component/icon's own
+   doc for the same distinction.
+
+   Leads with a \"clear all\" button that drops every value in
+   `vocabulary` at once, via :token/clear-flags -- scoped to the
+   vocabulary rather than emptying :token/flags outright, since that set
+   also holds :player and :dead. See that event for the reasoning.
    ```
    ($ status-checklist {:vocabulary [{:value :blinded :icon \"eye-slash-fill\"}]
                          :values values :on-change on-change})
@@ -121,25 +135,32 @@
     :or   {values (constantly (list)) on-change identity}}]
   (let [fqs (frequencies (reduce into [] (values :token/flags [])))
         ids (values :db/id)]
-    (for [{value :value icon-name :icon label :label} vocabulary
-          :let [focus (= value (:value (first vocabulary)))
-                state (cond (= (get fqs value 0) 0) false
-                            (= (get fqs value 0) (count ids)) true
-                            :else :indeterminate)]]
-      ($ indeterminate-checkbox {:key value :checked state}
-        (fn [input]
-          ($ :label {:aria-label (name value) :data-tooltip (or label (capitalize (name value)))}
-            ($ :input
-              {:ref input
-               :type "checkbox"
-               :name (str "status-flag-" (name value))
-               :checked (if (= state :indeterminate) false state)
-               :auto-focus focus
-               :on-change
-               (fn [event]
-                 (let [checked (.. event -target -checked)]
-                   (on-change :token/change-flag value checked)))})
-            ($ icon {:name icon-name})))))))
+    ($ :<>
+      ($ :button.status-checklist-clear
+        {:type "button"
+         :aria-label "clear all"
+         :data-tooltip "Clear all"
+         :on-click (fn [] (on-change :token/clear-flags (mapv :value vocabulary)))}
+        ($ icon {:name "no"}))
+      (for [{value :value icon-name :icon label :label color :color} vocabulary
+            :let [focus (= value (:value (first vocabulary)))
+                  state (cond (= (get fqs value 0) 0) false
+                              (= (get fqs value 0) (count ids)) true
+                              :else :indeterminate)]]
+        ($ indeterminate-checkbox {:key value :checked state}
+          (fn [input]
+            ($ :label {:aria-label (name value) :data-tooltip (or label (capitalize (name value)))}
+              ($ :input
+                {:ref input
+                 :type "checkbox"
+                 :name (str "status-flag-" (name value))
+                 :checked (if (= state :indeterminate) false state)
+                 :auto-focus focus
+                 :on-change
+                 (fn [event]
+                   (let [checked (.. event -target -checked)]
+                     (on-change :token/change-flag value checked)))})
+              ($ icon {:name icon-name :color color}))))))))
 
 (defn unranked-npc?
   "True when the given (pulled) token has no :player flag and no

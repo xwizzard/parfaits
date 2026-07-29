@@ -249,12 +249,19 @@
     }
   }
 
-  .context-menu-form-conditions {
+  /* Both game-types' status vocabularies render through the same
+     widget (game-type.widgets/status-checklist); the class differs only
+     because it's built from the element key -- :dnd5e/conditions vs
+     :gloomhaven/status-effects. They get the same grid so a condition
+     occupies the same cell-sized target in either game. */
+  .context-menu-form-conditions,
+  .context-menu-form-status-effects {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
     grid-gap: 2px;
 
-    label {
+    label,
+    .status-checklist-clear {
       align-items: center;
       aspect-ratio: 1;
       border-radius: 3px;
@@ -276,6 +283,25 @@
       }
 
       &:has(:focus-visible) {
+        outline: 1px dotted var(--outline-color);
+        outline-offset: 1px;
+      }
+    }
+
+    /* A button, not a checkbox: it has no on/off state of its own, so it
+       carries none of the :checked styling above and warns on hover
+       instead -- it discards every condition on the token at once. */
+    .status-checklist-clear {
+      background-color: transparent;
+      border: none;
+      padding: 0;
+
+      &:hover {
+        background-color: var(--color-blues-800);
+        color: var(--color-danger-500);
+      }
+
+      &:focus-visible {
         outline: 1px dotted var(--outline-color);
         outline-offset: 1px;
       }
