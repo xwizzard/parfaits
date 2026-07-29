@@ -421,11 +421,40 @@
 (defn ^:private token-flags-attr [data]
   (join " " (map name (token-flags data))))
 
-(defn ^:private token-conditions [data icons]
+;; Badges ring the token's edge, the first always at its north-west
+;; corner and each next one a fixed step counter-clockwise from the last.
+;; The step is fixed rather than "spread N badges evenly", so a given
+;; condition doesn't jump to a new corner every time an unrelated one is
+;; added or cleared -- where a badge sits stays predictable while a fight
+;; is in progress.
+;;
+;; -120 degrees is where the first badge already sat before badges ringed
+;; the token at all, kept so existing scenes look unchanged at a glance.
+;; Angles run cx=sin/cy=cos against SVG's y-down axis, which makes an
+;; INCREASING angle travel counter-clockwise on screen (south -> east ->
+;; north -> west).
+(def ^:private badge-origin-deg -120)
+
+;; A badge diamond is 15px across (7.5 half-diagonal, see the token
+;; component) and the ring it sits on is `token-radius` ~19px, so the
+;; circumference is a shade under 120px -- room for exactly 8 badges laid
+;; edge to edge. 45 degrees is therefore both a clean eighth-turn and the
+;; tightest step that doesn't overlap its neighbour.
+(def ^:private badge-step-deg 45)
+
+;; ...which makes 8 the most a token can show. Conditions past it are
+;; dropped rather than stacked on top of one another; see token-conditions.
+(def ^:private badge-limit (quot 360 badge-step-deg))
+
+(defn ^:private token-conditions
+  "The flags to badge, in a stable vocabulary order, capped at the
+   `badge-limit` that fits around the token. :player and :dead are styled
+   on the token body itself rather than badged, so they're excluded here."
+  [data icons]
   (let [xform (comp (filter (complement #{:initiative})))
         order (into [:initiative] xform (keys icons))
         exclu #{:player :dead}]
-    (take 4 (filter (difference (token-flags data) exclu) order))))
+    (take badge-limit (filter (difference (token-flags data) exclu) order))))
 
 (defui ^:private token [{:keys [node data base-scale icons] :or {base-scale 1 icons core-badge-icons}}]
   (let [radius token-radius
@@ -448,8 +477,9 @@
       ($ :g {:style {:transform (str "scale(" scale ")")}}
         ($ :circle.scene-token-shape {:r radius :fill (str "url(#" fill ")")})
         ($ :circle.scene-token-base {:r (+ radius 5)})
-        (for [[deg flag] (mapv vector [-120 120 -65 65] (token-conditions data icons))
-              :let [rn (* (/ js/Math.PI 180) deg)
+        (for [[idx flag] (map-indexed vector (token-conditions data icons))
+              :let [deg (+ badge-origin-deg (* idx badge-step-deg))
+                    rn (* (/ js/Math.PI 180) deg)
                     cx (* (js/Math.sin rn) radius)
                     cy (* (js/Math.cos rn) radius)
                     badge (icons flag)]]
