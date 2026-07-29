@@ -435,15 +435,27 @@
 ;; north -> west).
 (def ^:private badge-origin-deg -120)
 
-;; A badge diamond is 15px across (7.5 half-diagonal, see the token
-;; component) and the ring it sits on is `token-radius` ~19px, so the
-;; circumference is a shade under 120px -- room for exactly 8 badges laid
-;; edge to edge. 45 degrees is therefore both a clean eighth-turn and the
-;; tightest step that doesn't overlap its neighbour.
+;; Badges ride the token's outline rather than straddling it. Sitting the
+;; ring exactly on `token-radius` centres each badge on the edge, so half
+;; of it lies over the token -- and a full ring of eight then buries most
+;; of the artwork. Pushing the ring out this far leaves each badge just
+;; clipping the outline: the diamond dips 2.5-3.2px inside it (its reach
+;; toward the centre varies with angle, since an axis-aligned diamond is
+;; an L1 ball) and the circle 2px. Much past this and the circle stops
+;; touching the token altogether and reads as floating.
+(def ^:private badge-ring-offset 4)
+
+;; An eighth-turn apiece. At the offset ring the eight are comfortable
+;; rather than tight -- nearest neighbours clear at |dx|+|dy| = 19.8
+;; against the 15 two diamonds need to touch, and 17.6px between centres
+;; against the 12 two circles need. (On the un-offset ring the same step
+;; was the tightest that still fit, at 16.4 and 14.6.)
 (def ^:private badge-step-deg 45)
 
 ;; ...which makes 8 the most a token can show. Conditions past it are
 ;; dropped rather than stacked on top of one another; see token-conditions.
+;; The wider ring would seat a ninth, but only at an untidy 40-degree step
+;; that shifts every existing badge, so the eighth-turn stays.
 (def ^:private badge-limit (quot 360 badge-step-deg))
 
 (defn ^:private token-conditions
@@ -480,8 +492,9 @@
         (for [[idx flag] (map-indexed vector (token-conditions data icons))
               :let [deg (+ badge-origin-deg (* idx badge-step-deg))
                     rn (* (/ js/Math.PI 180) deg)
-                    cx (* (js/Math.sin rn) radius)
-                    cy (* (js/Math.cos rn) radius)
+                    ring (+ radius badge-ring-offset)
+                    cx (* (js/Math.sin rn) ring)
+                    cy (* (js/Math.cos rn) ring)
                     badge (icons flag)]]
           ($ :g.scene-token-flags {:key flag :data-flag flag :transform (str "translate(" cx ", " cy ")")}
             ;; The diamond is a square on its corner rather than a <polygon>
