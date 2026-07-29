@@ -14,18 +14,32 @@
 (def ^:private status-effects
   "Gloomhaven's status effect icons -- a different named vocabulary from
    D&D's SRD conditions (see ogres.app.game-type.games.dnd5e), under the
-   same cosmetically-similar 'badge icons on a token' mechanism."
-  [{:value :poison      :icon "poison-bottle"}
-   {:value :wound       :icon "activity"}
-   {:value :immobilize  :icon "anchor"}
-   {:value :disarm      :icon "scissors"}
-   {:value :stun        :icon "stars"}
-   {:value :muddle      :icon "question-circle"}
-   {:value :invisible   :icon "incognito"}
-   {:value :strengthen  :icon "lightning-fill"}
-   {:value :bless       :icon "star"}
-   {:value :curse       :icon "emoji-dizzy"}
-   {:value :regenerate  :icon "sun-fill"}])
+   same cosmetically-similar 'badge icons on a token' mechanism. Each
+   icon is purpose-built original artwork (see web/release/icons.svg's
+   'condition-*' symbols) rather than a generic Bootstrap-style glyph.
+
+   No entry carries a :color: these are monotone silhouettes that inherit
+   the surrounding text color, the same convention dnd5e's conditions
+   already follow. An earlier pass gave each one its own accent color,
+   which cost far more legibility than it bought -- at the 8px the canvas
+   badge actually renders (see component/scene's token), a colored glyph
+   on an arbitrarily-colored token is mush, and the darkest few vanished
+   into the app's own dark chrome entirely."
+  [{:value :bane        :icon "condition-bane"}
+   {:value :bless       :icon "condition-bless"}
+   {:value :brittle     :icon "condition-brittle"}
+   {:value :curse       :icon "condition-curse"}
+   {:value :disarm      :icon "condition-disarm"}
+   {:value :immobilize  :icon "condition-immobilize"}
+   {:value :impair      :icon "condition-impair"}
+   {:value :invisible   :icon "condition-invisible"}
+   {:value :muddle      :icon "condition-muddle"}
+   {:value :poison      :icon "condition-poison"}
+   {:value :regenerate  :icon "condition-regenerate"}
+   {:value :strengthen  :icon "condition-strengthen"}
+   {:value :stun        :icon "condition-stun"}
+   {:value :ward        :icon "condition-ward"}
+   {:value :wound       :icon "condition-wound"}])
 
 (def elements
   {:gloomhaven/hp-tracker
