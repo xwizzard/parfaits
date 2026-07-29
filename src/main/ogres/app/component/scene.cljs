@@ -46,19 +46,30 @@
 ;; a :token-badge vocabulary (see badge-icons below); this file never
 ;; names a specific game or condition/status-effect vocabulary directly.
 (def ^:private core-badge-icons
-  {:initiative "hourglass-split"})
+  {:initiative {:icon "hourglass-split"}})
 
 (defn ^:private badge-icons
-  "A flat {value icon} map assembled from every enabled element's
-   :token-badge vocabulary, plus the always-available core turn-order
-   icon. Different game-types can (and do) supply entirely different
-   vocabularies here -- see ogres.app.game-type.games.dnd5e/gloomhaven."
+  "A flat {value {:icon :color :badge-color :shape}} map assembled from
+   every enabled element's :token-badge vocabulary, plus the always-
+   available core turn-order icon. `:color` is nil (inherit, same as
+   today) unless the vocabulary entry names one. `:badge-color` fills the
+   badge's backdrop rather than the glyph, and `:shape` selects that
+   backdrop's form -- it is declared once on the :token-badge map, not per
+   entry, and is folded onto each entry here so the render site below can
+   stay a flat lookup. Different game-types can (and do) supply entirely
+   different vocabularies here -- see ogres.app.game-type.games.dnd5e/
+   gloomhaven, the latter drawing its statuses on diamonds."
   [enabled-elements]
   (into core-badge-icons
-        (comp (filter (comp :token-badge val))
-              (mapcat (comp :vocabulary :token-badge val))
-              (map (juxt :value :icon)))
-        (select-keys game-type/elements enabled-elements)))
+        (mapcat
+         (fn [[_ element]]
+           (let [{:keys [vocabulary shape]} (:token-badge element)]
+             (map (fn [entry]
+                    [(:value entry)
+                     (cond-> (select-keys entry [:icon :color :badge-color])
+                       (some? shape) (assoc :shape shape))])
+                  vocabulary))))
+        (filter (comp :token-badge val) (select-keys game-type/elements enabled-elements))))
 
 (defn ^:private stop-propagation [event]
   (.stopPropagation event))
@@ -440,11 +451,26 @@
         (for [[deg flag] (mapv vector [-120 120 -65 65] (token-conditions data icons))
               :let [rn (* (/ js/Math.PI 180) deg)
                     cx (* (js/Math.sin rn) radius)
-                    cy (* (js/Math.cos rn) radius)]]
+                    cy (* (js/Math.cos rn) radius)
+                    badge (icons flag)]]
           ($ :g.scene-token-flags {:key flag :data-flag flag :transform (str "translate(" cx ", " cy ")")}
-            ($ :circle {:r 12})
-            ($ :g {:transform (str "translate(" -8 ", " -8 ")")}
-              ($ icon {:name (icons flag) :size 16}))))
+            ;; The diamond is a square on its corner rather than a <polygon>
+            ;; so `rx` can round it the way the reference art does. Sized
+            ;; for equal area with the default circle (2r^2 vs pi*r^2, so
+            ;; a 7.5 half-diagonal against r=6) -- swapping shapes must not
+            ;; change how heavy a badge looks against the token.
+            (if (= (:shape badge) :diamond)
+              ($ :rect
+                {:x -5.3 :y -5.3 :width 10.6 :height 10.6 :rx 1.5
+                 :transform "rotate(45)"
+                 ;; Inline, because a stylesheet `fill` would outrank the
+                 ;; same-named presentation attribute; leaving it off lets
+                 ;; the CSS default stand for any vocabulary that declares
+                 ;; a shape but no per-entry color.
+                 :style (if-let [c (:badge-color badge)] {:fill c})})
+              ($ :circle {:r 6}))
+            ($ :g {:transform (str "translate(" -4 ", " -4 ")")}
+              ($ icon {:name (:icon badge) :color (:color badge) :size 8}))))
         (if-let [label (token-label data)]
           ($ :text.scene-token-label {:y half-size} label)))
       (let [radius (+ (* scale half-size) 2)]

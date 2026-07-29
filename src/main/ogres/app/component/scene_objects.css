@@ -175,7 +175,13 @@
   color: white;
   pointer-events: none;
 
-  circle {
+  /* The backdrop is a circle by default and a diamond for vocabularies
+     that ask for one (see component/scene's badge-icons). Either way it
+     sits behind a white glyph, so the shadow is what keeps the badge off
+     light token art. A per-condition fill arrives inline and overrides
+     the default below. */
+  circle,
+  rect {
     fill: var(--color-blues-900);
     filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.8));
   }
