@@ -409,6 +409,28 @@
   [{:db/id game-type-id :game-type/name (trim name)}])
 
 (defmethod
+  ^{:doc "Sets how much real-world distance one grid cell represents for
+          this game-type, and what that distance is called -- 5 / \"ft.\"
+          is D&D's convention and the default.
+
+          Presentation only. The grid stays `grid-size` px per cell and
+          :token/size, :token/light and :token/aura-radius stay in fixed
+          scene units; this changes what the measurement tool PRINTS and
+          nothing else, so a game can measure in metres, hexes, miles or
+          parsecs without any of the geometry moving. See component/
+          scene-draw's px->distance. A game-type that measures in bare
+          cells wants :tool/measurement-cells instead and can ignore
+          this entirely."}
+  event-tx-fn :game-type/change-distance
+  [_ _ game-type-id per-cell unit]
+  (into (if (and (number? per-cell) (pos? per-cell))
+          [[:db/add game-type-id :game-type/distance-per-cell per-cell]]
+          [[:db/retract game-type-id :game-type/distance-per-cell]])
+        (if (and (string? unit) (seq (trim unit)))
+          [[:db/add game-type-id :game-type/distance-unit (trim unit)]]
+          [[:db/retract game-type-id :game-type/distance-unit]])))
+
+(defmethod
   ^{:doc "Removes the given game-type template. Refuses to remove the
           last remaining template -- a scene must always have one to
           reference. Any scene using it, and the Builder mode 'currently

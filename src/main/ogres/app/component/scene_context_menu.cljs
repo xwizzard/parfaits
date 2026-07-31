@@ -8,24 +8,65 @@
             [ogres.app.util :as util]
             [uix.core :as uix :refer [defui $]]))
 
-(defn ^:private token-size [x]
-  (cond (<= x 3)  "Tiny"
-        (<  x 5)  "Small"
-        (<= x 5)  "Medium"
-        (<= x 10) "Large"
-        (<= x 15) "Huge"
-        (>  x 15) "Gargantuan"
-        :else     "Unknown"))
+(def ^:private size-units-per-cell
+  "How many :token/size units make up one grid cell.
+
+   :token/size is stored in fifths of a cell for historical reasons (it
+   began life as D&D feet, where 5ft = one square). Nothing reads it as
+   feet any more -- geom/object-bounding-rect derives a token's footprint
+   as `size / 5` cells and component/scene scales the rendered circle by
+   the same ratio -- so this is now just the encoding, and the controls
+   below step it one whole CELL at a time."
+  5)
+
+(defn ^:private unit-size-label
+  "Describes a token occupying `cells` grid cells.
+
+   Generic: a footprint is always meaningful, so the fallback is a plain
+   cell count. Two optional layers sit on top, each supplied by the
+   active game-type rather than assumed here --
+
+     * a real-world distance, if the game-type defines one (see
+       :game-type/change-distance) -- \"10ft.\", \"4m\";
+     * a name for that footprint, if some enabled element contributes
+       :unit-size-labels -- D&D's \"Large\", \"Huge\".
+
+   With both, D&D reads \"10ft. Large\" exactly as before; with neither,
+   a game that simply has big and small units reads \"2 cells\"."
+  [cells {:keys [per-cell unit]} labels]
+  (let [distance (if (and (number? per-cell) (pos? per-cell) (seq unit))
+                   (str (* cells per-cell) unit)
+                   (str cells (if (= cells 1) " cell" " cells")))
+        named (some (fn [[n label]] (if (= n cells) label)) labels)]
+    (if named (str distance " " named) distance)))
 
 (def ^:private enabled-elements-query
   [{:user/camera
     [{:camera/scene
       [{:scene/game-type
-        [[:game-type/enabled-elements :default #{}]]}]}]}])
+        [[:game-type/enabled-elements :default #{}]
+         :game-type/distance-per-cell
+         :game-type/distance-unit]}]}]}])
 
 (defn ^:private use-enabled-elements []
   (let [result (hooks/use-query enabled-elements-query)]
     (-> result :user/camera :camera/scene :scene/game-type :game-type/enabled-elements)))
+
+(defn ^:private use-unit-presentation
+  "How the active game-type wants unit footprints described: its
+   real-world distance definition (nil when it doesn't define one, in
+   which case footprints read as bare cell counts) and any
+   :unit-size-labels its enabled elements contribute. Both are read
+   generically -- see game-type/elements' own docstring on the keys an
+   element may declare."
+  []
+  (let [result (hooks/use-query enabled-elements-query)
+        gt (-> result :user/camera :camera/scene :scene/game-type)
+        enabled (:game-type/enabled-elements gt #{})]
+    {:distance {:per-cell (:game-type/distance-per-cell gt)
+                :unit (:game-type/distance-unit gt)}
+     :size-labels (into [] (mapcat :unit-size-labels)
+                        (vals (select-keys game-type/elements enabled)))}))
 
 (def ^:private shape-colors
   ["red"   "orange"  "amber"  "yellow" "lime"
@@ -68,7 +109,7 @@
     {:data-tooltip (if value "Unlock" "Lock")}
     ($ :input
       {:type "checkbox"
-       :name "hidden"
+       :name "locked"
        :checked value
        :disabled disabled
        :aria-disabled disabled
@@ -167,24 +208,34 @@
 (defui ^:private token-form-details
   [{:keys [on-change values enabled-elements]
     :or   {values (constantly (list)) on-change identity enabled-elements #{}}}]
-  (let [value-fn (fn [attr] (first (into (sorted-set-by >) (values attr))))]
+  (let [{:keys [distance size-labels]} (use-unit-presentation)
+        value-fn (fn [attr] (first (into (sorted-set-by >) (values attr))))]
     ($ :<>
       (if (contains? enabled-elements :unit/size)
-        (let [value (value-fn :token/size)]
+        ;; The primitive is "this unit occupies N grid cells", stepped a
+        ;; whole cell at a time. Whether a cell is five feet, and whether
+        ;; a 2x2 footprint is called "Large", are both supplied by the
+        ;; active game-type -- see unit-size-label.
+        (let [value (value-fn :token/size)
+              cells (/ value size-units-per-cell)
+              step (fn [n] (on-change :token/change-size
+                                      (-> (+ value (* n size-units-per-cell))
+                                          (max size-units-per-cell)
+                                          (min (* 10 size-units-per-cell)))))]
           ($ :<>
             ($ :label "Size")
             ($ :button
               {:type "button"
                :auto-focus true
-               :on-click #(on-change :token/change-size (max (- value 5) 5))
-               :aria-label "Decrease token size by 5 feet"}
+               :on-click #(step -1)
+               :aria-label "Decrease token size by one cell"}
               "-")
             ($ :data {:value value}
-              (str value  "ft. " (token-size value)))
+              (unit-size-label cells distance size-labels))
             ($ :button
               {:type "button"
-               :on-click #(on-change :token/change-size (min (+ value 5) 50))
-               :aria-label "Increase token size by 5 feet"} "+"))))
+               :on-click #(step 1)
+               :aria-label "Increase token size by one cell"} "+"))))
       (if (contains? enabled-elements :unit/light)
         (let [value (value-fn :token/light)]
           ($ :<>
@@ -192,14 +243,16 @@
             ($ :button
               {:type "button"
                :on-click #(on-change :token/change-light (max (- value 5) 0))
-               :aria-label "Decrease light radius by 5 feet"}
+               :aria-label "Decrease light radius by one cell"}
               "-")
             ($ :data {:value value}
-              (if (> value 0) (str value "ft. radius") "None"))
+              (if (> value 0)
+                (str (unit-size-label (/ value size-units-per-cell) distance nil) " radius")
+                "None"))
             ($ :button
               {:type "button"
                :on-click #(on-change :token/change-light (min (+ value 5) 120))
-               :aria-label "Increase light radius by 5 feet"}
+               :aria-label "Increase light radius by one cell"}
               "+"))))
       (if (contains? enabled-elements :unit/aura)
         (let [value (value-fn :token/aura-radius)]
@@ -208,14 +261,16 @@
             ($ :button
               {:type "button"
                :on-click #(on-change :token/change-aura (max (- value 5) 0))
-               :aria-label "Decrease aura size by 5 feet"}
+               :aria-label "Decrease aura size by one cell"}
               "-")
             ($ :data {:value value}
-              (if (> value 0) (str value "ft. radius") "None"))
+              (if (> value 0)
+                (str (unit-size-label (/ value size-units-per-cell) distance nil) " radius")
+                "None"))
             ($ :button
               {:type "button"
                :on-click #(on-change :token/change-aura (min (+ value 5) 120))
-               :aria-label "Increase aura size by 5 feet"}
+               :aria-label "Increase aura size by one cell"}
               "+")))))))
 
 (def ^:private owner-query

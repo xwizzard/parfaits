@@ -328,3 +328,30 @@
     (is (not= (set (map :value dnd5e-vocab)) (set (map :value gloomhaven-vocab)))
         "The two games genuinely have different status vocabularies under
          the same cosmetically-similar :token-badge mechanism.")))
+
+(deftest test-unit-sizing-primitive-vs-dnd-conventions
+  (testing "the PRIMITIVE -- a unit occupying N grid cells -- is core's
+            :unit/size and belongs to no game"
+    (is (contains? game-type/elements :unit/size))
+    (is (= (namespace :unit/size) "unit")
+        "core namespace, not a game module's"))
+
+  (testing "the D&D CONVENTIONS are declared by its own module"
+    (let [el (get game-type/elements :dnd5e/size-categories)]
+      (is (some? el) "size naming is a dnd5e element, not core behaviour")
+      (is (= (:unit-size-labels el) [[1 "Medium"] [2 "Large"] [3 "Huge"] [4 "Gargantuan"]])
+          "keyed by cells occupied, not by feet")
+      (is (contains? game-type/dnd5e-enabled-elements :dnd5e/size-categories))
+      (is (contains? game-type/dnd5e-enabled-elements :unit/size)
+          "D&D layers its names on top of the generic control")))
+
+  (testing "a game whose figures all occupy one cell simply omits the primitive"
+    (is (not (contains? game-type/gloomhaven-enabled-elements :unit/size))
+        "Gloomhaven standees are all one hex -- no size control at all")
+    (is (not (contains? game-type/gloomhaven-enabled-elements :dnd5e/size-categories))))
+
+  (testing "no other game-type inherits D&D's naming"
+    (doseq [[label elements] [["default" game-type/default-enabled-elements]
+                              ["memory" game-type/memory-enabled-elements]
+                              ["war" game-type/war-enabled-elements]]]
+      (is (not (contains? elements :dnd5e/size-categories)) label))))

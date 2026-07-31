@@ -50,8 +50,35 @@
   []
   (sequence (mapcat shuffle) (repeat (range 1 21))))
 
+(def ^:private size-categories
+  "D&D 5e's creature size categories, keyed by how many grid cells the
+   creature occupies (PHB p.191's Size Categories table: Tiny and Small
+   both share a square, Medium one, Large 2x2, Huge 3x3, Gargantuan 4x4
+   or more).
+
+   This is the game-specific half of token sizing. The PRIMITIVE -- a
+   unit occupying N grid cells, adjusted a cell at a time -- is generic
+   and lives in core's :unit/size; nothing about it is D&D's. What is
+   D&D's is calling 2x2 'Large', and the fact that one cell means five
+   feet, which comes from this template's own :game-type/distance-per-
+   cell rather than from anything hardcoded. A game whose creatures are
+   all one cell (Gloomhaven) simply doesn't enable :unit/size, and one
+   that sizes creatures without naming the sizes enables :unit/size
+   without this."
+  [[1 "Medium"] [2 "Large"] [3 "Huge"] [4 "Gargantuan"]])
+
 (def elements
-  {:dnd5e/hp-tracker
+  {:dnd5e/size-categories
+   {:label "Size Categories"
+    :icon  "person-circle"
+    ;; :unit-size-labels is read generically by component/scene-context-
+    ;; menu -- an element may contribute a name for each footprint the
+    ;; same way it may contribute a :token-panel or :token-badge. Only
+    ;; meaningful alongside core's :unit/size, which supplies the
+    ;; control itself.
+    :unit-size-labels size-categories}
+
+   :dnd5e/hp-tracker
    {:label "HP Tracker"
     :icon  "heart-fill"
     ;; Shares an :exclusive-group with gloomhaven/hp-tracker -- see

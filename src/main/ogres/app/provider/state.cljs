@@ -93,6 +93,14 @@
                         :game-type/enabled-elements game-type/default-enabled-elements}
                        {:game-type/key :dnd5e
                         :game-type/name "D&D 5e"
+                        ;; One square is five feet -- D&D's own convention,
+                        ;; declared by its template rather than assumed by
+                        ;; the engine. Everything measured (the ruler, a
+                        ;; token's footprint, light and aura radii) reads
+                        ;; in feet because of these two attributes; a
+                        ;; game-type that omits them reads in grid cells.
+                        :game-type/distance-per-cell 5
+                        :game-type/distance-unit "ft."
                         :game-type/enabled-elements game-type/dnd5e-enabled-elements}
                        {:game-type/key :gloomhaven
                         :game-type/name "Gloomhaven"

@@ -145,7 +145,7 @@
    alongside the attack-deck system above, the same 'pull in a core tool
    this game genuinely wants' precedent :tool/dice already set for D&D."
   (into default-enabled-elements
-        (concat [:tool/measurement-cells :unit/size :tool/character-profile]
+        (concat [:tool/measurement-cells :tool/character-profile]
                 (keys gloomhaven/elements))))
 
 (def memory-enabled-elements

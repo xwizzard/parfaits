@@ -89,11 +89,28 @@
 (def ^:private points->poly
   (completing into (fn [xs] (join " " xs))))
 
-(defn ^:private px->ft [len]
-  (let [ft (* (/ len grid-size) 5)
-        rd (js/Math.round ft)]
-    (if (< (abs (- ft rd)) 0.001) rd
-        (.toFixed ft 1))))
+(defn ^:private px->distance
+  "Scene pixels -> the NUMBER shown on a measurement label, in whatever
+   unit the active game-type measures in.
+
+   Nothing about the scene's own geometry changes here: the grid is
+   always `grid-size` px per cell and a token's :token/size, light and
+   aura stay in fixed scene units. This converts px to cells and then
+   asks how much of the game's own unit one cell represents -- 5 feet is
+   D&D's convention and the default, but a cell is just as legitimately
+   6 feet, 2 metres, a hex, or a parsec. Only the presentation moves."
+  [len per-cell]
+  (let [n  (* (/ len grid-size) per-cell)
+        rd (js/Math.round n)]
+    (if (< (abs (- n rd)) 0.001) rd
+        (.toFixed n 1))))
+
+(defn ^:private distance-label
+  "px->distance plus the game-type's unit suffix, e.g. \"15ft.\" or
+   \"4.5m\". The suffix is concatenated directly, so it carries its own
+   leading space if it wants one."
+  [len {:keys [per-cell unit]}]
+  (str (px->distance len per-cell) unit))
 
 ;; A small dedicated query, independent of draw-segment's shared `query`
 ;; above (and its children-fn signature every other draw tool relies on)
@@ -104,28 +121,33 @@
     [{:camera/scene
       [[:scene/grid-type :default :square]
        {:scene/game-type
-        [[:game-type/enabled-elements :default #{}]]}]}]}])
+        [[:game-type/enabled-elements :default #{}]
+         [:game-type/distance-per-cell :default 5]
+         [:game-type/distance-unit :default "ft."]]}]}]}])
 
 (defn ^:private use-measurement-info []
   (let [result (hooks/use-query measurement-query)
         scene  (-> result :user/camera :camera/scene)]
     {:grid-type (:scene/grid-type scene)
-     :enabled   (:game-type/enabled-elements (:scene/game-type scene) #{})}))
+     :enabled   (:game-type/enabled-elements (:scene/game-type scene) #{})
+     :per-cell  (:game-type/distance-per-cell (:scene/game-type scene) 5)
+     :unit      (:game-type/distance-unit (:scene/game-type scene) "ft.")}))
 
 (defn ^:private format-measurement
   "Builds the ruler's distance label from whichever measurement
-   primitive(s) are enabled -- :tool/measurement (feet, the existing
-   behavior) and/or :tool/measurement-cells (grid-cell count, hex- or
-   square-aware, see ogres.app.geom/cell-distance). The two aren't
+   primitive(s) are enabled -- :tool/measurement (a real-world distance
+   in the game-type's own unit, see distance-label) and/or
+   :tool/measurement-cells (grid-cell count, hex- or square-aware, see
+   ogres.app.geom/cell-distance). The two aren't
    exclusive: if both are enabled, both show, joined by \" / \". If
    neither is (only reachable today via the pre-existing gap where the
    'r' keyboard shortcut doesn't check :tool/measurement -- see
    toolbar.cljs), this is an empty string."
-  [segment {:keys [grid-type enabled]}]
+  [segment {:keys [grid-type enabled] :as info}]
   (join " / "
         (cond-> []
           (contains? enabled :tool/measurement)
-          (conj (str (px->ft (vec/dist-cheb segment)) "ft."))
+          (conj (distance-label (vec/dist-cheb segment) info))
           (contains? enabled :tool/measurement-cells)
           (conj (let [n (geom/cell-distance segment grid-type)]
                   (str n (if (= n 1) " cell" " cells")))))))
@@ -300,7 +322,8 @@
                 (format-measurement camera info)))))))))
 
 (defui ^:private draw-circle []
-  (let [dispatch (hooks/use-dispatch)]
+  (let [dispatch (hooks/use-dispatch)
+        info (use-measurement-info)]
     ($ draw-segment
       {:align-fn align-grid
        :on-release (fn [s] (dispatch :shape/create :circle (seq s)))
@@ -314,10 +337,11 @@
             ($ :circle.scene-draw-shape
               {:transform src :r (vec/dist-cheb canvas)})
             ($ text {:x (.-x src) :y (.-y src)}
-              (str (px->ft (vec/dist-cheb camera)) "ft. radius"))))))))
+              (str (distance-label (vec/dist-cheb camera) info) " radius"))))))))
 
 (defui ^:private draw-rect []
-  (let [dispatch (hooks/use-dispatch)]
+  (let [dispatch (hooks/use-dispatch)
+        info (use-measurement-info)]
     ($ draw-segment
       {:align-fn align-grid
        :on-release (fn [s] (dispatch :shape/create :rect (seq s)))}
@@ -330,11 +354,12 @@
             (let [point (seg/extend canvas 32)]
               ($ text {:x (.-x point) :y (.-y point)}
                 (let [v (vec/abs (vec/sub a b))]
-                  (str (px->ft (.-x v)) "ft. x "
-                       (px->ft (.-y v)) "ft."))))))))))
+                  (str (distance-label (.-x v) info) " x "
+                       (distance-label (.-y v) info)))))))))))
 
 (defui ^:private draw-line []
-  (let [dispatch (hooks/use-dispatch)]
+  (let [dispatch (hooks/use-dispatch)
+        info (use-measurement-info)]
     ($ draw-segment
       {:align-fn align-line
        :on-release (fn [s] (dispatch :shape/create :line (seq s)))
@@ -349,10 +374,11 @@
                 {:points (join " " (mapcat seq points))}))
             (let [point (seg/extend canvas 32)]
               ($ text {:x (.-x point) :y (.-y point)}
-                (str (px->ft (vec/dist camera)) "ft.")))))))))
+                (distance-label (vec/dist camera) info)))))))))
 
 (defui ^:private draw-cone []
-  (let [dispatch (hooks/use-dispatch)]
+  (let [dispatch (hooks/use-dispatch)
+        info (use-measurement-info)]
     ($ draw-segment
       {:align-fn align-cone
        :on-release (fn [s] (dispatch :shape/create :cone (seq s)))
@@ -366,7 +392,7 @@
               {:points (join " " (mapcat seq points))}))
           (let [point (seg/extend canvas 32)]
             ($ text {:x (.-x point) :y (.-y point)}
-              (str (px->ft (vec/dist camera)) "ft."))))))))
+              (distance-label (vec/dist camera) info))))))))
 
 (defui ^:private draw-poly []
   (let [dispatch (hooks/use-dispatch)]

@@ -4706,3 +4706,70 @@
         (dispatch conn :minigame/remove minigame-id)
         (is (:scene/neutral-authority? (scene-memory conn))
             "ending the table doesn't touch it either")))))
+
+(deftest test-default-cell-px-is-a-density-not-a-size
+  (testing "one baseline has to serve a multi-cell map tile, a single-cell
+            prop and a tiny accent alike. It can, because it specifies
+            DENSITY (pixels per cell), not size -- every asset produced at
+            the same density lands at the same scale and so keeps its own
+            real-world footprint."
+    (let [conn (ds/conn-from-db (initial-data true))
+          seed! (fn [hash px]
+                  (dispatch conn :props-images/create-many
+                            [[{:hash hash :name hash :size 1 :width px :height px}
+                              {:hash hash :name hash :size 1 :width px :height px}]]))]
+      ;; all three exported at 140px per cell
+      (seed! "map-tile" 1400)   ; 10 cells across
+      (seed! "one-cell" 140)    ; exactly 1 cell
+      (seed! "accent" 35)       ; a quarter cell
+      (dispatch conn :root/change-default-cell-px 140)
+      (dispatch conn :props/create-many (Vec2. 0 0) "map-tile" 1)
+      (dispatch conn :props/create-many (Vec2. 0 0) "one-cell" 1)
+      (dispatch conn :props/create-many (Vec2. 0 0) "accent" 1)
+      (let [by-hash (into {} (map (juxt (comp :image/hash :prop/image) identity))
+                          (scene-props conn))
+            ;; scene units each image covers = native px * :object/scale
+            covered (fn [hash px] (* px (:object/scale (by-hash hash))))]
+        (is (= (set (map (comp :object/scale val) by-hash)) #{0.5})
+            "one density -> one scale, regardless of how large the asset is")
+        (is (= (covered "map-tile" 1400) 700.0) "the map tile spans 10 cells (700 / 70)")
+        (is (= (covered "one-cell" 140) 70.0)   "the one-cell prop spans exactly 1")
+        (is (= (covered "accent" 35) 17.5)      "the accent stays a quarter cell")))))
+
+(deftest test-default-cell-px-leaves-anchor-calibration-alone
+  (testing "the baseline only supplies scale; an image's calibrated anchor
+            point is separate per-image data and is untouched by it"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "tile")
+      (transact! conn [{:image/hash "tile" :image/anchor (Vec2. 3 4)}])
+      (dispatch conn :root/change-default-cell-px 140)
+      (dispatch conn :props/create-many (Vec2. 0 0) "tile" 1)
+      (is (= (:image/anchor (entity @conn [:image/hash "tile"])) (Vec2. 3 4))
+          "anchor survives untouched"))))
+
+(deftest test-game-type-change-distance
+  (testing "how much a cell measures, and what it's called, is per
+            game-type presentation -- the scene's own units never move"
+    (let [conn (ds/conn-from-db (initial-data true))
+          gt (fn [] (:scene/game-type (current-scene conn)))
+          id (:db/id (gt))]
+      (is (nil? (:game-type/distance-per-cell (gt)))
+          "unset by default -- callers fall back to 5 / ft.")
+      (dispatch conn :game-type/change-distance id 2 "m")
+      (is (= (:game-type/distance-per-cell (gt)) 2))
+      (is (= (:game-type/distance-unit (gt)) "m"))
+
+      (testing "a blank or non-positive value clears rather than storing junk"
+        (dispatch conn :game-type/change-distance id 0 "m")
+        (is (nil? (:game-type/distance-per-cell (gt))))
+        (dispatch conn :game-type/change-distance id 2 "   ")
+        (is (nil? (:game-type/distance-unit (gt)))))
+
+      (testing "it never touches the scene's fixed geometry"
+        (dispatch conn :game-type/change-distance id 100 "parsecs")
+        (dispatch conn :token/create (Vec2. 0 0) nil)
+        (let [token (scene-token conn)]
+          (is (= (:token/size token 5) 5)
+              "a token is still 5 scene units -- one cell -- regardless")
+          (is (nil? (:scene/grid-size (current-scene conn)))
+              "and the grid is untouched"))))))

@@ -18,6 +18,8 @@
     [:db/id
      :game-type/name
      [:game-type/category :default nil]
+     [:game-type/distance-per-cell :default 5]
+     [:game-type/distance-unit :default "ft."]
      [:game-type/enabled-elements :default #{}]
      [:game-type/icon-overrides :default {}]]}
    {:root/user
@@ -177,6 +179,45 @@
            :maxLength 36
            :value (or (:game-type/name game-type) "")
            :on-change #(dispatch :game-type/rename id (.. % -target -value))}))
+      ;; How much real-world distance one CELL represents, and what to
+      ;; call it. Presentation only -- see :game-type/change-distance.
+      ;; Shown regardless of whether :tool/measurement is enabled, since
+      ;; enabling it is a checkbox further down the same panel.
+      (let [per-cell (:game-type/distance-per-cell game-type)
+            unit (:game-type/distance-unit game-type)]
+        ($ :fieldset.fieldset
+          ($ :legend "Measurement ( per cell )")
+          ($ :.game-type-builder-distance
+            ($ :input.text.text-ghost
+              {:type "number"
+               :min 0
+               :step "any"
+               :aria-label "Distance per cell"
+               :value per-cell
+               :on-change
+               (fn [event]
+                 (let [v (.. event -target -value)]
+                   (dispatch :game-type/change-distance id
+                             (if (= v "") 0 (js/Number v)) unit)))})
+            ($ :input.text.text-ghost
+              {:type "text"
+               :maxLength 12
+               :aria-label "Distance unit"
+               :placeholder "ft."
+               :value unit
+               :on-change
+               (fn [event]
+                 (dispatch :game-type/change-distance id per-cell
+                           (.. event -target -value)))}))
+          ($ :details
+            ($ :summary "More Information")
+            "What one grid cell measures, and its label -- \"5\" and
+             \"ft.\" gives \"15ft.\" on the ruler. This changes only what
+             measurements PRINT: the grid, token sizes, light and aura
+             radii are all in fixed scene units and never move. Games
+             that count bare cells instead should enable "
+            ($ :strong "Cell Measurement")
+            " below and can ignore this.")))
       ($ :details.game-type-builder-category
         ($ category-summary
           {:label "Generic" :ids generic-ids :game-type game-type :dispatch dispatch})
