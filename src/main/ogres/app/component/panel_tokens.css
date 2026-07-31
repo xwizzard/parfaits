@@ -158,11 +158,14 @@
   margin: 1vw;
   position: relative;
 
-  .token-editor-button {
+  .token-editor-actions {
     position: absolute;
     inset: auto auto 12px 50%;
-    width: 320px;
     transform: translateX(-50%);
+  }
+
+  .token-editor-actions .token-editor-button {
+    width: 320px;
   }
 }
 
@@ -341,4 +344,20 @@
   .token-editor {
     flex-direction: column;
   }
+}
+
+/* Crop and rotate controls, laid out along the bottom of the workspace.
+   Positioning lives in the .token-editor-workspace rule above -- this
+   row replaced the lone Apply button that used to be placed there. */
+.token-editor-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+/* There is no clockwise arrow symbol -- mirror the counterclockwise one
+   rather than ship a second, nearly identical glyph. */
+.token-editor-rotate-cw .icon {
+  transform: scaleX(-1);
 }

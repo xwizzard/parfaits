@@ -2821,9 +2821,13 @@
   [[:db/retract [:db/ident :root] :root/token-images]])
 
 (defmethod event-tx-fn :token-images/change-thumbnail
-  [_ _ hash thumb rect]
+  [_ _ hash thumb rect rotation]
   [{:image/hash hash
     :image/thumbnail-rect rect
+    ;; The rect is expressed in the rotated frame the editor was showing,
+    ;; so the turn has to be stored with it -- reopening the editor without
+    ;; it would restore the crop box against a differently-oriented image.
+    :image/thumbnail-rotation (or rotation 0)
     :image/thumbnail
     {:image/hash (:hash thumb)
      :image/size (.-size (:data thumb))

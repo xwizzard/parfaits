@@ -27,6 +27,7 @@
      :image/width
      :image/height
      :image/thumbnail-rect
+     :image/thumbnail-rotation
      {:image/thumbnail
       [:image/hash :image/size]}
      :token-image/default-label
@@ -308,6 +309,52 @@
        :class (str "token-editor-region-anchor-" (name id))
        :on-pointer-down (.. drag -listeners -onPointerDown)})))
 
+(defn ^:private rotate-rect
+  "Maps a crop rectangle from a `w` x `h` frame into the frame produced by
+   turning that image one quarter turn, so the selection keeps covering the
+   same pixels instead of jumping somewhere else when the image turns."
+  [[ax ay bx by] w h clockwise?]
+  (if clockwise?
+    [(- h by) ax (- h ay) bx]
+    [ay (- w bx) by (- w ax)]))
+
+(defn ^:private use-rotated-url
+  "Returns an object URL for `url` turned clockwise by `degrees`. The editor
+   displays a genuinely rotated image rather than a CSS-transformed one so
+   that every measurement taken off it -- the crop rectangle, its clamp, the
+   object-fit scale -- is in the same frame the user sees."
+  [url degrees]
+  (let [[out set-out] (uix/use-state nil)]
+    (uix/use-effect
+     (fn []
+       (if (or (nil? url) (zero? (mod degrees 360)))
+         (do (set-out url) js/undefined)
+         (let [image (js/Image.)
+               made  (atom nil)]
+           (set! (.-onload image)
+                 (fn []
+                   (let [deg (mod degrees 360)
+                         sw  (.-naturalWidth image)
+                         sh  (.-naturalHeight image)
+                         qtr (or (= deg 90) (= deg 270))
+                         cw  (if qtr sh sw)
+                         ch  (if qtr sw sh)
+                         cvs (js/document.createElement "canvas")
+                         ctx (do (set! (.-width cvs) cw)
+                                 (set! (.-height cvs) ch)
+                                 (.getContext cvs "2d"))]
+                     (.translate ctx (/ cw 2) (/ ch 2))
+                     (.rotate ctx (* deg (/ js/Math.PI 180)))
+                     (.drawImage ctx image (- (/ sw 2)) (- (/ sh 2)))
+                     (.toBlob cvs (fn [blob]
+                                    (let [next (js/URL.createObjectURL blob)]
+                                      (reset! made next)
+                                      (set-out next)))))))
+           (set! (.-src image) url)
+           (fn [] (if-let [prev (deref made)] (js/URL.revokeObjectURL prev))))))
+     [url degrees])
+    out))
+
 (defui ^:private region [{:keys [children x y width height]}]
   (let [drag (use-draggable #js {"id" "rg"})]
     ($ :.token-editor-region
@@ -323,13 +370,23 @@
           height :image/height} :image
          on-change :on-change} props
         element (uix/use-ref nil)
-        obj-url (hooks/use-image hash)
-        initial (or (:image/thumbnail-rect (:image props)) (default-region width height))
+        ;; Quarter turns. The image the user is looking at is really rotated
+        ;; rather than merely transformed in CSS, so the crop rectangle, its
+        ;; clamp, and the object-fit scale are all expressed in the frame on
+        ;; screen -- what you crop is what gets saved.
+        [rotation set-rotation]
+        (uix/use-state (or (:image/thumbnail-rotation (:image props)) 0))
+        quarter? (or (= rotation 90) (= rotation 270))
+        rot-wdth (if quarter? height width)
+        rot-hght (if quarter? width height)
+        obj-url (use-rotated-url (hooks/use-image hash) rotation)
+        initial (or (:image/thumbnail-rect (:image props))
+                    (default-region rot-wdth rot-hght))
         [delta set-delta] (uix/use-state [0 0 0 0])
         [bound set-bound] (uix/use-state initial)
         [scale set-scale] (uix/use-state nil)
         scale-fn (uix/use-memo #(dnd-scale-fn scale) [scale])
-        clamp-fn (uix/use-memo #(dnd-clamp-fn bound width height) [bound width height])
+        clamp-fn (uix/use-memo #(dnd-clamp-fn bound rot-wdth rot-hght) [bound rot-wdth rot-hght])
         on-drag-move
         (uix/use-callback
          (fn [data]
@@ -369,7 +426,8 @@
            (let [con-rect (.-contentRect entry)
                  con-wdth (js/Math.round (.-width con-rect))
                  con-hght (js/Math.round (.-height con-rect))]
-             (set-scale (object-fit-scale width height con-wdth con-hght)))) [width height])]
+             (set-scale (object-fit-scale rot-wdth rot-hght con-wdth con-hght))))
+         [rot-wdth rot-hght])]
 
     ;; Observe changes to the size of the token image in order to recalculate
     ;; the scale of the image relative to its natural dimensions.
@@ -389,26 +447,49 @@
           {:on-submit
            (fn [event]
              (.preventDefault event)
-             (on-change hash bound))}
+             (on-change hash bound rotation))}
           ($ :img.token-editor-image
             {:ref element
              :src obj-url
-             :width width
-             :height height
+             :width rot-wdth
+             :height rot-hght
              :data-loaded (some? obj-url)})
           ($ region
-            {:x      (* (- (+ ax cx) (/ width 2)) scale)
-             :y      (* (- (+ ay cy) (/ height 2)) scale)
+            {:x      (* (- (+ ax cx) (/ rot-wdth 2)) scale)
+             :y      (* (- (+ ay cy) (/ rot-hght 2)) scale)
              :width  (* (+ (- bx ax cx) dx) scale)
              :height (* (+ (- by ay cy) dy) scale)}
             ($ anchor {:key :nw :id :nw})
             ($ anchor {:key :ne :id :ne})
             ($ anchor {:key :se :id :se})
             ($ anchor {:key :sw :id :sw}))
-          ($ :button.token-editor-button
-            {:type "submit" :disabled (= initial bound)}
-            ($ icon {:name "crop" :size 16})
-            "Crop and Resize"))))))
+          ($ :.token-editor-actions
+            ($ :button.button.button-neutral
+              {:type "button"
+               :aria-label "Rotate left"
+               :data-tooltip "Rotate left"
+               :on-click
+               (fn []
+                 (set-bound (fn [rect] (rotate-rect rect rot-wdth rot-hght false)))
+                 (set-rotation #(mod (- % 90) 360)))}
+              ($ icon {:name "arrow-counterclockwise" :size 16}))
+            ($ :button.button.button-neutral.token-editor-rotate-cw
+              {:type "button"
+               :aria-label "Rotate right"
+               :data-tooltip "Rotate right"
+               :on-click
+               (fn []
+                 (set-bound (fn [rect] (rotate-rect rect rot-wdth rot-hght true)))
+                 (set-rotation #(mod (+ % 90) 360)))}
+              ;; No clockwise glyph exists; mirroring the counterclockwise
+              ;; one beats shipping a near-duplicate symbol for it.
+              ($ icon {:name "arrow-counterclockwise" :size 16}))
+            ($ :button.token-editor-button
+              ;; Enabled by a rotation as well as a crop -- rotating
+              ;; without re-cropping is a perfectly ordinary edit.
+              {:type "submit" :disabled (and (= initial bound) (zero? rotation))}
+              ($ icon {:name "crop" :size 16})
+              "Apply")))))))
 
 (defui ^:private token-editor [props]
   (let [dispatch (hooks/use-dispatch)
@@ -426,10 +507,10 @@
               {:key (:image/hash token)
                :image token
                :on-change
-               (fn [hash bounds]
+               (fn [hash bounds rotation]
                  (if (:user/host user)
-                   (publish :image/change-thumbnail hash bounds)
-                   (publish :image/change-thumbnail-request hash bounds)))}))
+                   (publish :image/change-thumbnail hash bounds rotation)
+                   (publish :image/change-thumbnail-request hash bounds rotation)))}))
           ($ :.token-editor-placeholder
             ($ icon {:name "crop" :size 64})
             "Select an image to crop and resize." ($ :br)

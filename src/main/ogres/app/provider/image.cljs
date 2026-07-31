@@ -60,6 +60,30 @@
      (.drawImage (.getContext canvas "2d") src ax ay (- bx ax) (- by ay) 0 0 len len)
      canvas)))
 
+(defn ^:private rotate-canvas
+  "Returns a <canvas> with `src` rotated clockwise by `degrees` (0, 90, 180
+   or 270); a quarter turn swaps its dimensions. Applied to the whole source
+   BEFORE cropping, because the editor shows the rotated image and lets the
+   user place the crop on top of it -- so the rectangle it hands back is
+   already expressed in this rotated frame."
+  [^js/HTMLCanvasElement src degrees]
+  (let [deg (mod degrees 360)]
+    (if (zero? deg)
+      src
+      (let [sw (.-width src)
+            sh (.-height src)
+            quarter? (or (= deg 90) (= deg 270))
+            cw (if quarter? sh sw)
+            ch (if quarter? sw sh)
+            canvas (js/document.createElement "canvas")
+            ctx (do (set! (.-width canvas) cw)
+                    (set! (.-height canvas) ch)
+                    (.getContext canvas "2d"))]
+        (.translate ctx (/ cw 2) (/ ch 2))
+        (.rotate ctx (* deg (/ js/Math.PI 180)))
+        (.drawImage ctx src (- (/ sw 2)) (- (/ sh 2)))
+        canvas))))
+
 (defn ^:private create-canvas
   "Returns a <canvas> with the contents of the given image drawn on it."
   [^js/ImageBitmap image]
@@ -216,13 +240,14 @@
        [write put-url loading]))
     (events/use-subscribe :image/change-thumbnail
       (uix/use-callback
-       (fn [hash [ax ay bx by :as rect]]
+       (fn [hash [ax ay bx by :as rect] rotation]
          (let [entity (ds/entity (ds/db conn) [:image/hash hash])]
            (-> (read hash)
                (.then (fn [rec] (js/createImageBitmap (.-data rec))))
                (.then
                 (fn [src]
                   (-> (create-canvas src)
+                      (rotate-canvas (or rotation 0))
                       (create-thumbnail 256 ax ay bx by)
                       (extract-image))))
                (.then
@@ -235,7 +260,7 @@
                           out]))))
                (.then
                 (fn [[_ _ data]]
-                  (dispatch :token-images/change-thumbnail hash data rect)))))) [read dispatch conn write]))
+                  (dispatch :token-images/change-thumbnail hash data rect (or rotation 0))))))) [read dispatch conn write]))
     ($ context {:value [urls on-request]}
       (:children props))))
 

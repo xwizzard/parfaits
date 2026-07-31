@@ -110,8 +110,8 @@
                  "dst"  (str (:src message))}))))
 
     :image/change-thumbnail-request
-    (let [{{hash :hash bounds :bounds} :data} message]
-      (publish :image/change-thumbnail hash bounds))
+    (let [{{hash :hash bounds :bounds rotation :rotation} :data} message]
+      (publish :image/change-thumbnail hash bounds rotation))
 
     ;; A non-host connection can't safely mint the ~50 entities a new
     ;; mini-game session (deck + cards + seats) requires -- there's no
@@ -309,7 +309,7 @@
 
     (hooks/use-subscribe :image/change-thumbnail-request
       (uix/use-callback
-       (fn [hash bounds]
+       (fn [hash bounds rotation]
          (let [session (ds/entity @conn [:db/ident :session])]
            (if-let [host (-> session :session/host :user/uuid)]
              (on-send-text
@@ -318,7 +318,8 @@
                :data
                {:name :image/change-thumbnail-request
                 :hash hash
-                :bounds bounds}})))) [conn on-send-text]))
+                :bounds bounds
+                :rotation rotation}})))) [conn on-send-text]))
 
     ;; A non-host connection's request to create a new mini-game session
     ;; -- forwarded to the host, who alone actually dispatches (see the
