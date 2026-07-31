@@ -41,8 +41,7 @@
   }
 
   text,
-  .scene-grid,
-  .scene-image {
+  .scene-grid {
     pointer-events: none;
   }
 }
@@ -130,10 +129,6 @@
 
   .scene-background {
     display: none;
-
-    .scene-image {
-      filter: url(#scene-image-filter);
-    }
   }
 
   .scene-mask-primary {

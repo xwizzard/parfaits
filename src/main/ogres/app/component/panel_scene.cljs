@@ -21,6 +21,7 @@
      :image/size
      {:image/thumbnail
       [:image/hash]}]}
+   :root/default-cell-px
    {:root/user
     [{:user/camera
       [:db/id
@@ -259,11 +260,12 @@
         input    (uix/use-ref)
         data     (hooks/use-query query [:db/ident :root])
         {{{scene :camera/scene} :user/camera
-          camera :user/camera} :root/user} data
+          camera :user/camera} :root/user
+         default-cell-px :root/default-cell-px} data
         enabled-elements (:game-type/enabled-elements (:scene/game-type scene) #{})
         ;; "No-grid mode": the active game-type has no grid layout enabled
         ;; at all, so the scene is on an invisible, unaligned square grid
-        ;; (see :game-type/toggle-element). Tile size / grid options /
+        ;; (see :game-type/toggle-element). Image scale / grid options /
         ;; grid alignment are all meaningless with no grid to configure.
         no-grid? (zero? (game-type/grid-count enabled-elements))
         ;; The scene-level Lighting mode and each token's individual light
@@ -437,24 +439,34 @@
            useful for previewing how tokens will fit before placing any."))
       (if-not no-grid?
         ($ :fieldset.fieldset
-          ($ :legend "Tile size ( px )")
+          ($ :legend "Image scale ( px per cell )")
           ($ :input.text.text-ghost
             {:type "number"
-             :name "Tile size"
-             :value (:scene/grid-size scene)
-             :placeholder "70px"
+             :name "Image scale"
+             :min 1
+             :value (or default-cell-px "")
+             :placeholder "native size"
              :on-change
              (fn [event]
-               (let [value (.. event -target -value)
-                     value (js/Number value)]
-                 (if (= value 0)
-                   (dispatch :scene/retract-grid-size)
-                   (dispatch :scene/change-grid-size value))))})
+               (let [value (.. event -target -value)]
+                 (dispatch :root/change-default-cell-px
+                           (if (= value "") 0 (js/Number value)))))})
           ($ :details
             ($ :summary "More Information")
-            "The tile size is the width, in pixels, of one square in the
-             selected background image. Changes to this value will scale the
-             image such that each square will take up the width of one token.")))
+            "How many pixels of a map or prop image make up one grid cell.
+             Set it once and every board piece and prop you place afterwards
+             drops already scaled to the grid, instead of at its native
+             pixel size. Leave it empty to place images at native size.
+
+             This is a baseline for a whole asset set. An individual image
+             can still override it: scale one placed copy until it fits,
+             then use "
+            ($ :strong "Save scale as default")
+            " on it -- that calibration wins over this value, and also
+             corrects every copy of that image already on your scenes.
+
+             Images already placed are not affected; this only changes how
+             new ones land.")))
       (if-not no-grid?
         ($ :fieldset.fieldset
           ($ :legend "Grid options")

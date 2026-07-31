@@ -4,7 +4,7 @@
             [goog.object :refer [getValueByKeys]]
             [ogres.app.component :refer [icon image]]
             [ogres.app.component.scene-draw :refer [draw]]
-            [ogres.app.component.scene-objects :refer [objects]]
+            [ogres.app.component.scene-objects :refer [objects tokens-xf]]
             [ogres.app.component.scene-pattern :refer [pattern]]
             [ogres.app.const :refer [grid-size half-size hex-width hex-row token-radius]]
             [ogres.app.game-type :as game-type]
@@ -519,31 +519,51 @@
       (let [radius (+ (* scale half-size) 2)]
         ($ :circle.scene-token-ring {:style {:r radius}})))))
 
+;; Rooted at :root rather than :user so the session's connected uuids are
+;; available here: these defs carry the actual token artwork, so they have
+;; to be resolved through the same authority rule scene-objects' `<use>`
+;; list uses (see tokens-xf). :token/image-alt is pulled with the SAME
+;; sub-pattern as :token/image because resolve-hidden swaps one for the
+;; other wholesale.
 (def ^:private tokens-defs-query
-  [[:user/host :default true]
-   {:user/camera
-    [{:camera/scene
-      [[:scene/grid-type :default :square]
-       [:scene/token-scale :default {}]
-       {:scene/game-type
-        [[:game-type/enabled-elements :default #{}]]}
-       {:scene/tokens
-        [:db/id
-         [:initiative/suffix :default nil]
-         [:object/point :default vec/zero]
-         [:object/hidden :default false]
-         [:token/flags :default #{}]
-         [:token/label :default ""]
-         [:token/size :default 5]
-         [:token/light :default 15]
-         [:token/aura-radius :default 0]
-         {:token/image [{:image/thumbnail [:image/hash]}]}
-         {:scene/_initiative [:db/id :initiative/turn]}]}]}]}])
+  [{:root/user
+    [[:user/host :default true]
+     :user/uuid
+     {:user/camera
+      [{:camera/scene
+        [[:scene/grid-type :default :square]
+         [:scene/token-scale :default {}]
+         [:scene/neutral-authority? :default false]
+         {:scene/game-type
+          [[:game-type/enabled-elements :default #{}]]}
+         {:scene/tokens
+          [:db/id
+           [:initiative/suffix :default nil]
+           [:object/point :default vec/zero]
+           [:object/hidden :default false]
+           [:token/flags :default #{}]
+           [:token/label :default ""]
+           [:token/size :default 5]
+           [:token/light :default 15]
+           [:token/aura-radius :default 0]
+           {:token/image [{:image/thumbnail [:image/hash]}]}
+           {:token/image-alt [{:image/thumbnail [:image/hash]}]}
+           {:object/owner [:db/id {:player/controller [:user/uuid]}]}
+           {:scene/_initiative [:db/id :initiative/turn]}]}]}]}]}
+   {:root/session [{:session/conns [:user/uuid]}]}])
 
 (defui ^:private tokens-defs []
-  (let [result (hooks/use-query tokens-defs-query)
-        scene  (-> result :user/camera :camera/scene)
-        tokens (:scene/tokens scene)
+  (let [result (hooks/use-query tokens-defs-query [:db/ident :root])
+        user   (:root/user result)
+        scene  (-> user :user/camera :camera/scene)
+        ;; Same inputs scene-objects derives for its own copy of this
+        ;; call: the host's default authority is suppressed on a
+        ;; :scene/neutral-authority? scene, so an impartial-dealer host
+        ;; doesn't get the real face either.
+        connected-uuids (into #{} (map :user/uuid) (:session/conns (:root/session result)))
+        default-authority (and (:user/host user) (not (:scene/neutral-authority? scene)))
+        tokens (sequence (tokens-xf (:user/uuid user) default-authority connected-uuids)
+                         (:scene/tokens scene))
         ;; The base-scale multiplier is tuned per grid-type (see
         ;; panel_scene.cljs's "Token scale" fieldset), so it comes from
         ;; whichever grid-type the scene is currently on.

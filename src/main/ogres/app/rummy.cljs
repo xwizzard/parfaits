@@ -8,14 +8,33 @@
    crazy-eights play for their own games. See events.cljs's :rummy/*
    methods and component/panel_rummy.cljs.")
 
+(defn set-scored-count
+  "How many cards of one rank are on the table as part of a laid-down
+   SET, given every scored card of that rank.
+
+   Cards melded as part of a RUN carry :card/run-meld? and are excluded.
+   The shared :scored area holds both kinds indistinguishably otherwise,
+   and counting run cards as set progress breaks scoreable-set's
+   precondition below in both directions: a legal fresh 3-of-a-kind
+   becomes permanently unplayable once one of that rank has gone down in
+   somebody's run (scoreable-set answers 0 for an already-scored count of
+   1 or 2), and three of a rank arriving via three separate runs lets a
+   player 'lay off the 4th' onto a set nobody ever laid down."
+  [scored-of-rank]
+  (count (remove :card/run-meld? scored-of-rank)))
+
 (defn scoreable-set
   "How many of the player's own `hand-count` cards of one rank would
    be laid down right now, given `already-scored` -- how many of that
-   rank are already scored on the table -- 0 if none eligible. A fresh
+   rank are already on the table as part of a SET (see set-scored-count,
+   which is how callers must derive this) -- 0 if none eligible. A fresh
    set needs the player to hold >=3 of their own (lays down all they
    hold, 3 or 4 at once); once exactly 3 of a rank are already scored,
    laying off the 4th needs exactly 1 more in hand; a rank already
-   fully scored (4) has nothing left to add."
+   fully scored (4) has nothing left to add.
+
+   The 1-or-2 case answering 0 rests on sets only ever being laid down 3
+   or 4 at once, so those counts are unreachable for set-melded cards."
   [hand-count already-scored]
   (cond
     (>= already-scored 4) 0

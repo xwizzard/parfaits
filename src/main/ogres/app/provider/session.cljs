@@ -14,6 +14,15 @@
 (def ^:private interval-heartbeat 20000)
 (def ^:private interval-reconnect 5000)
 
+(defn ^:private close-socket
+  "Closes `socket` if it is worth closing. A socket still CONNECTING (0)
+   or already OPEN (1) has to be closed explicitly -- dropping the
+   reference only detaches our listeners and leaves the connection (and
+   its room membership) alive on the server."
+  [socket]
+  (if (and (some? socket) (contains? #{0 1} (.-readyState socket)))
+    (.close socket)))
+
 (def ^:private color-options
   ["blue" "yellow" "green" "purple" "orange"])
 
@@ -169,12 +178,18 @@
         on-send-binary
         (uix/use-callback
          (fn [message]
-           (let [user (ds/entity @conn [:db/ident :user])
-                 data (js/Object.assign
-                       #js {}
-                       #js {"time" (js/Date.now) "src" (str (:user/uuid user))}
-                       message)]
-             (.send socket (MessagePack/encode data)))) [socket conn])
+           ;; Same open-socket guard on-send-text has. Without it, an
+           ;; image published while the socket is still CONNECTING throws
+           ;; InvalidStateError inside a .then (an unhandled rejection and
+           ;; a silently lost upload), and on a CLOSED socket send() is
+           ;; spec-silently discarded -- also a silent loss.
+           (if (and (some? socket) (= (.-readyState socket) 1))
+             (let [user (ds/entity @conn [:db/ident :user])
+                   data (js/Object.assign
+                         #js {}
+                         #js {"time" (js/Date.now) "src" (str (:user/uuid user))}
+                         message)]
+               (.send socket (MessagePack/encode data))))) [socket conn])
         on-status-change
         (uix/use-callback
          (fn [event]
@@ -186,24 +201,38 @@
     (hooks/use-event-listener socket "close" on-status-change)
     (hooks/use-event-listener socket "error" on-status-change)
 
-    ;; Periodically attempt to re-establish closed connections.
+    ;; Periodically attempt to re-establish closed connections. The host
+    ;; reconnects too, via :session/request rather than :session/join --
+    ;; that path reuses :session/last-room (see below), so the room comes
+    ;; back under its original code and any link already shared with
+    ;; players keeps working. A host with no last-room has nothing to
+    ;; reclaim and is left alone, so this never silently opens a room
+    ;; nobody asked for.
     (hooks/use-interval
      (uix/use-callback
       (fn []
         (let [user (ds/entity @conn [:db/ident :user])]
-          (if (and (not (:user/host user))
-                   (= (:session/status user) :disconnected))
-            (dispatch :session/join)))) [conn dispatch]) interval-reconnect)
+          (if (= (:session/status user) :disconnected)
+            (cond (not (:user/host user)) (dispatch :session/join)
+                  (:session/last-room user) (dispatch :session/request)))))
+      [conn dispatch]) interval-reconnect)
 
     ;; Periodically send heartbeat messages to keep the session connections
     ;; alive. This heartbeat will be sent to the server and then distributed
     ;; to the other connections in the room.
+    ;;
+    ;; The HOST heartbeats as well. It used to be guests only, which meant
+    ;; a host who opened a room and then sat waiting for friends sent
+    ;; nothing at all -- they transmit only when they transact or move the
+    ;; cursor. The server's idle timeout is 3 minutes (server/core's
+    ;; :idle-timeout-ms) and closing the HOST's socket destroys the whole
+    ;; room and force-closes every guest, so the single most ordinary
+    ;; pre-game moment was enough to kill the session.
     (hooks/use-interval
      (uix/use-callback
       (fn []
         (let [user (ds/entity @conn [:db/ident :user])]
-          (if (and (not (:user/host user))
-                   (= (:session/status user) :connected))
+          (if (= (:session/status user) :connected)
             (dispatch :session/heartbeat)))) [conn dispatch]), interval-heartbeat)
 
     ;; Subscribe to requests to create a new session, creating a WebSocket
@@ -212,11 +241,20 @@
       (uix/use-callback
        (fn []
          (let [host (ds/entity @conn [:db/ident :user])
-               conn (js/WebSocket.
+               next (js/WebSocket.
                      (if (:session/last-room host)
                        (str SOCKET-URL "?host=" (:session/last-room host))
                        SOCKET-URL))]
-           (set-socket conn))) [conn]))
+           ;; Close whatever we were holding first. use-event-listener only
+           ;; detaches listeners from the old socket -- the socket itself
+           ;; stays alive, and any orphan that reaches OPEN becomes a ghost
+           ;; room member the host mints a whole user entity and camera
+           ;; for, visible in the lobby until its own idle timeout. The
+           ;; reconnect interval above fires every 5s, so a slow upgrade
+           ;; orphaned one every attempt; double-clicking "Start online
+           ;; game" did the same.
+           (close-socket socket)
+           (set-socket next))) [socket conn]))
 
     ;; Subscribe to requests to join the session, creating a WebSocket
     ;; connection object.
@@ -227,8 +265,11 @@
                params (js/URLSearchParams. search)
                room   (.get params "join")]
            (if (some? room)
-             (let [conn (js/WebSocket. (str SOCKET-URL "?join=" room))]
-               (set-socket conn))))) []))
+             (let [next (js/WebSocket. (str SOCKET-URL "?join=" room))]
+               ;; See :session/request above for why the previous socket
+               ;; has to be closed rather than just dropped.
+               (close-socket socket)
+               (set-socket next))))) [socket]))
 
     ;; Subscribe to regular heartbeat events, rebroadcasting it to the other
     ;; connections in the server.

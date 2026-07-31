@@ -224,7 +224,7 @@
                  :on-card-click (if acting? (fn [card] (dispatch :rummy/discard (:db/id selected) id (:db/id card))))
                  :render-group-extra
                  (fn [rank group]
-                   (let [already (count (cards/cards-of-rank scored rank))
+                   (let [already (rummy/set-scored-count (cards/cards-of-rank scored rank))
                          n (rummy/scoreable-set (count group) already)]
                      (if (pos? n)
                        ($ :button.button.button-neutral.rummy-score-button

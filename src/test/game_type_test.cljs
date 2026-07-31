@@ -1,5 +1,5 @@
 (ns game-type-test
-  (:require [cljs.test :refer-macros [deftest is]]
+  (:require [cljs.test :refer-macros [deftest is testing]]
             [clojure.set :as set]
             [ogres.app.game-type :as game-type]
             [ogres.app.game-type.core-elements :as core]
@@ -124,6 +124,17 @@
       "the seeded Gloomhaven template actually enables its own attack
        modifier deck system, same as every other element gloomhaven.cljs
        contributes"))
+
+(deftest test-character-profile-registry-entry
+  (is (= (get-in core/elements [:tool/character-profile :label]) "Character Profile"))
+  (is (string? (get-in core/elements [:tool/character-profile :icon])))
+  (is (contains? game-type/gloomhaven-enabled-elements :tool/character-profile)
+      "the seeded Gloomhaven template pulls in the generic character-
+       profile primitive explicitly, same as :tool/dice being pulled
+       into the D&D 5e template")
+  (is (not (contains? game-type/dnd5e-enabled-elements :tool/character-profile))
+      "not enabled by any other seeded template -- it's opt-in, not
+       Gloomhaven-specific"))
 
 (deftest test-sanitize-icon-overrides
   (is (= (game-type/sanitize-icon-overrides

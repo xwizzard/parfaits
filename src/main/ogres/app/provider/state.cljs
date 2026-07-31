@@ -17,7 +17,6 @@
    :card/holder          {:db/valueType :db.type/ref}
    :db/ident             {:db/unique :db.unique/identity}
    :deck/cards           {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
-   :deck/owner           {:db/valueType :db.type/ref}
    :draw/deck            {:db/valueType :db.type/ref}
    :game-type/key        {:db/unique :db.unique/identity}
    :image/hash           {:db/unique :db.unique/identity}
@@ -28,7 +27,9 @@
    :minigame/props       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :minigame/seats       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :object/owner         {:db/valueType :db.type/ref}
+   :player/attack-deck   {:db/valueType :db.type/ref :db/isComponent true}
    :player/controller    {:db/valueType :db.type/ref}
+   :player/items         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :prop/image           {:db/valueType :db.type/ref}
    :prop/image-alt       {:db/valueType :db.type/ref}
    :roll/owner           {:db/valueType :db.type/ref}
@@ -40,7 +41,6 @@
    :root/token-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/props-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/user            {:db/valueType :db.type/ref :db/isComponent true}
-   :scene/attack-decks   {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/attack-draws   {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/board          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/crazy-eights-deck {:db/valueType :db.type/ref}
@@ -50,6 +50,7 @@
    :scene/go-fish-deck   {:db/valueType :db.type/ref}
    :scene/initiative     {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :scene/minigames      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :scene/monster-attack-deck {:db/valueType :db.type/ref :db/isComponent true}
    :scene/old-maid-deck  {:db/valueType :db.type/ref}
    :scene/masks          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :scene/shapes         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
@@ -60,7 +61,7 @@
    :scene/war-deck       {:db/valueType :db.type/ref}
    :seat/controller      {:db/valueType :db.type/ref}
    :seat/player          {:db/valueType :db.type/ref}
-   :session/conns        {:db/valueType :db.type/ref :db.cardinality :db.cardinality/many :db/isComponent true}
+   :session/conns        {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :session/host         {:db/valueType :db.type/ref}
    :token/image          {:db/valueType :db.type/ref}
    :token/image-alt      {:db/valueType :db.type/ref}
@@ -256,6 +257,33 @@
 (def ^:private ignored-attrs
   #{:user/host :user/ready :session/status})
 
+(defn ^:private session-carry-tx
+  "Tx-data re-asserting whatever session identity `db` already holds --
+   for the restore effect below, which replaces the whole database via
+   `reset-conn!`.
+
+   A session can be started while the IndexedDB read is still in flight
+   (on a cold profile the first open runs `upgradeneeded`, which is not
+   fast). The WebSocket itself lives in React state and survives the
+   reset untouched -- but the identity and room it is bound to live in
+   here and would be wiped, leaving the lobby back at 'Invite your
+   friends' with no room code while still connected, and every outgoing
+   message stamped `:src nil` (see provider/session's on-send-text).
+   Returns an empty vector when no session has started, which is the
+   overwhelmingly common case."
+  [db]
+  (let [user (ds/entity db [:db/ident :user])
+        room (:session/room (ds/entity db [:db/ident :session]))]
+    (cond-> []
+      (:user/uuid user)
+      (conj [:db/add [:db/ident :user] :user/uuid (:user/uuid user)])
+      (:session/status user)
+      (conj [:db/add [:db/ident :user] :session/status (:session/status user)])
+      (:session/last-room user)
+      (conj [:db/add [:db/ident :user] :session/last-room (:session/last-room user)])
+      room
+      (conj [:db/add [:db/ident :session] :session/room room]))))
+
 (defui ^:private persistence [{:keys [host]}]
   (let [conn  (uix/use-context context)
         read  (idb/use-reader "app")
@@ -295,6 +323,7 @@
                         (ds/conn-from-datoms schema)
                         (ds/db)
                         (ds/db-with tx-data)
+                        (ds/db-with (session-carry-tx @conn))
                         (as-> data (ds/reset-conn! conn data)))))))) ^:lint/disable [])))
 
 (defui provider

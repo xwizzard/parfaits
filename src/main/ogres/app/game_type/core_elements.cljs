@@ -70,6 +70,15 @@
    ;; it in explicitly alongside its own element (see game_type.cljs's
    ;; dnd5e-enabled-elements).
    :tool/dice        {:label "Dice" :icon "dice-5-fill"}
+   ;; Gates the Character panel/tab -- generic level/experience/gold/
+   ;; item tracking directly on a roster player (see events.cljs's new
+   ;; ";; --- Character Profile ---" section). Deliberately NOT
+   ;; Gloomhaven-specific -- any game-type with leveling/currency (D&D
+   ;; included) can opt in, the same way Gloomhaven's own seeded
+   ;; template pulls it in explicitly alongside :gloomhaven/attack-deck
+   ;; (see game_type.cljs's gloomhaven-enabled-elements). Not enabled by
+   ;; any other seeded template yet.
+   :tool/character-profile {:label "Character Profile" :icon "person-circle"}
 
    ;; One entry per concrete :scene/grid-type value (see
    ;; component/panel_scene.cljs's `options-grid-type`, which this mirrors

@@ -81,6 +81,11 @@
               {:kind kind :effect effect :amount amount :count (count group)}))
        (sort-by (juxt :kind :effect))))
 
+(def ^:private deck-card-fields
+  [:card/rank :card/location
+   [:card/effect :default nil] [:card/effect-amount :default nil]
+   [:card/temporary? :default nil]])
+
 (def ^:private query
   [{:root/user
     [:user/uuid
@@ -89,13 +94,8 @@
       [{:camera/scene
         [[:scene/attack-deck-shuffle-icons? :default true]
          [:scene/attack-deck-reduced-randomness? :default false]
-         {:scene/attack-decks
-          [:db/id :deck/name
-           [:deck/needs-reshuffle? :default false]
-           {:deck/owner [:db/id :player/name :player/color {:player/controller [:user/uuid]}]}
-           {:deck/cards [:card/rank :card/location
-                         [:card/effect :default nil] [:card/effect-amount :default nil]
-                         [:card/temporary? :default nil]]}]}
+         {:scene/monster-attack-deck
+          [:db/id :deck/name [:deck/needs-reshuffle? :default false] {:deck/cards deck-card-fields}]}
          {:scene/attack-draws
           [:db/id
            [:draw/mode :default nil]
@@ -107,14 +107,18 @@
            [:draw/discarded-effect-amount :default nil]
            [:draw/at :default 0]
            {:draw/deck [:db/id :deck/name]}]}]}]}]}
-   {:root/players [:db/id :player/name :player/color]}
+   {:root/players
+    [:db/id :player/name :player/color {:player/controller [:user/uuid]}
+     {:player/attack-deck
+      [:db/id :deck/name [:deck/needs-reshuffle? :default false] {:deck/cards deck-card-fields}]}]}
    {:root/session [{:session/conns [:user/uuid]}]}])
 
 (defn ^:private attack-decks-state
   [result]
   (let [{uuid :user/uuid host :user/host
          {scene :camera/scene} :user/camera} (:root/user result)
-        decks (:scene/attack-decks scene)
+        players (:root/players result)
+        monster-deck (:scene/monster-attack-deck scene)
         draws (:scene/attack-draws scene)
         connected (into #{} (map :user/uuid) (:session/conns (:root/session result)))
         authorized?
@@ -122,7 +126,17 @@
           (if owner
             (player/authority? uuid host connected (get-in owner [:player/controller :user/uuid]))
             host))
-        owned-ids (into #{} (keep (comp :db/id :deck/owner)) decks)]
+        ;; Each player's own :player/attack-deck is a forward ref -- the
+        ;; deck itself no longer stores who owns it (see events.cljs's
+        ;; :player/_attack-deck reverse-ref note), so :deck/owner is
+        ;; reconstructed here, client-side, purely so deck-row/draw-item
+        ;; below need no changes at all -- they already just expect a
+        ;; plain deck map with a :deck/owner key, however it got there.
+        player-decks (keep (fn [p]
+                              (some-> (:player/attack-deck p)
+                                      (assoc :deck/owner (select-keys p [:db/id :player/name :player/color :player/controller]))))
+                            players)
+        decks (cond-> (vec player-decks) monster-deck (conj monster-deck))]
     {:host host
      :decks decks
      :draws (sort-by :draw/at > draws)
@@ -132,8 +146,8 @@
      :authorized? authorized?
      :shuffle-icons? (:scene/attack-deck-shuffle-icons? scene)
      :reduced-randomness? (:scene/attack-deck-reduced-randomness? scene)
-     :has-monster? (some (comp nil? :deck/owner) decks)
-     :players-without-deck (remove (comp owned-ids :db/id) (:root/players result))}))
+     :has-monster? (some? monster-deck)
+     :players-without-deck (remove :player/attack-deck players)}))
 
 (defui ^:private composition-form
   [{:keys [dispatch deck-id disabled?]}]

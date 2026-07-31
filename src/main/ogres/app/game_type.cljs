@@ -138,9 +138,14 @@
    exact same :initiative-panel/:initiative-actions mechanism D&D's
    module already proves out -- demonstrating that two real games
    legitimately want different subsets of the same shared primitives,
-   decided here in data, with no core file caring which."
+   decided here in data, with no core file caring which. Also pulls in
+   :tool/character-profile explicitly -- generic level/experience/gold/
+   item tracking (see events.cljs's Character Profile section), not
+   Gloomhaven-specific but exactly what a persistent campaign needs
+   alongside the attack-deck system above, the same 'pull in a core tool
+   this game genuinely wants' precedent :tool/dice already set for D&D."
   (into default-enabled-elements
-        (concat [:tool/measurement-cells :unit/size]
+        (concat [:tool/measurement-cells :unit/size :tool/character-profile]
                 (keys gloomhaven/elements))))
 
 (def memory-enabled-elements

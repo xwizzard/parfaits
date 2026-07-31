@@ -143,10 +143,17 @@
     (some? (get entity alt-key)) (assoc entity image-key (get entity alt-key))
     :else nil))
 
-(defn ^:private tokens-xf
+(defn tokens-xf
   "Defines a transducer which expects a collection of token entities and
    returns only the elements suitable for rendering given the viewer's
-   authority over each -- see object-authority?/resolve-hidden."
+   authority over each -- see object-authority?/resolve-hidden.
+
+   Public because component/scene's `tokens-defs` must resolve tokens
+   through the EXACT same rule this file's `<use>` list does. The two
+   render halves are split -- the artwork and badges live in a
+   `<g id=\"token<id>\">` def over there, referenced by a `<use>` here --
+   so filtering only on this side would leave a hidden token's real face
+   sitting in the defs for anyone to see."
   [viewer-uuid host? connected-uuids]
   (keep
    (fn [token]
@@ -973,7 +980,17 @@
            ($ :polygon.scene-object-align
              {:points (join " " (mapcat seq points))}) portal)))
       (if (and (= type :token/token) is-aligning (not (#{:hex-pointy :hex-flat} base-type)))
-        (let [rect (vec/rnd (vec/add (geom/object-bounding-rect entity) delta) grid-size)]
+        ;; Preview the rect at the point the drop will ACTUALLY produce, by
+        ;; asking geom/snap-to-cell for it -- the same function
+        ;; :objects/translate-many commits through. This used to round the
+        ;; bounding box's own corners to grid multiples instead, which
+        ;; agrees with centre-snapping only when the footprint is an odd
+        ;; number of cells across. A token's footprint is `size` * 14px, so
+        ;; every even size the context menu offers (10/20/30/40/50 -> 2/4/
+        ;; 6/8/10 cells) previewed half a cell away from where the token
+        ;; landed, and visibly jumped by 35px on release.
+        (let [shift (vec/sub (geom/snap-to-cell entity delta base-type) point)
+              rect (vec/add (geom/object-bounding-rect entity) shift)]
           (dom/create-portal
            ($ :rect.scene-object-align
              {:width (seg/width rect)

@@ -175,10 +175,18 @@
          bx (.-x (.-b segment))
          by (.-y (.-b segment))]
      (if (= ay by)
+       ;; `(- ln)`, not `(- ay ln)`: shift's 3-arity adds, so subtracting
+       ;; `ln` FROM `ay` put these two corners at `y = by + ay - ln`
+       ;; instead of `ay - ln`. That happens to be right only when
+       ;; ay = 0 -- which is exactly what the one masking call site
+       ;; passes (a Segment from vec/zero), so the band came out correct
+       ;; there and wrong for every other horizontal line, including in
+       ;; object-bounding-rect, where the line then fell OUTSIDE its own
+       ;; bounding rect.
        [(vec/shift av 0 ln)
         (vec/shift bv 0 ln)
-        (vec/shift bv 0 (- ay ln))
-        (vec/shift av 0 (- ay ln))]
+        (vec/shift bv 0 (- ln))
+        (vec/shift av 0 (- ln))]
        (let [ma (/ (- bx ax) (- ay by))
              mb (js/Math.sqrt (inc (* ma ma)))
              si (js/Math.sign (- ay by))
@@ -465,10 +473,15 @@
     {width :image/width
      height :image/height} :prop/image}]
   (let [bound (Segment. point (vec/shift point width height))
+        ;; (or scale 1)/(or rotation 0) as object-transform already does:
+        ;; DOMMatrix.scale takes an unrestricted double, so a nil scale
+        ;; coerces to 0 rather than defaulting to 1 and collapses the
+        ;; whole rect to a point at the image's centre. Reachable from the
+        ;; context menu's "reset transformations", which retracts both.
         xform (-> matrix/identity
                   (matrix/translate (seg/midpoint bound))
-                  (matrix/scale scale)
-                  (matrix/rotate rotation)
+                  (matrix/scale (or scale 1))
+                  (matrix/rotate (or rotation 0))
                   (matrix/translate (vec/mul (seg/midpoint bound) -1)))]
     (bounding-rect (map xform (rect-points bound)))))
 
@@ -482,10 +495,15 @@
     {width :image/width
      height :image/height} :board/image}]
   (let [bound (Segment. point (vec/shift point width height))
+        ;; (or scale 1)/(or rotation 0) as object-transform already does:
+        ;; DOMMatrix.scale takes an unrestricted double, so a nil scale
+        ;; coerces to 0 rather than defaulting to 1 and collapses the
+        ;; whole rect to a point at the image's centre. Reachable from the
+        ;; context menu's "reset transformations", which retracts both.
         xform (-> matrix/identity
                   (matrix/translate (seg/midpoint bound))
-                  (matrix/scale scale)
-                  (matrix/rotate rotation)
+                  (matrix/scale (or scale 1))
+                  (matrix/rotate (or rotation 0))
                   (matrix/translate (vec/mul (seg/midpoint bound) -1)))]
     (bounding-rect (map xform (rect-points bound)))))
 
@@ -608,11 +626,16 @@
    `vec/nearest-square` all return the nearest CELL CENTER for their grid
    family, not a corner. An earlier version of the square-grid branch
    instead rounded the raw bounding-box corners and took their midpoint,
-   ignoring the calibrated anchor point entirely -- for a token this
-   happened to still land on a center only because a token's box is always
-   an odd number of cells wide, but for a prop/board-piece image with an
-   even-cell-count footprint (common for map tiles), it landed on a grid
-   CORNER instead, regardless of where the calibrated anchor actually was."
+   ignoring the calibrated anchor point entirely -- which lands on a grid
+   CORNER rather than a center whenever the footprint is an even number of
+   cells across, regardless of where the calibrated anchor actually was.
+   That is not a tokens-are-safe/props-are-not distinction, as an earlier
+   version of this note claimed: a token's footprint is `:token/size` * 14
+   px, so every even size the context menu offers (10/20/30/40/50, i.e.
+   2/4/6/8/10 cells) is affected too. It survived that long only because
+   the corner-rounding version was left in the drag PREVIEW rather than
+   the committed value -- see component/scene-objects' object-hint, which
+   now derives its preview from this function instead."
   [entity delta base-type]
   (let [point (:object/point entity)
         center (object-anchor-point entity)

@@ -137,22 +137,48 @@
   (let [conn           (uix/use-context state/context)
         read           (idb/use-reader "images")
         write          (idb/use-writer "images")
-        loading        (atom {})
+        ;; use-memo, not a bare (atom {}) in the render body: that
+        ;; allocated a fresh atom on every render and only de-duplicated
+        ;; at all because on-request's deps are frozen, so its closure
+        ;; kept hold of the very first one. Adding any real dependency
+        ;; below would have silently broken request de-duplication.
+        loading        (uix/use-memo (fn [] (atom {})) [])
         publish        (events/use-publish)
         dispatch       (use-dispatch)
         [urls set-url] (uix/use-state {})
+        ;; Records `url` for `hash`. Deliberately does NOT revoke a previous
+        ;; entry: object URLs here are cached for the session on purpose
+        ;; (that is what makes use-image cheap to call repeatedly), and with
+        ;; the duplicate-fetch bug below fixed, a hash is only ever assigned
+        ;; one URL. Revoking from inside the state updater would also be
+        ;; unsafe -- React may invoke an updater twice.
+        put-url
+        (uix/use-callback
+         (fn [hash url]
+           (set-url (fn [urls] (assoc urls hash url)))) [])
         on-request
         (uix/use-callback
+         ;; `loading` is the single source of truth for "already have it, or
+         ;; already fetching it". It used to consult `urls` first, but that
+         ;; value is frozen at {} by the empty dep list, so the check never
+         ;; fired -- and :image/cache recorded a url WITHOUT marking
+         ;; loading, so the next request for a cached hash re-read it from
+         ;; storage and minted a second object URL, orphaning the first.
          (fn [hash]
-           (let [url (get urls hash)]
-             (if (not url)
-               (when (not (get @loading hash))
-                 (swap! loading assoc hash true)
-                 (-> (read hash)
-                     (.then (fn [rec] (js/URL.createObjectURL (.-data rec))))
-                     (.then (fn [url] (set-url (fn [urls] (assoc urls hash url)))))
-                     (.catch (fn [] (publish :image/request hash)))))
-               url))) ^:lint/disable [])]
+           (when (not (get @loading hash))
+             (swap! loading assoc hash true)
+             (-> (read hash)
+                 (.then (fn [rec] (js/URL.createObjectURL (.-data rec))))
+                 (.then (fn [url] (put-url hash url)))
+                 (.catch (fn []
+                           ;; Clear the marker before asking the host, so a
+                           ;; request that never gets answered can be tried
+                           ;; again. Left set, a single failed fetch made
+                           ;; that image unloadable for the rest of the
+                           ;; session -- only a reload recovered it.
+                           (swap! loading dissoc hash)
+                           (publish :image/request hash))))))
+         [read put-url publish loading])]
     (events/use-subscribe :image/create-token
       (uix/use-callback
        (fn [blob]
@@ -180,7 +206,14 @@
        (fn [image]
          (-> (create-hash image)
              (.then (fn [hash] (write :put [#js {"checksum" hash "data" image}]) hash))
-             (.then (fn [hash] (set-url (fn [urls] (assoc urls hash (js/URL.createObjectURL image)))))))) [write]))
+             (.then (fn [hash]
+                      ;; Mark it loaded as well as recording the url --
+                      ;; otherwise on-request treats this hash as unseen and
+                      ;; fetches it all over again, minting a duplicate
+                      ;; object URL and orphaning this one.
+                      (swap! loading assoc hash true)
+                      (put-url hash (js/URL.createObjectURL image))))))
+       [write put-url loading]))
     (events/use-subscribe :image/change-thumbnail
       (uix/use-callback
        (fn [hash [ax ay bx by :as rect]]

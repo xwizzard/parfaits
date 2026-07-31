@@ -295,7 +295,13 @@
 ;; -- Scenes --
 (defmethod
   ^{:doc "Creates a new blank scene and corresponding camera for the local user
-          then switches them to it."}
+          then switches them to it. Also resets :user/game-type-editing to
+          the new scene's own (Default) game-type -- game types are
+          isolated to Game Builder mode (see :user/edit-game-type's own
+          doc), so without this, opening Builder mode right after
+          creating a scene would misleadingly show whatever template was
+          last being edited as still 'selected', even though this brand
+          new scene actually starts on Default."}
   event-tx-fn :scenes/create
   []
   [[:db/add -1 :db/ident :root]
@@ -306,19 +312,30 @@
    [:db/add -3 :db/ident :user]
    [:db/add -3 :user/camera -4]
    [:db/add -3 :user/cameras -4]
+   [:db/add -3 :user/game-type-editing [:game-type/key :default]]
    [:db/add -4 :camera/scene -2]
    [:db/add -4 :camera/point vec/zero]])
 
 (defmethod
-  ^{:doc "Switches to the given scene by the given camera identifier."}
+  ^{:doc "Switches to the given scene by the given camera identifier.
+          Also resyncs :user/game-type-editing to that scene's own
+          :scene/game-type -- without this, Game Builder mode (if opened
+          after switching) would keep showing whichever template was
+          last edited rather than the newly active scene's actual one,
+          the same staleness :scenes/create's own doc explains."}
   event-tx-fn :scenes/change
-  [_ _ id]
-  [{:db/ident :user :user/camera id}])
+  [data _ id]
+  (let [game-type-id (:db/id (:scene/game-type (:camera/scene (ds/entity data id))))]
+    [{:db/ident :user :user/camera id :user/game-type-editing game-type-id}]))
 
 (defmethod
   ^{:doc "Removes the scene and corresponding camera for the local user. Also
           removes all scene cameras for any connected users and switches them
-          to whichever scene the host is now on."}
+          to whichever scene the host is now on. Whenever the local user's
+          own camera moves to a different scene as a result (any of the
+          three branches below), :user/game-type-editing is resynced to
+          that scene's own :scene/game-type -- the same staleness
+          :scenes/create's and :scenes/change's own docs explain."}
   event-tx-fn :scenes/remove
   [data _ camera-id]
   (let [root (ds/entity data [:db/ident :root])
@@ -328,18 +345,23 @@
     (conj
      (if (= (:db/id (:user/camera user)) (:db/id prev-cam))
        (if-let [next-scn (:db/id (first (remove (comp #{prev-scn} :db/id) (:root/scenes root))))]
-         (if-let [next-cam (:db/id (first (filter (comp #{next-scn} :db/id :camera/scene) (:user/cameras user))))]
-           [[:db/add (:db/id user) :user/camera next-cam]]
-           [[:db/add (:db/id user) :user/camera -1]
-            [:db/add (:db/id user) :user/cameras -1]
-            [:db/add -1 :camera/scene next-scn]
-            [:db/add -1 :camera/point vec/zero]])
+         (let [game-type-id (:db/id (:scene/game-type (ds/entity data next-scn)))]
+           (if-let [next-cam (:db/id (first (filter (comp #{next-scn} :db/id :camera/scene) (:user/cameras user))))]
+             [[:db/add (:db/id user) :user/camera next-cam]
+              [:db/add (:db/id user) :user/game-type-editing game-type-id]]
+             [[:db/add (:db/id user) :user/camera -1]
+              [:db/add (:db/id user) :user/cameras -1]
+              [:db/add (:db/id user) :user/game-type-editing game-type-id]
+              [:db/add -1 :camera/scene next-scn]
+              [:db/add -1 :camera/point vec/zero]]))
          [[:db/add (:db/id root) :root/scenes -2]
           [:db/add (:db/id user) :user/camera -1]
           [:db/add (:db/id user) :user/cameras -1]
+          [:db/add (:db/id user) :user/game-type-editing [:game-type/key :default]]
           [:db/add -1 :camera/scene -2]
           [:db/add -1 :camera/point vec/zero]
-          [:db/add -2 :db/empty true]]) [])
+          [:db/add -2 :db/empty true]
+          [:db/add -2 :scene/game-type [:game-type/key :default]]]) [])
      [:db.fn/call event-tx-fn :scenes/sync-with-user prev-scn]
      [:db/retractEntity prev-scn]
      [:db/retractEntity camera-id])))
@@ -586,10 +608,40 @@
 
 
 (defmethod
-  ^{:doc "Updates the grid size for the current scene."}
+  ^{:doc "Updates the grid size for the current scene. Written and read
+          back only by the grid-alignment tool (component/scene-draw's
+          draw-grid), which uses the previous value to space its preview
+          lattice and to scale the origin it computes. Nothing renders
+          from it -- the scene grid itself is always the `grid-size`
+          constant -- so this is alignment-tool state, not a scene
+          dimension. To change how big an IMAGE lands relative to the
+          grid, see :root/change-default-cell-px and image-cell-scale."}
   event-tx-fn :scene/change-grid-size
   [_ _ size]
   [[:db.fn/call assoc-scene :scene/grid-size size]])
+
+(defmethod
+  ^{:doc "Sets the campaign-wide baseline pixel density for prop and board
+          images -- how many source pixels make up one grid cell -- or
+          clears it when `value` isn't a positive number.
+
+          Hosts overwhelmingly prepare a game from one asset set produced
+          at a single density, so calibrating every image by hand (drag a
+          copy to size, 'Save scale as default') is repetitive setup.
+          This is the fallback those per-image calibrations override; see
+          image-cell-scale for the full resolution order. Applies only to
+          images placed AFTER it's set -- it is a default for new
+          placements, not a retroactive rescale of a built scene.
+
+          Host-only: it is campaign-wide setup, the same concern the
+          Scene panel that hosts it is already gated on."}
+  event-tx-fn :root/change-default-cell-px
+  [data _ value]
+  (if (:user/host (ds/entity data [:db/ident :user]))
+    (if (and (number? value) (pos? value))
+      [[:db/add [:db/ident :root] :root/default-cell-px value]]
+      [[:db/retract [:db/ident :root] :root/default-cell-px]])
+    []))
 
 (defmethod
   ^{:doc "Updates the grid type (:square, :hex-pointy, or :hex-flat) for
@@ -734,6 +786,7 @@
   [:db/id
    :object/type
    :object/point
+   [:object/locked :default false]
    [:object/scale :default 1]
    [:object/rotation :default 0]
    :shape/points
@@ -762,7 +815,18 @@
         base-type (geom/base-grid-type grid-type)]
     (into [[:db/retract [:db/ident :user] :user/dragging]]
           (for [entity (ds/pull-many data translate-many-select idxs)
-                :let [{id :db/id point :object/point type :object/type} entity]]
+                :let [{id :db/id point :object/point type :object/type} entity]
+                ;; Skip locked objects, and anything already gone. The lock
+                ;; was only ever enforced in the drag handler, and only for
+                ;; a SINGLE-object selection -- rubber-band a locked object
+                ;; together with any other and the group drag moved it
+                ;; anyway. Skipping here rather than rejecting the whole
+                ;; transaction gives the behaviour you'd want from a lock:
+                ;; the rest of the selection moves, the locked member stays
+                ;; put. The `point` check covers an id whose entity was
+                ;; retracted mid-drag (ds/pull-many yields nil for it, and
+                ;; vec/add on nil would throw and lose the whole move).
+                :when (and (some? point) (not (:object/locked entity)))]
             (cond
               (and align? (contains? snap-to-cell-types type))
               {:db/id id :object/point (geom/snap-to-cell entity delta base-type)}
@@ -794,6 +858,31 @@
        [:db/retract camera :camera/selected id]
        {:db/id camera :camera/selected {:db/id id}})]))
 
+(defn ^:private authorized-to-own?
+  "The ownership half of authorized-to-hide? below, on its own -- the
+   host (unless the scene is :scene/neutral-authority?), or the
+   *connected* controller assigned via :object/owner ->
+   :player/controller. Factored out so the destructive actions can reuse
+   the ownership rule without inheriting the :object/shared? escape
+   hatch that only makes sense for a reversible toggle."
+  [data entity]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        default (and (:user/host user) (not (:scene/neutral-authority? scene)))
+        connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) default connected controller-uuid)))
+
+(defn ^:private authorized-to-remove?
+  "True if the local viewer may DELETE `entity`. Deliberately
+   authorized-to-own? WITHOUT authorized-to-hide?'s :object/shared?
+   escape hatch: 'any connected participant may flip this shared card
+   face-up' must not also mean 'any connected participant may destroy
+   it'. Retraction is irreversible -- this app has no undo -- so it
+   stays with the owner or the host."
+  [data entity]
+  (authorized-to-own? data entity))
+
 (defn ^:private authorized-to-hide?
   "True if the local viewer may toggle :object/hidden for `entity` --
    the host, unless a *connected* controller is assigned to it via
@@ -818,12 +907,7 @@
    not X-ray vision over gameplay.'"
   [data entity]
   (or (:object/shared? entity)
-      (let [user (ds/entity data [:db/ident :user])
-            scene (:camera/scene (:user/camera user))
-            default (and (:user/host user) (not (:scene/neutral-authority? scene)))
-            connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-            controller-uuid (get-in entity [:object/owner :player/controller :user/uuid])]
-        (player/authority? (:user/uuid user) default connected controller-uuid))))
+      (authorized-to-own? data entity)))
 
 (defmethod
   ^{:doc "Hide or reveal the given object. The host may always do this
@@ -1060,17 +1144,26 @@
 (defmethod
   ^{:doc "Removes the objects given by idxs."}
   event-tx-fn :objects/remove
-  [_ _ idxs]
-  (for [id idxs]
+  [data _ idxs]
+  (for [id idxs
+        :when (authorized-to-remove? data (ds/entity data id))]
     [:db/retractEntity id]))
 
 (defmethod
-  ^{:doc "Removes all currently currently selected objects."}
+  ^{:doc "Removes all currently selected objects the viewer is actually
+          allowed to remove (see authorized-to-remove?) -- checked here
+          rather than only disabled in the context menu, since any
+          connected participant can dispatch this directly and every
+          peer applies the broadcast datoms verbatim. Anything they may
+          not remove is silently left alone, the same shape every other
+          partially-authorized bulk action here takes (compare
+          :objects/toggle-hidden-selected)."}
   event-tx-fn :objects/remove-selected
   [data _]
   (let [user (ds/entity data [:db/ident :user])]
-    (for [{id :db/id} (:camera/selected (:user/camera user))]
-      [:db/retractEntity id])))
+    (for [entity (:camera/selected (:user/camera user))
+          :when (authorized-to-remove? data entity)]
+      [:db/retractEntity (:db/id entity)])))
 
 (defmethod
   ^{:doc "Updates the attribute for the objects given by idxs to the
@@ -1131,8 +1224,8 @@
   ;; the context menu's own toolbar and have nothing to do with a
   ;; game-type's conditions -- wiping the set would silently strip a
   ;; player token of its player-ness. Doing it in one transaction rather
-  ;; than a :token/change-flag per condition keeps it to a single undo
-  ;; step and a single broadcast to connected peers.
+  ;; than a :token/change-flag per condition means one broadcast to
+  ;; connected peers instead of N.
   [data _ idxs values]
   (let [tokens   (ds/pull-many data [:db/id :token/flags] idxs)
         clearing (set values)]
@@ -1300,7 +1393,7 @@
 (defmethod
   ^{:doc "Batch-writes an explicit :initiative/rank for each entry in the
           given `id->rank` map, in a single transaction -- one re-render,
-          one undo entry, instead of N separate :initiative/change-rank
+          one transaction (and so one broadcast), instead of N separate :initiative/change-rank
           dispatches. Contains no opinion about how those values were
           chosen; a game module decides the values (e.g. D&D's d20 roll
           for every un-ranked NPC at once, see
@@ -1562,7 +1655,7 @@
   event-tx-fn :deck/discard
   [data _ card-id]
   (let [card (ds/entity data card-id)
-        deck (first (:deck/_cards card))]
+        deck (:deck/_cards card)]
     (move-card-tx card-id :discard (next-position (pile deck :discard)) nil)))
 
 (defmethod
@@ -1597,33 +1690,51 @@
 ;; --- Attack Modifier Decks ---
 ;; The Gloomhaven-family ("x-haven") attack modifier deck mechanic -- see
 ;; ogres.app.attack-deck for the pure kind-vocabulary/comparison logic.
-;; Each player has their own personal 20-card deck (:deck/owner a roster
-;; player); monsters share exactly one deck (:deck/owner nil). A whole new
-;; event family, NOT built on the generic :deck/* methods above -- the
-;; round-boundary flagged-card reshuffle rule and the draw-2-keep-better/
-;; worse shape of Advantage/Disadvantage are different enough control flow
-;; that forcing reuse would fight the existing code rather than share it
-;; -- but it still reuses this namespace's own `pile`/`top-card`/
-;; `next-position`/`move-card-tx` helpers and ogres.app.cards/
-;; shuffle-positions directly, and reuses the existing :card/rank/
-;; :card/location/:card/position schema wholesale: a card's :card/rank
-;; simply holds one of attack-deck's 9 kind keywords instead of a playing-
-;; card rank, the same re-skinning precedent Old Maid's own queen card
-;; already established.
+;; Each player has their own personal 20-card deck, reached via a FORWARD
+;; ref from the player (:player/attack-deck) -- root-scoped, not scene-
+;; scoped, so it survives a scene change/new scenario exactly the way
+;; :root/players itself already does (this is the fix for the deck
+;; otherwise resetting to vanilla every time a new scene starts). Monsters
+;; share exactly one deck per scene (:scene/monster-attack-deck) -- a
+;; fresh scenario's monsters really are a new deck, so THAT stays scene-
+;; scoped on purpose. A whole new event family, NOT built on the generic
+;; :deck/* methods above -- the round-boundary flagged-card reshuffle
+;; rule and the draw-2-keep-better/worse shape of Advantage/Disadvantage
+;; are different enough control flow that forcing reuse would fight the
+;; existing code rather than share it -- but it still reuses this
+;; namespace's own `pile`/`top-card`/`next-position`/`move-card-tx`
+;; helpers and ogres.app.cards/shuffle-positions directly, and reuses the
+;; existing :card/rank/:card/location/:card/position schema wholesale: a
+;; card's :card/rank simply holds one of attack-deck's 9 kind keywords
+;; instead of a playing-card rank, the same re-skinning precedent Old
+;; Maid's own queen card already established.
 
-(defn ^:private attack-deck-authorized?
-  "Whether `user` may draw from or edit `deck-id`'s deck. A personal deck
-   (owner-id non-nil) requires player/authority? over that specific
-   roster player -- the same explicit-target-id-plus-authority-check
-   shape :dice/roll's own owner check uses. The shared monster deck
-   (owner-id nil) requires the host -- unlike a neutral dice roll (which
-   anyone may make), running the monsters' turn is a GM action."
+(defn ^:private attack-deck-owner-authorized?
+  "Whether `user` may act on behalf of `owner-id` (a specific roster
+   player) or, if nil, the shared monster deck (host-only) -- the
+   authority check shared by :attack-deck/create (no deck entity exists
+   yet to resolve an owner from) and attack-deck-authorized? below (which
+   resolves an owner-id from an EXISTING deck via a reverse ref, since
+   there's no other way to ask 'who owns this deck' once ownership is a
+   forward ref FROM the player rather than a stored :deck/owner)."
   [data user owner-id]
   (if owner-id
     (let [connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
           controller-uuid (get-in (ds/entity data owner-id) [:player/controller :user/uuid])]
       (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid))
     (:user/host user)))
+
+(defn ^:private attack-deck-authorized?
+  "Whether `user` may draw from or edit `deck`. Resolves the owning
+   roster player via the :player/_attack-deck reverse ref -- a personal
+   deck (some owner found) requires player/authority? over that specific
+   player, the same explicit-target-id-plus-authority-check shape :dice/
+   roll's own owner check uses. The shared monster deck (no owner found
+   -- nothing points to it via :player/_attack-deck) requires the host --
+   unlike a neutral dice roll (which anyone may make), running the
+   monsters' turn is a GM action."
+  [data user deck]
+  (attack-deck-owner-authorized? data user (:db/id (:player/_attack-deck deck))))
 
 (defn ^:private attack-deck-composition-tx
   "Tx-data (paired with the fresh cards' own :db/ids) for a freshly-dealt
@@ -1693,36 +1804,42 @@
       :disadvantage (if (= (attack-deck/worse ka kb) ka) a b))))
 
 (defmethod
-  ^{:doc "Creates a new attack modifier deck on the current scene, seeded
-          from ogres.app.attack-deck/standard-composition and shuffled.
-          `owner-id` nil creates the shared 'Monsters' deck (host-only,
-          see attack-deck-authorized?); otherwise a personal deck for
-          that roster player (that player, or the host, may create it).
-          A no-op if a deck for that same owner (nil included) already
-          exists on the scene -- exactly one deck per player, exactly
-          one monster deck. Also a no-op if :gloomhaven/attack-deck isn't
-          actually enabled on the scene's own game-type (checked here
-          server-side, not just gated in the UI, since any connected
-          participant may dispatch this) -- the same enabled-elements
-          check every ported mini-game's own /start requires for its own
-          :X/game element (see :old-maid/start)."}
+  ^{:doc "Creates a new attack modifier deck, seeded from ogres.app.
+          attack-deck/standard-composition and shuffled. `owner-id` nil
+          creates the CURRENT SCENE's shared 'Monsters' deck (host-only,
+          see attack-deck-owner-authorized?), scene-scoped since a fresh
+          scenario's monsters really are a new deck; otherwise a
+          PERSONAL deck attached directly to that roster player
+          (:player/attack-deck, root-scoped -- that player, or the host,
+          may create it), surviving every future scene change. A no-op
+          if that owner (nil included) already has a deck -- exactly one
+          deck per player, exactly one monster deck per scene. Also a
+          no-op if :gloomhaven/attack-deck isn't actually enabled on the
+          scene's own game-type (checked here server-side, not just
+          gated in the UI, since any connected participant may dispatch
+          this) -- the same enabled-elements check every ported mini-
+          game's own /start requires for its own :X/game element (see
+          :old-maid/start)."}
   event-tx-fn :attack-deck/create
   [data _ owner-id]
   (let [user (ds/entity data [:db/ident :user])
         scene (:camera/scene (:user/camera user))
         enabled (:game-type/enabled-elements (:scene/game-type scene))
-        existing (:scene/attack-decks scene)]
+        already-exists? (if owner-id
+                          (some? (:player/attack-deck (ds/entity data owner-id)))
+                          (some? (:scene/monster-attack-deck scene)))]
     (if (or (not (contains? enabled :gloomhaven/attack-deck))
-            (not (attack-deck-authorized? data user owner-id))
-            (some (fn [d] (= (:db/id (:deck/owner d)) owner-id)) existing))
+            (not (attack-deck-owner-authorized? data user owner-id))
+            already-exists?)
       []
       (let [label (if owner-id (:player/name (ds/entity data owner-id)) "Monsters")
             [ids card-tx] (attack-deck-composition-tx)
             deck-id (dec (apply min ids))]
-        (concat [(cond-> {:db/id deck-id :deck/name label :deck/cards ids}
-                   owner-id (assoc :deck/owner owner-id))]
+        (concat [{:db/id deck-id :deck/name label :deck/cards ids}]
                 card-tx
-                [[:db.fn/call assoc-scene :scene/attack-decks deck-id]])))))
+                (if owner-id
+                  [[:db/add owner-id :player/attack-deck deck-id]]
+                  [[:db.fn/call assoc-scene :scene/monster-attack-deck deck-id]]))))))
 
 (defn ^:private attack-deck-shuffle-icons-enabled?
   "Whether the standard Null/2x reshuffle-icon rule is active on the
@@ -1758,9 +1875,8 @@
   event-tx-fn :attack-deck/draw
   [data _ deck-id mode]
   (let [user (ds/entity data [:db/ident :user])
-        deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))]
-    (if-not (attack-deck-authorized? data user owner-id)
+        deck (ds/entity data deck-id)]
+    (if-not (attack-deck-authorized? data user deck)
       []
       (let [n (if mode 2 1)
             {:keys [picked reshuffle-tx]} (pop-cards deck n)]
@@ -1865,9 +1981,8 @@
   event-tx-fn :attack-deck/add-cards
   [data _ deck-id kind n temporary?]
   (let [user (ds/entity data [:db/ident :user])
-        deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))]
-    (if (or (<= n 0) (not (attack-deck-authorized? data user owner-id)))
+        deck (ds/entity data deck-id)]
+    (if (or (<= n 0) (not (attack-deck-authorized? data user deck)))
       []
       (attack-deck-new-cards-tx deck kind n nil nil temporary?))))
 
@@ -1886,9 +2001,8 @@
   [data _ deck-id kind effect amount n temporary?]
   (let [user (ds/entity data [:db/ident :user])
         deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))
         effect-def (get attack-deck/effect-kinds effect)]
-    (if (or (<= n 0) (nil? effect-def) (not (attack-deck-authorized? data user owner-id)))
+    (if (or (<= n 0) (nil? effect-def) (not (attack-deck-authorized? data user deck)))
       []
       (attack-deck-new-cards-tx deck kind n effect (if (:amount? effect-def) amount) temporary?))))
 
@@ -1905,9 +2019,8 @@
   event-tx-fn :attack-deck/remove-cards
   [data _ deck-id kind n]
   (let [user (ds/entity data [:db/ident :user])
-        deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))]
-    (if-not (attack-deck-authorized? data user owner-id)
+        deck (ds/entity data deck-id)]
+    (if-not (attack-deck-authorized? data user deck)
       []
       (let [targets (take n (filter (fn [c] (and (= (:card/rank c) kind) (nil? (:card/effect c))))
                                      (:deck/cards deck)))]
@@ -1921,9 +2034,8 @@
   event-tx-fn :attack-deck/remove-effect-cards
   [data _ deck-id kind effect amount n]
   (let [user (ds/entity data [:db/ident :user])
-        deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))]
-    (if-not (attack-deck-authorized? data user owner-id)
+        deck (ds/entity data deck-id)]
+    (if-not (attack-deck-authorized? data user deck)
       []
       (let [targets (take n (filter (fn [c] (and (= (:card/rank c) kind)
                                                   (= (:card/effect c) effect)
@@ -1951,9 +2063,25 @@
   [deck kind]
   (count (filter (comp #{kind} :card/rank) (:deck/cards deck))))
 
+(defn ^:private attack-deck-all-decks
+  "Every attack modifier deck currently in play -- every roster player's
+   own :player/attack-deck (root-scoped, wherever they are) plus the
+   CURRENT scene's own :scene/monster-attack-deck, if it has one. The
+   shared 'sweep everything' set both attack-deck-curse-pool-total and
+   the scene-wide :attack-deck/reshuffle-flagged/end-scenario actions
+   use -- unconditional (no 'is this player in the current scenario'
+   concept exists or is needed: sweeping an inactive player's untouched
+   deck is a harmless no-op in the realistic single-campaign-per-save
+   case)."
+  [data]
+  (let [root (ds/entity data [:db/ident :root])
+        scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
+    (concat (keep :player/attack-deck (:root/players root))
+            (if-let [m (:scene/monster-attack-deck scene)] [m] []))))
+
 (defn ^:private attack-deck-curse-pool-total
   "The combined CURSE count across every PERSONAL (owned) attack modifier
-   deck on the current scene -- the shared pool of 10 available for
+   deck currently in play -- the shared pool of 10 available for
    distribution to players (rulebook errata p.55: 'The curse deck is
    split into two equal decks of 10 cards each. One deck is exclusively
    for putting curse cards into the players' attack modifier decks...'
@@ -1964,8 +2092,8 @@
    separate counter, so it can never drift out of sync with what's
    actually in play."
   [data]
-  (let [scene (:camera/scene (:user/camera (ds/entity data [:db/ident :user])))]
-    (apply + (map #(attack-deck-kind-count % :curse) (filter :deck/owner (:scene/attack-decks scene))))))
+  (let [root (ds/entity data [:db/ident :root])]
+    (apply + (map #(attack-deck-kind-count % :curse) (keep :player/attack-deck (:root/players root))))))
 
 (defmethod
   ^{:doc "Adds `n` BLESS cards to `deck-id` -- shorthand for :attack-deck/
@@ -1993,7 +2121,14 @@
   event-tx-fn :attack-deck/add-curse
   [data _ deck-id n]
   (let [deck (ds/entity data deck-id)
-        current (if (:deck/owner deck)
+        ;; `some?`, not `seq`: :player/attack-deck is :db/isComponent, so
+        ;; this reverse ref is the single owning Entity, never a
+        ;; collection. `seq` did give the right answer, but only because
+        ;; seq-ing an Entity yields its attribute pairs -- it read as a
+        ;; non-empty-collection test, and "correcting" it to `first` would
+        ;; have quietly made every personal deck share the monster deck's
+        ;; separate pool.
+        current (if (some? (:player/_attack-deck deck))
                   (attack-deck-curse-pool-total data)
                   (attack-deck-kind-count deck :curse))]
     (if (> (+ current n) 10)
@@ -2008,9 +2143,8 @@
   event-tx-fn :attack-deck/reshuffle
   [data _ deck-id]
   (let [user (ds/entity data [:db/ident :user])
-        deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))]
-    (if-not (attack-deck-authorized? data user owner-id)
+        deck (ds/entity data deck-id)]
+    (if-not (attack-deck-authorized? data user deck)
       []
       (let [ids (map :db/id (:deck/cards deck))
             positions (cards/shuffle-positions ids)]
@@ -2018,42 +2152,42 @@
               {:db/id deck-id :deck/needs-reshuffle? false})))))
 
 (defmethod
-  ^{:doc "Host-only: reshuffles every attack modifier deck on the current
-          scene currently flagged :deck/needs-reshuffle? (see :attack-
-          deck/draw) in one sweep -- the manual 'end of round' action
-          substituting for automatically hooking the generic :initiative/
-          next event, which would otherwise need to know this specific
-          game module exists."}
+  ^{:doc "Host-only: reshuffles every attack modifier deck currently in
+          play (see attack-deck-all-decks -- every player's own deck
+          plus the current scene's monster deck) that's currently
+          flagged :deck/needs-reshuffle? (see :attack-deck/draw) in one
+          sweep -- the manual 'end of round' action substituting for
+          automatically hooking the generic :initiative/next event,
+          which would otherwise need to know this specific game module
+          exists."}
   event-tx-fn :attack-deck/reshuffle-flagged
   [data _]
   (let [user (ds/entity data [:db/ident :user])]
     (if-not (:user/host user)
       []
-      (let [scene (:camera/scene (:user/camera user))
-            flagged (filter :deck/needs-reshuffle? (:scene/attack-decks scene))]
+      (let [flagged (filter :deck/needs-reshuffle? (attack-deck-all-decks data))]
         (apply concat
                (for [deck flagged]
                  [[:db.fn/call event-tx-fn :attack-deck/reshuffle (:db/id deck)]]))))))
 
 (defmethod
   ^{:doc "Host-only: removes every card still flagged :card/temporary?
-          true from EVERY attack modifier deck on the current scene,
-          drawn-or-not -- BLESS/CURSE cards that were never drawn, plus
-          any item/scenario-added plain or effect card (see :attack-
-          deck/add-cards/add-effect-cards' own `temporary?` and
-          add-bless/add-curse, which always set it). The FAQ (p.78) is
-          explicit these 'should be removed from your deck at the end of
-          a scenario' -- applied scene-wide in one sweep, the same shape
-          :attack-deck/reshuffle-flagged already established for its own
-          'sweep every deck on the scene' action."}
+          true from EVERY attack modifier deck currently in play (see
+          attack-deck-all-decks), drawn-or-not -- BLESS/CURSE cards that
+          were never drawn, plus any item/scenario-added plain or effect
+          card (see :attack-deck/add-cards/add-effect-cards' own
+          `temporary?` and add-bless/add-curse, which always set it).
+          The FAQ (p.78) is explicit these 'should be removed from your
+          deck at the end of a scenario' -- applied in one sweep, the
+          same shape :attack-deck/reshuffle-flagged already established
+          for its own 'sweep every deck currently in play' action."}
   event-tx-fn :attack-deck/end-scenario
   [data _]
   (let [user (ds/entity data [:db/ident :user])]
     (if-not (:user/host user)
       []
-      (let [scene (:camera/scene (:user/camera user))
-            targets (mapcat (fn [deck] (filter :card/temporary? (:deck/cards deck)))
-                             (:scene/attack-decks scene))]
+      (let [targets (mapcat (fn [deck] (filter :card/temporary? (:deck/cards deck)))
+                             (attack-deck-all-decks data))]
         (mapv (fn [c] [:db/retractEntity (:db/id c)]) targets)))))
 
 (defmethod
@@ -2065,9 +2199,8 @@
   event-tx-fn :attack-deck/reset
   [data _ deck-id]
   (let [user (ds/entity data [:db/ident :user])
-        deck (ds/entity data deck-id)
-        owner-id (:db/id (:deck/owner deck))]
-    (if-not (attack-deck-authorized? data user owner-id)
+        deck (ds/entity data deck-id)]
+    (if-not (attack-deck-authorized? data user deck)
       []
       (let [old-ids (map :db/id (:deck/cards deck))
             [new-ids card-tx] (attack-deck-composition-tx)]
@@ -2079,8 +2212,18 @@
   ^{:doc "Removes the given attack modifier deck and all its cards
           (isComponent cleanup, same as :deck/remove)."}
   event-tx-fn :attack-deck/remove
-  [_ _ deck-id]
-  [[:db/retractEntity deck-id]])
+  [data _ deck-id]
+  (let [user (ds/entity data [:db/ident :user])
+        deck (ds/entity data deck-id)]
+    ;; The most destructive action in this family and, until now, the
+    ;; only one not checked here -- :player/attack-deck is
+    ;; :db/isComponent, so retracting the deck takes every card with it,
+    ;; including a campaign's worth of perk edits. The panel button was
+    ;; already :disabled for the unauthorized, but the UI is not the
+    ;; boundary: any participant can dispatch this directly.
+    (if-not (attack-deck-authorized? data user deck)
+      []
+      [[:db/retractEntity deck-id]])))
 
 ;; --- Dice ---
 ;; A generic n-sided-die primitive, independent of any game-type -- see
@@ -2269,9 +2412,17 @@
           `player-id` isn't actually seated at this session."}
   event-tx-fn :minigame/set-controller
   [data _ minigame-id player-id uuid]
-  (let [minigame (ds/entity data minigame-id)
+  (let [user (ds/entity data [:db/ident :user])
+        minigame (ds/entity data minigame-id)
         seat (first (filter (comp #{player-id} :db/id :seat/player) (:minigame/seats minigame)))]
-    (if seat
+    ;; Host-only, like the roster's own controller-picker this is the
+    ;; per-session sibling of (see component/panel's `visible-tabs` --
+    ;; the Players tab is host-only because seating is a GM concern).
+    ;; :seat/controller is the FIRST branch of minigame-controller-uuid,
+    ;; so whoever writes it decides who may act on that seat and who
+    ;; sees its hand face-up -- without this check any guest could point
+    ;; another player's seat at themselves and read their hand.
+    (if (and seat (:user/host user))
       (if uuid
         [{:db/id (:db/id seat) :seat/controller [:user/uuid uuid]}]
         [[:db/retract (:db/id seat) :seat/controller]])
@@ -2390,10 +2541,18 @@
           time (a stale controller whose session disconnected is
           treated as unassigned, not an error)."}
   event-tx-fn :player/set-controller
-  [_ _ player-id user-id]
-  (if user-id
-    [{:db/id player-id :player/controller user-id}]
-    [[:db/retract player-id :player/controller]]))
+  [data _ player-id user-id]
+  ;; Host-only. The Players tab that dispatches this is already
+  ;; host-only, so this changes no legitimate flow -- but :player/
+  ;; controller is precisely what player/authority? keys on, so an
+  ;; unchecked write here hands the writer authority over that player's
+  ;; objects, attack deck and character profile. Same reasoning as
+  ;; :minigame/set-controller's own check.
+  (if (:user/host (ds/entity data [:db/ident :user]))
+    (if user-id
+      [{:db/id player-id :player/controller user-id}]
+      [[:db/retract player-id :player/controller]])
+    []))
 
 (defmethod
   ^{:doc "Takes the given player/NPC out of active play (active? false) or
@@ -2410,6 +2569,191 @@
   event-tx-fn :player/remove
   [_ _ player-id]
   [[:db/retractEntity player-id]])
+
+;; --- Character Profile ---
+;; Generic level/experience/gold/items tracking directly on the roster
+;; player entity -- see :tool/character-profile (game_type/core_
+;; elements.cljs). Deliberately NOT Gloomhaven-specific: any game-type
+;; with leveling/currency (D&D included) can opt in the same way
+;; Gloomhaven's own seeded template does. :root/players is already
+;; root-scoped (not scene-scoped) and already sits inside this app's
+;; automatic whole-DB save (provider/idb.cljs) -- these fields persist
+;; across scene changes and browser reloads for free, no new persistence
+;; plumbing, just new attributes on an entity that already survives
+;; everything. Plain editable numbers and a flat named-item list -- no
+;; XP-threshold table or item slot/equip-restriction rules are enforced,
+;; the same 'trust the humans, don't automate rules resolution' stance
+;; the rest of this app already takes everywhere else.
+
+(defn ^:private character-profile-authorized?
+  "Whether `user` may edit `player-id`'s character profile -- the
+   controlling player (if connected), or the host -- the same player/
+   authority? check :attack-deck/*'s own owner-authorization already
+   uses, letting a player manage their own character (level up, track
+   gold, add items) without host intervention, unlike the base Roster
+   tab's own host-only admin actions."
+  [data user player-id]
+  (let [connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
+        controller-uuid (get-in (ds/entity data player-id) [:player/controller :user/uuid])]
+    (player/authority? (:user/uuid user) (:user/host user) connected controller-uuid)))
+
+(defmethod
+  ^{:doc "Sets the given player/NPC's level. A plain editable number --
+          no XP-threshold table is enforced."}
+  event-tx-fn :player/set-level
+  [data _ player-id value]
+  (if (character-profile-authorized? data (ds/entity data [:db/ident :user]) player-id)
+    [{:db/id player-id :player/level value}]
+    []))
+
+(defmethod
+  ^{:doc "Sets the given player/NPC's experience total. A plain editable
+          number, same reasoning as :player/set-level."}
+  event-tx-fn :player/set-experience
+  [data _ player-id value]
+  (if (character-profile-authorized? data (ds/entity data [:db/ident :user]) player-id)
+    [{:db/id player-id :player/experience value}]
+    []))
+
+(defmethod
+  ^{:doc "Sets the given player/NPC's gold/currency total."}
+  event-tx-fn :player/set-gold
+  [data _ player-id value]
+  (if (character-profile-authorized? data (ds/entity data [:db/ident :user]) player-id)
+    [{:db/id player-id :player/gold value}]
+    []))
+
+(defmethod
+  ^{:doc "Adds one named item (with an optional description) to the given
+          player/NPC's inventory, unequipped by default -- a generic
+          'this character owns a thing' primitive, no slot/weight-limit
+          rules enforced (the same no-reinvented-rules-resolution stance
+          the attack-deck deck-edit primitives already take)."}
+  event-tx-fn :player/add-item
+  [data _ player-id name description]
+  (if (character-profile-authorized? data (ds/entity data [:db/ident :user]) player-id)
+    [{:db/id player-id
+      :player/items [(cond-> {:item/name (str name)}
+                       (seq description) (assoc :item/description (str description)))]}]
+    []))
+
+(defmethod
+  ^{:doc "Toggles whether the given item is currently equipped."}
+  event-tx-fn :player/toggle-item-equipped
+  [data _ item-id value]
+  (let [owner (:player/_items (ds/entity data item-id))]
+    (if (and owner (character-profile-authorized? data (ds/entity data [:db/ident :user]) (:db/id owner)))
+      [{:db/id item-id :item/equipped? value}]
+      [])))
+
+(defmethod
+  ^{:doc "Removes the given item from its owner's inventory entirely."}
+  event-tx-fn :player/remove-item
+  [data _ item-id]
+  (let [owner (:player/_items (ds/entity data item-id))]
+    (if (and owner (character-profile-authorized? data (ds/entity data [:db/ident :user]) (:db/id owner)))
+      [[:db/retractEntity item-id]]
+      [])))
+
+(defn ^:private import-character-keyword
+  "Untrusted value -> keyword, nil for anything that is neither a keyword
+   nor a string. (keyword 42) happens to evaluate to nil under
+   ClojureScript today, but leaning on that is how a bad blob ends up
+   transacting a nil value; be explicit instead."
+  [x]
+  (cond (keyword? x) x
+        (string? x)  (keyword x)))
+
+(defn ^:private import-character-text
+  "Untrusted value -> trimmed string, \"\" for anything non-string. Not
+   `str`, which happily renders nil as \"\" and a map as its literal
+   source -- both of which then show up verbatim in the panel."
+  [x]
+  (if (string? x) (trim x) ""))
+
+(defn ^:private import-character-card
+  "One untrusted card entry -> card tx data, or nil to drop it. A card is
+   kept only if it names one of attack-deck's 9 kinds -- `value` returns
+   nil for anything else, the same recognised-or-no-op test
+   :attack-deck/add-effect-cards already applies to its own `effect`
+   argument. An unrecognised effect is dropped while keeping the card,
+   and an amount is kept only for the effects that take one, exactly as
+   that event does. :db/id and :card/position are assigned by the caller
+   once the surviving cards are known."
+  [entry]
+  (if (map? entry)
+    (let [kind (import-character-keyword (:rank entry))
+          effect (import-character-keyword (:effect entry))
+          effect-def (get attack-deck/effect-kinds effect)
+          amount (:amount entry)]
+      (if (some? (attack-deck/value kind))
+        (cond-> {:card/rank kind :card/location :draw}
+          (some? effect-def) (assoc :card/effect effect)
+          (and (:amount? effect-def) (number? amount)) (assoc :card/effect-amount amount))))))
+
+(defmethod
+  ^{:doc "Creates a brand-new player (kind :human) from a previously-
+          exported character blob (see component/panel_character.cljs's
+          export-character!) -- name, level, experience, gold, items,
+          and a full attack modifier deck composition (draw/discard
+          split is NOT carried over -- an imported character always
+          starts fresh-shuffled, same as a newly created one). Mirrors
+          :game-type/import's own shape and trust level: no authority
+          check (matches :player/create's own trust-the-UI convention
+          for roster-admin actions), plain type coercion on the
+          untrusted input, everything built in one transaction. Not
+          gated on :gloomhaven/attack-deck being enabled -- the
+          character is still created without a deck-carrying import if
+          `deck` is empty, or even if the importing scene's game-type
+          doesn't have the element on (just without a tab to view it in
+          until it does)."}
+  event-tx-fn :player/import-character
+  [data _ {:keys [name level experience gold items deck]}]
+  (let [root (ds/entity data [:db/ident :root])
+        taken (into #{} (map :player/color) (:root/players root))
+        player-id -1
+        deck-id -2
+        ;; Everything below treats the blob as hostile. It arrives from a
+        ;; file the user picked, so it can be truncated, hand-edited, or
+        ;; written by an older release -- a bad one must yield a poorer
+        ;; character, never a failed transaction.
+        cards-in (if (sequential? deck) deck [])
+        items-in (if (sequential? items) items [])
+        coerced (keep import-character-card cards-in)
+        card-ids (mapv - (range 3 (+ 3 (count coerced))))
+        positions (cards/shuffle-positions card-ids)
+        card-tx (map (fn [c id] (assoc c :db/id id :card/position (get positions id)))
+                     coerced card-ids)
+        item-tx (into []
+                      (keep (fn [entry]
+                              (if (map? entry)
+                                (let [nm (import-character-text (:name entry))
+                                      ds (import-character-text (:description entry))]
+                                  ;; a nameless item is just a blank row in
+                                  ;; the panel -- drop it rather than show it
+                                  (if (seq nm)
+                                    (cond-> {:item/name nm}
+                                      (seq ds) (assoc :item/description ds)
+                                      (true? (:equipped? entry)) (assoc :item/equipped? true)))))))
+                      items-in)
+        player-name (let [n (import-character-text name)]
+                      (if (seq n) n "Imported Character"))]
+    (concat
+     [(cond-> {:db/id player-id
+               :player/name player-name
+               :player/kind :human
+               :player/color (player/next-color (player/colors-for-kind :human) taken)
+               :player/active true}
+        (seq item-tx) (assoc :player/items item-tx)
+        (number? level) (assoc :player/level level)
+        (number? experience) (assoc :player/experience experience)
+        (number? gold) (assoc :player/gold gold))]
+     (if (seq card-tx)
+       (concat [{:db/id deck-id :deck/name player-name :deck/cards card-ids}]
+               card-tx
+               [[:db/add player-id :player/attack-deck deck-id]])
+       [])
+     [[:db/add [:db/ident :root] :root/players player-id]])))
 
 ;; --- Token Images ---
 (defmethod event-tx-fn :token-images/create-many
@@ -2879,6 +3223,27 @@
 
 ;; --- Props ---
 
+(defn ^:private image-cell-scale
+  "The :object/scale a prop or board image should be placed at so that one
+   grid cell's worth of the image covers one cell of the scene.
+
+   Resolution order, most specific first:
+     1. the image's own :image/cell-px, calibrated by scaling a placed
+        copy and hitting 'Save scale as default' (:image/set-cell-scale);
+     2. :root/default-cell-px -- the campaign-wide baseline, for the
+        common case where a host's whole asset set was produced at one
+        pixel density and calibrating each image individually is just
+        busywork;
+     3. 1, i.e. native pixels, which is what happened before either
+        existed.
+
+   Tokens deliberately do not participate: their footprint comes from
+   :token/size in game units and the artwork is fitted to the token's
+   circle, so source resolution never affects how big they render."
+  [data cell-px]
+  (let [px (or cell-px (:root/default-cell-px (ds/entity data [:db/ident :root])))]
+    (if (and (number? px) (pos? px)) (/ grid-size px) 1)))
+
 (defmethod
   ^{:doc "Creates a new prop image in the current scene at the given
           screen-space point. If the image has a saved cell-scale
@@ -2908,7 +3273,7 @@
          rotation :image/rotation
          anchor :image/anchor}
         (ds/entity data [:image/hash hash])
-        scale (if cell-px (/ grid-size cell-px) 1)
+        scale (image-cell-scale data cell-px)
         rotation (or rotation 0)
         align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
         base-type (geom/base-grid-type grid-type)
@@ -2996,7 +3361,7 @@
          {width :image/width height :image/height cell-px :image/cell-px
           rotation :image/rotation anchor :image/anchor}
          (image-calibration data hash)
-         scale (if cell-px (/ grid-size cell-px) 1)
+         scale (image-cell-scale data cell-px)
          rotation (or rotation 0)
          align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
          base-type (geom/base-grid-type grid-type)
@@ -3323,10 +3688,17 @@
             [[:db/retractEntity (:db/id a)]
              [:db/retractEntity (:db/id b)]
              {:db/id minigame-id :minigame/scores (update scores turn-id (fnil inc 0))}])
-          (let [idx (:minigame/turn-index minigame)
-                players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+          (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
                 active? (partial memory-player-active? data)
-                next-idx (or (turn-order/next-turn-index players active? idx) idx)]
+                ;; Advance from the seat that actually just played, not
+                ;; from the raw stored index -- the same reason
+                ;; :old-maid/draw bases its step on `drawer-index`. When
+                ;; the stored index points at a since-benched seat, the
+                ;; turn player is resolved forward past them but the
+                ;; stored index is not, so stepping from the raw value
+                ;; hands the player who just missed a second turn.
+                turn-idx (first (keep-indexed (fn [i id] (if (= id turn-id) i)) players))
+                next-idx (or (turn-order/next-turn-index players active? turn-idx) turn-idx)]
             [[:db/add (:db/id a) :object/hidden true]
              [:db/add (:db/id b) :object/hidden true]
              {:db/id minigame-id :minigame/turn-index next-idx}])))
@@ -3454,7 +3826,19 @@
             extra-turn-on-hit? (contains? enabled :go-fish/extra-turn-on-hit)
             extra-turn-on-lucky-draw? (contains? enabled :go-fish/extra-turn-on-lucky-draw)
             players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
-            idx (:minigame/turn-index minigame)
+            ;; The ASKER's own seat position, not :minigame/turn-index.
+            ;; The guard above admits the player resolved through
+            ;; go-fish-turn-player, which skips forward past benched
+            ;; seats; the stored index does not move with it. Basing
+            ;; `next-seat` and every advance below on the raw value meant
+            ;; that with the stored index pointing at a benched seat, the
+            ;; computed next seat could come out as the asker themselves
+            ;; -- and since a clause below forbids targeting yourself,
+            ;; NO target was legal and the table locked up permanently
+            ;; (this event is the only writer of the index). Same
+            ;; actor-relative basis :old-maid/draw and :crazy-eights/play
+            ;; already use.
+            idx (first (keep-indexed (fn [i id] (if (= id asker-id) i)) players))
             active? (partial go-fish-player-active? data)
             next-seat (turn-order/valid-turn-index players active? (mod (inc idx) (count players)))
             next-seat-id (if next-seat (nth players next-seat))
@@ -4135,7 +4519,7 @@
           (let [hand (cards/cards-of-holder (:deck/cards deck) player-id)
                 group (cards/cards-of-rank hand rank)
                 scored (filter (comp #{:scored} :card/location) (:deck/cards deck))
-                already-scored (count (cards/cards-of-rank scored rank))
+                already-scored (rummy/set-scored-count (cards/cards-of-rank scored rank))
                 n (rummy/scoreable-set (count group) already-scored)]
             (if (pos? n)
               (let [to-score (take n group)
@@ -4181,7 +4565,13 @@
               (let [to-score (filter (comp id-set :db/id) hand)
                     scored (filter (comp #{:scored} :card/location) (:deck/cards deck))
                     start (next-position scored)]
-                (mapcat (fn [card i] (move-card-tx (:db/id card) :scored (+ start i) player-id))
+                ;; Mark these as run-melds. The :scored area is shared and
+                ;; otherwise makes a run's cards indistinguishable from a
+                ;; laid-down set, which :rummy/score then miscounts as set
+                ;; progress -- see rummy/set-scored-count.
+                (mapcat (fn [card i]
+                          (conj (vec (move-card-tx (:db/id card) :scored (+ start i) player-id))
+                                [:db/add (:db/id card) :card/run-meld? true]))
                         to-score (range)))
               []))
           []))
@@ -4458,7 +4848,7 @@
          cell-px :image/cell-px
          anchor :image/anchor}
         (ds/entity data [:image/hash hash])
-        scale (if cell-px (/ grid-size cell-px) 1)
+        scale (image-cell-scale data cell-px)
         align? (and align? (pos? (game-type/grid-count (:game-type/enabled-elements game-type-entity #{}))))
         base-type (geom/base-grid-type grid-type)
         rotation-mode (if (= base-type :square) 90 60)

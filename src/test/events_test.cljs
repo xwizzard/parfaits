@@ -90,6 +90,7 @@
 (deftest test-scene-focus
   (let [db (initial-data true)
         sc (:db/id (:camera/scene (:user/camera (entity db [:db/ident :user]))))
+        orig-cam (:db/id (:user/camera (entity db [:db/ident :user])))
         tx [{:db/ident :root
              :root/session
              {:db/ident :session
@@ -108,7 +109,7 @@
           "Every user is viewing the same scene as the host.")
       (is (= (count (into #{} (map :user/camera) conns)) 3)
           "Every user has a distinct camera entity."))
-    (dispatch conn :scenes/change sc)
+    (dispatch conn :scenes/change orig-cam)
     (let [{conns :session/conns} (entity @conn [:db/ident :session])]
       (is (every? (comp not #{sc} :db/id :camera/scene :user/camera) conns)
           "Users remain on the scene even if the host changes theirs."))))
@@ -303,6 +304,71 @@
       (is (= (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn))))) default-id)
           "Selecting a different template in Game Builder mode switches
            the scene back to it."))))
+
+(deftest test-scenes-create-resets-game-type-editing
+  (let [conn (ds/conn-from-db (initial-data true))
+        default-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))]
+    (dispatch conn :game-type/create default-id "Custom")
+    (is (not= (:db/id (:user/game-type-editing (user conn))) default-id)
+        "sanity check: Builder mode is now editing the new Custom template")
+    (dispatch conn :scenes/create)
+    (is (= (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn))))) default-id)
+        "a brand new scene starts on the seeded Default template")
+    (is (= (:db/id (:user/game-type-editing (user conn))) default-id)
+        ":user/game-type-editing is reset to match -- without this, Game
+         Builder mode would misleadingly keep showing Custom as
+         'selected' even though this new scene is actually on Default")))
+
+(deftest test-scenes-change-resyncs-game-type-editing
+  (let [conn (ds/conn-from-db (initial-data true))
+        default-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        orig-cam (:db/id (:user/camera (user conn)))]
+    (dispatch conn :game-type/create default-id "Custom")
+    (let [custom-id (:db/id (:user/game-type-editing (user conn)))]
+      (dispatch conn :scenes/create)
+      (is (= (:db/id (:user/game-type-editing (user conn))) default-id)
+          "sanity check: the new scene left Builder mode on Default")
+      (dispatch conn :scenes/change orig-cam)
+      (is (= (:db/id (:user/camera (user conn))) orig-cam))
+      (is (= (:db/id (:user/game-type-editing (user conn))) custom-id)
+          "switching back to the original scene (still on Custom)
+           resyncs Builder mode to match it, not whatever was last
+           edited"))))
+
+(deftest test-scenes-remove-resyncs-game-type-editing-to-existing-scene
+  (let [conn (ds/conn-from-db (initial-data true))
+        default-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        orig-cam (:db/id (:user/camera (user conn)))]
+    (dispatch conn :scenes/create)
+    (let [new-cam (:db/id (:user/camera (user conn)))]
+      (dispatch conn :game-type/create default-id "Custom")
+      (let [custom-id (:db/id (:user/game-type-editing (user conn)))]
+        (is (not= custom-id default-id))
+        (dispatch conn :scenes/remove new-cam)
+        (is (= (:db/id (:user/camera (user conn))) orig-cam)
+            "sanity check: removing the current (Custom) scene fell back
+             to the original scene, which already had its own camera")
+        (is (= (:db/id (:user/game-type-editing (user conn))) default-id)
+            "Builder mode resyncs to the scene fallen back to (still on
+             Default), not left pointing at the just-removed scene's
+             Custom template")))))
+
+(deftest test-scenes-remove-last-scene-creates-default-game-typed-scene
+  (let [conn (ds/conn-from-db (initial-data true))
+        default-id (:db/id (:scene/game-type (:camera/scene (:user/camera (user conn)))))
+        orig-cam (:db/id (:user/camera (user conn)))]
+    (dispatch conn :game-type/create default-id "Custom")
+    (dispatch conn :scenes/remove orig-cam)
+    (let [scene (:camera/scene (:user/camera (user conn)))]
+      (is (some? (:scene/game-type scene))
+          "removing the only remaining scene creates a fresh replacement
+           that itself references a real game-type -- not left with no
+           :scene/game-type at all, which would hide every panel tab")
+      (is (= (:db/id (:scene/game-type scene)) default-id)
+          "the replacement scene starts on the seeded Default template,
+           same as :scenes/create's own fresh scene")
+      (is (= (:db/id (:user/game-type-editing (user conn))) default-id)
+          "Builder mode resyncs to match"))))
 
 (deftest test-game-type-create-clones-source
   (let [conn (ds/conn-from-db (initial-data true))
@@ -972,6 +1038,21 @@
                      {:db/ident :session
                       :session/conns [{:user/host false :user/uuid uuid}]}}]))
 
+(defn ^:private set-controller!
+  "Test helper -- assigns (or, with nil, clears) a roster player's
+   :player/controller directly. Deliberately NOT through
+   :player/set-controller: that event is host-only (it is what
+   player/authority? keys on, so an unchecked write would hand the
+   writer authority over that player), while most tests below need
+   'this guest controls player X' as a PRECONDITION established while
+   simulating the guest themselves. Transacting it keeps each test
+   about the behaviour it actually names -- see
+   test-player-set-controller-host-only for the event's own coverage."
+  [conn player-id user-ref]
+  (if user-ref
+    (transact! conn [{:db/id player-id :player/controller user-ref}])
+    (transact! conn [[:db/retract player-id :player/controller]])))
+
 (deftest test-player-set-controller
   (let [conn (ds/conn-from-db (initial-data true))
         guest-uuid (random-uuid)]
@@ -983,6 +1064,73 @@
       (dispatch conn :player/set-controller player-id nil)
       (is (nil? (:player/controller (entity @conn player-id)))
           "clearing the controller reverts to host-controlled"))))
+
+(deftest test-player-set-controller-host-only
+  (testing ":player/controller is exactly what player/authority? keys on,
+            so a guest who could write it would grant themselves
+            authority over that player's objects, attack deck and
+            character profile. The Players tab is host-only, but the UI
+            is not the boundary."
+    (let [conn (ds/conn-from-db (initial-data false))
+          my-uuid (random-uuid)]
+      (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+      (add-conn! conn my-uuid)
+      (dispatch conn :player/create :npc)
+      (let [player-id (:db/id (first (root-players conn)))]
+        (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+        (is (nil? (:player/controller (entity @conn player-id)))
+            "a guest may not point a roster player at themselves")))))
+
+(deftest test-minigame-set-controller-host-only
+  (testing ":seat/controller is the first branch of
+            minigame-controller-uuid, so writing it decides who may act
+            on a seat AND who sees its hand face-up. The seat dropdown
+            renders for every connected guest."
+    (let [conn (ds/conn-from-db (initial-data false))
+          my-uuid (random-uuid)]
+      (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+      (add-conn! conn my-uuid)
+      (set-enabled-elements! conn #{:old-maid/game})
+      (dispatch conn :player/create :npc)
+      (dispatch conn :player/create :npc)
+      (let [[p1 p2] (map :db/id (root-players conn))]
+        (dispatch conn :old-maid/start [p1 p2])
+        (let [mg (first (:scene/minigames (current-scene conn)))
+              seat (first (filter (comp #{p1} :db/id :seat/player) (:minigame/seats mg)))]
+          (is (some? seat) "sanity: the table seated p1")
+          (dispatch conn :minigame/set-controller (:db/id mg) p1 my-uuid)
+          (is (nil? (:seat/controller (entity @conn (:db/id seat))))
+              "a guest may not point another player's seat at themselves"))))))
+
+(deftest test-objects-translate-many-skips-locked-members
+  (testing "the lock was only enforced in the drag handler, and only for a
+            single-object selection -- rubber-band a locked object with any
+            other and the group drag moved it anyway. The rest of the
+            selection should still move; only the locked member holds."
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (dispatch conn :token/create (Vec2. 0 0) nil)
+      (dispatch conn :token/create (Vec2. 100 0) nil)
+      (let [[a b] (mapv :db/id (sort-by :db/id (:scene/tokens (:camera/scene (:user/camera (user conn))))))]
+        (transact! conn [{:db/id a :object/locked true}])
+        (let [before-a (:object/point (entity @conn a))
+              before-b (:object/point (entity @conn b))]
+          (dispatch conn :objects/translate-many #{a b} (Vec2. 70 70))
+          (is (= (:object/point (entity @conn a)) before-a)
+              "the locked token did not move")
+          (is (not= (:object/point (entity @conn b)) before-b)
+              "its unlocked companion did"))))))
+
+(deftest test-objects-translate-many-tolerates-a-removed-object
+  (testing "an id whose entity was retracted mid-drag (a peer deleted it)
+            pulls as nil; adding a delta to a nil point would throw and
+            lose the whole move for every other object in the selection."
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (dispatch conn :token/create (Vec2. 0 0) nil)
+      (let [id (:db/id (scene-token conn))
+            gone 999999]
+        (dispatch conn :objects/translate-many #{id gone} (Vec2. 70 70))
+        (is (= (:object/point (entity @conn id)) (Vec2. 70 70))
+            "the surviving object still moved")))))
 
 (deftest test-objects-assign-owner
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -1025,7 +1173,7 @@
           player-id (:db/id (first (root-players conn)))]
       (add-conn! conn guest-uuid)
       (dispatch conn :objects/assign-owner [id] player-id)
-      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (set-controller! conn player-id [:user/uuid guest-uuid])
       (dispatch conn :objects/toggle-hidden id)
       (is (not (:object/hidden (entity @conn id)))
           "the host's own toggle attempt is rejected once a connected
@@ -1043,7 +1191,7 @@
           player-id (:db/id (first (root-players conn)))]
       (add-conn! conn my-uuid)
       (dispatch conn :objects/assign-owner [id] player-id)
-      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (set-controller! conn player-id [:user/uuid my-uuid])
       (dispatch conn :objects/toggle-hidden id)
       (is (:object/hidden (entity @conn id))
           "the assigned, connected controller may toggle it even though
@@ -1060,7 +1208,7 @@
           player-id (:db/id (first (root-players conn)))]
       (add-conn! conn other-uuid)
       (dispatch conn :objects/assign-owner [id] player-id)
-      (dispatch conn :player/set-controller player-id [:user/uuid other-uuid])
+      (set-controller! conn player-id [:user/uuid other-uuid])
       (dispatch conn :objects/toggle-hidden id)
       (is (not (:object/hidden (entity @conn id)))
           "a connected guest who isn't the assigned controller (and isn't
@@ -1075,7 +1223,7 @@
           player-id (:db/id (first (root-players conn)))]
       (add-conn! conn stale-uuid)
       (dispatch conn :objects/assign-owner [id] player-id)
-      (dispatch conn :player/set-controller player-id [:user/uuid stale-uuid])
+      (set-controller! conn player-id [:user/uuid stale-uuid])
       ;; simulate the controlling guest disconnecting -- retracted from
       ;; :session/conns, but :player/controller still points at them
       (transact! conn [[:db/retract [:db/ident :session] :session/conns [:user/uuid stale-uuid]]])
@@ -1143,7 +1291,7 @@
     (dispatch conn :player/create :npc)
     (let [player-id (:db/id (first (root-players conn)))]
       (add-conn! conn guest-uuid)
-      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (set-controller! conn player-id [:user/uuid guest-uuid])
       (dispatch conn :dice/roll [20] nil player-id)
       (is (empty? (scene-dice-rolls conn))
           "the host has no authority over a connected, assigned controller's
@@ -1158,7 +1306,7 @@
     (dispatch conn :player/create :npc)
     (let [player-id (:db/id (first (root-players conn)))]
       (add-conn! conn my-uuid)
-      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (set-controller! conn player-id [:user/uuid my-uuid])
       (dispatch conn :dice/roll [20] nil player-id)
       (let [roll (first (scene-dice-rolls conn))]
         (is (= (:db/id (:roll/owner roll)) player-id)
@@ -1184,8 +1332,26 @@
     (is (empty? (scene-dice-rolls conn)) "every roll entity is retracted")))
 
 ;; --- Attack Modifier Decks (Gloomhaven-family "x-haven") ---
-(defn ^:private scene-attack-decks [conn]
-  (:scene/attack-decks (current-scene conn)))
+(defn ^:private scene-attack-decks
+  "Test helper: every attack deck currently in play -- each :root/
+   players' own root-scoped :player/attack-deck plus the active
+   scene's still-scene-scoped :scene/monster-attack-deck. Mirrors
+   events.cljs's own attack-deck-all-decks helper."
+  [conn]
+  (concat (keep :player/attack-deck (root-players conn))
+          (if-let [m (:scene/monster-attack-deck (current-scene conn))] [m] [])))
+
+(defn ^:private deck-owner
+  "Test helper: resolves a deck's owning player entity via DataScript's
+   reverse-ref (there is no stored :deck/owner anymore -- see
+   events.cljs's attack-deck-authorized?). :player/attack-deck is
+   :db/isComponent true, so DataScript's reverse lookup already
+   returns the single owning Entity directly (NOT wrapped in a set --
+   that's only how DataScript handles non-component reverse refs, e.g.
+   :minigame/_props) -- no `first` needed or wanted here. nil for the
+   monster deck, which nothing points at this way."
+  [deck]
+  (:player/_attack-deck deck))
 
 (defn ^:private scene-attack-draws [conn]
   (:scene/attack-draws (current-scene conn)))
@@ -1236,8 +1402,8 @@
       (dispatch conn :attack-deck/create player-id)
       (dispatch conn :attack-deck/create nil)
       (let [decks (scene-attack-decks conn)
-            personal (first (filter (comp #{player-id} :db/id :deck/owner) decks))
-            monster (first (filter (comp nil? :deck/owner) decks))]
+            personal (first (filter (comp #{player-id} :db/id deck-owner) decks))
+            monster (first (filter (comp nil? deck-owner) decks))]
         (is (= (count decks) 2))
         (is (= (count (:deck/cards personal)) 20) "a fresh standard 20-card deck")
         (is (= (:deck/name personal) (:player/name (first (root-players conn)))))
@@ -1456,8 +1622,8 @@
     (let [player-id (:db/id (first (root-players conn)))]
       (dispatch conn :attack-deck/create player-id)
       (let [decks (scene-attack-decks conn)
-            monster-id (:db/id (first (filter (comp nil? :deck/owner) decks)))
-            player-deck-id (:db/id (first (filter (comp some? :deck/owner) decks)))]
+            monster-id (:db/id (first (filter (comp nil? deck-owner) decks)))
+            player-deck-id (:db/id (first (filter (comp some? deck-owner) decks)))]
         (force-attack-deck-top! conn (entity @conn monster-id) :times-2)
         (dispatch conn :attack-deck/draw monster-id nil)
         (dispatch conn :attack-deck/reshuffle-flagged)
@@ -1473,7 +1639,7 @@
     (dispatch conn :player/create :npc)
     (let [player-id (:db/id (first (root-players conn)))]
       (add-conn! conn my-uuid)
-      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (set-controller! conn player-id [:user/uuid my-uuid])
       ;; a self-controlled PERSONAL deck, unlike the monster deck, is
       ;; something this non-host guest may create/draw from -- the point
       ;; of this test is that :attack-deck/reshuffle-flagged is host-only
@@ -1512,6 +1678,66 @@
       (is (nil? (:card/location (entity @conn card-id))) "its cards were retracted too")
       (is (empty? (scene-attack-decks conn))))))
 
+(deftest test-attack-deck-remove-rejected-without-authority
+  (testing "the most destructive action in this family, and the last one
+            still relying on the panel button's :disabled. Any
+            participant can dispatch it directly, and :player/attack-deck
+            is :db/isComponent -- so an unchecked remove takes a whole
+            campaign's perk edits with it."
+    (let [conn (ds/conn-from-db (initial-data true))
+          my-uuid (random-uuid)
+          other-uuid (random-uuid)]
+      (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+      (dispatch conn :player/create :npc)
+      (let [player-id (:db/id (first (root-players conn)))]
+        ;; built as the host, so the deck exists and is fully stocked...
+        (dispatch conn :attack-deck/create player-id)
+        (let [deck-id (:db/id (:player/attack-deck (entity @conn player-id)))]
+          (is (some? deck-id) "sanity: the deck was created")
+          ;; ...then become a guest who neither hosts nor controls its owner
+          (transact! conn [{:db/id [:db/ident :user] :user/host false :user/uuid my-uuid}])
+          (add-conn! conn my-uuid)
+          (add-conn! conn other-uuid)
+          (set-controller! conn player-id [:user/uuid other-uuid])
+          (dispatch conn :attack-deck/remove deck-id)
+          (is (some? (:db/id (entity @conn deck-id)))
+              "a guest who neither hosts nor controls the owner may not destroy it")
+          (is (= (count (:deck/cards (entity @conn deck-id))) 20)
+              "and its cards survive intact"))))))
+
+(deftest test-objects-remove-selected-rejected-without-authority
+  (testing "removal is irreversible and this app has no undo, so it
+            follows the ownership rule WITHOUT authorized-to-hide?'s
+            :object/shared? escape hatch -- 'anyone may flip this shared
+            card' must not mean 'anyone may destroy it'."
+    (let [conn (ds/conn-from-db (initial-data true))
+          my-uuid (random-uuid)
+          other-uuid (random-uuid)]
+      (dispatch conn :token/create (Vec2. 0 0) nil)
+      (dispatch conn :player/create :npc)
+      (let [token-id (:db/id (scene-token conn))
+            player-id (:db/id (first (root-players conn)))
+            camera-id (:db/id (:user/camera (user conn)))]
+        (dispatch conn :objects/assign-owner [token-id] player-id)
+        ;; become a guest who does not control the token's owner, with the
+        ;; token selected (set directly -- what matters here is the remove,
+        ;; not how the selection was made)
+        (transact! conn [{:db/id [:db/ident :user] :user/host false :user/uuid my-uuid}
+                         {:db/id camera-id :camera/selected token-id}])
+        (add-conn! conn my-uuid)
+        (add-conn! conn other-uuid)
+        (set-controller! conn player-id [:user/uuid other-uuid])
+        (is (= (count (:camera/selected (:user/camera (user conn)))) 1)
+            "sanity: the token really is selected")
+        (dispatch conn :objects/remove-selected)
+        (is (some? (:db/id (entity @conn token-id)))
+            "a guest may not delete a token owned by someone else")
+        (transact! conn [{:db/id token-id :object/shared? true}])
+        (dispatch conn :objects/remove-selected)
+        (is (some? (:db/id (entity @conn token-id)))
+            "and :object/shared? does not open it up either -- that flag
+             is for reversible toggles, not deletion")))))
+
 (deftest test-attack-deck-draw-owner-rejected-without-authority
   (let [conn (ds/conn-from-db (initial-data true))
         guest-uuid (random-uuid)]
@@ -1519,7 +1745,7 @@
     (dispatch conn :player/create :npc)
     (let [player-id (:db/id (first (root-players conn)))]
       (add-conn! conn guest-uuid)
-      (dispatch conn :player/set-controller player-id [:user/uuid guest-uuid])
+      (set-controller! conn player-id [:user/uuid guest-uuid])
       (dispatch conn :attack-deck/create player-id)
       (is (empty? (scene-attack-decks conn))
           "the host has no authority over a connected, assigned controller's seat --
@@ -1544,7 +1770,7 @@
     (dispatch conn :player/create :npc)
     (let [player-id (:db/id (first (root-players conn)))]
       (add-conn! conn my-uuid)
-      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (set-controller! conn player-id [:user/uuid my-uuid])
       (dispatch conn :attack-deck/create player-id)
       (is (= (count (scene-attack-decks conn)) 1)
           "a connected player may create/act on the deck for the seat they
@@ -1702,8 +1928,8 @@
       (dispatch conn :attack-deck/create player-a)
       (dispatch conn :attack-deck/create player-b)
       (let [decks (scene-attack-decks conn)
-            deck-a-id (:db/id (first (filter (comp #{player-a} :db/id :deck/owner) decks)))
-            deck-b-id (:db/id (first (filter (comp #{player-b} :db/id :deck/owner) decks)))
+            deck-a-id (:db/id (first (filter (comp #{player-a} :db/id deck-owner) decks)))
+            deck-b-id (:db/id (first (filter (comp #{player-b} :db/id deck-owner) decks)))
             curse-count (fn [id] (count (filter (comp #{:curse} :card/rank) (:deck/cards (entity @conn id)))))]
         (dispatch conn :attack-deck/add-curse deck-a-id 8)
         (is (= (curse-count deck-a-id) 8))
@@ -1725,8 +1951,8 @@
       (dispatch conn :attack-deck/create player-id)
       (dispatch conn :attack-deck/create nil)
       (let [decks (scene-attack-decks conn)
-            player-deck-id (:db/id (first (filter (comp some? :deck/owner) decks)))
-            monster-deck-id (:db/id (first (filter (comp nil? :deck/owner) decks)))]
+            player-deck-id (:db/id (first (filter (comp some? deck-owner) decks)))
+            monster-deck-id (:db/id (first (filter (comp nil? deck-owner) decks)))]
         ;; maxes out the SHARED player pool entirely on one deck
         (dispatch conn :attack-deck/add-curse player-deck-id 10)
         (is (= (count (filter (comp #{:curse} :card/rank) (:deck/cards (entity @conn player-deck-id)))) 10))
@@ -1775,7 +2001,7 @@
     (dispatch conn :player/create :npc)
     (let [player-id (:db/id (first (root-players conn)))]
       (add-conn! conn my-uuid)
-      (dispatch conn :player/set-controller player-id [:user/uuid my-uuid])
+      (set-controller! conn player-id [:user/uuid my-uuid])
       (dispatch conn :attack-deck/create player-id)
       (let [deck-id (:db/id (first (scene-attack-decks conn)))]
         (dispatch conn :attack-deck/add-bless deck-id 1)
@@ -1783,6 +2009,96 @@
         (is (= (count (:deck/cards (entity @conn deck-id))) 21)
             "a non-host guest may not sweep the scene's decks, even one
              they themselves fully control")))))
+
+(deftest test-attack-deck-personal-deck-survives-a-new-scenario
+  (testing "the bug the root-scoped ownership move exists to fix: a
+            player's deck must outlive the scenario it was built in,
+            while the monster deck is genuinely per-scenario and must
+            NOT follow. Without this, every hard-won perk edit vanished
+            the moment a new scene was created."
+    (let [conn (ds/conn-from-db (initial-data true))
+          orig-cam (:db/id (:user/camera (user conn)))]
+      (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+      (dispatch conn :player/create :npc)
+      (let [player-id (:db/id (first (root-players conn)))]
+        (dispatch conn :attack-deck/create player-id)
+        (dispatch conn :attack-deck/create nil)
+        (let [deck-id (:db/id (:player/attack-deck (entity @conn player-id)))]
+          ;; give the deck state worth losing: a permanent perk edit plus
+          ;; a card already drawn into the discard
+          (dispatch conn :attack-deck/add-cards deck-id :plus-1 2 false)
+          (force-attack-deck-top! conn (entity @conn deck-id) :plus-1)
+          (dispatch conn :attack-deck/draw deck-id nil)
+          (let [cards-before (count (:deck/cards (entity @conn deck-id)))
+                discarded-before (count (filter (comp #{:discard} :card/location)
+                                                (:deck/cards (entity @conn deck-id))))]
+            (is (= cards-before 22) "sanity: the two perk cards are in")
+            (is (= discarded-before 1) "sanity: one card really is in the discard")
+
+            (dispatch conn :scenes/create)
+
+            (testing "in the brand-new scenario"
+              (let [deck (:player/attack-deck (entity @conn player-id))]
+                (is (some? deck) "the player still has a deck at all")
+                (is (= (:db/id deck) deck-id)
+                    "and it is the SAME deck entity, not a fresh 20-card one")
+                (is (= (count (:deck/cards deck)) cards-before)
+                    "the perk edit came along")
+                (is (= (count (filter (comp #{:discard} :card/location) (:deck/cards deck)))
+                       discarded-before)
+                    "so did the draw/discard state"))
+              (is (nil? (:scene/monster-attack-deck (current-scene conn)))
+                  "the monster deck does not follow -- a new scenario starts
+                   with fresh monsters"))
+
+            (testing "and switching back to the original scenario"
+              (dispatch conn :scenes/change orig-cam)
+              (is (= (:db/id (:player/attack-deck (entity @conn player-id))) deck-id))
+              (is (some? (:scene/monster-attack-deck (current-scene conn)))
+                  "that scenario's own monster deck is still where it was"))))))))
+
+(deftest test-attack-deck-sweeps-reach-player-decks-from-another-scenario
+  (testing "the sweeps walk every roster player's deck plus the active
+            scene's monster deck -- so they still reach a player's deck
+            while a DIFFERENT scenario is open. Back when decks hung off
+            the scene, sweeping from elsewhere silently missed them."
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+      (dispatch conn :player/create :npc)
+      (let [player-id (:db/id (first (root-players conn)))
+            scene-before (:db/id (current-scene conn))]
+        (dispatch conn :attack-deck/create player-id)
+        (let [deck-id (:db/id (:player/attack-deck (entity @conn player-id)))]
+
+          (testing "end-scenario"
+            (dispatch conn :attack-deck/add-bless deck-id 1)
+            (dispatch conn :attack-deck/add-cards deck-id :minus-1 1 true)
+            (is (= (count (:deck/cards (entity @conn deck-id))) 22))
+            (dispatch conn :scenes/create)
+            (is (not= (:db/id (current-scene conn)) scene-before)
+                "control: the sweep below is only meaningful if we really did
+                 move to a different scene")
+            (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+            (dispatch conn :attack-deck/end-scenario)
+            (is (= (count (:deck/cards (entity @conn deck-id))) 20)
+                "the never-drawn BLESS and the temporary -1 are swept from a
+                 deck belonging to nobody's current scene"))
+
+          (testing "reshuffle-flagged"
+            (force-attack-deck-top! conn (entity @conn deck-id) :null)
+            (dispatch conn :attack-deck/draw deck-id nil)
+            (is (:deck/needs-reshuffle? (entity @conn deck-id))
+                "sanity: drawing NULL flags the deck")
+            (let [scene-was (:db/id (current-scene conn))]
+              (dispatch conn :scenes/create)
+              (is (not= (:db/id (current-scene conn)) scene-was)
+                  "control: same -- a third scene, so the flagged deck belongs
+                   to no scene we are standing in"))
+            (set-enabled-elements! conn #{:gloomhaven/attack-deck})
+            (dispatch conn :attack-deck/reshuffle-flagged)
+            (is (not (:deck/needs-reshuffle? (entity @conn deck-id)))
+                "the flag clears even though the deck's player is not
+                 attached to whatever scene is open")))))))
 
 (deftest test-attack-deck-toggle-reduced-randomness
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -1808,6 +2124,222 @@
       (dispatch conn :attack-deck/draw deck-id nil)
       (is (:deck/needs-reshuffle? (entity @conn deck-id))
           "turned back on -- drawing 2x now flags the deck again"))))
+
+;; --- Character Profile (generic level/experience/gold/item tracking) ---
+(defn ^:private player-items [conn player-id]
+  (:player/items (entity @conn player-id)))
+
+(deftest test-player-set-level-experience-gold
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/set-level player-id 3)
+      (dispatch conn :player/set-experience player-id 45)
+      (dispatch conn :player/set-gold player-id 60)
+      (let [player (entity @conn player-id)]
+        (is (= (:player/level player) 3))
+        (is (= (:player/experience player) 45))
+        (is (= (:player/gold player) 60))))))
+
+(deftest test-player-set-level-host-only-when-guest-unassigned
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn my-uuid)
+      (dispatch conn :player/set-level player-id 3)
+      (is (nil? (:player/level (entity @conn player-id)))
+          "a non-host connected guest has no authority over an unassigned
+           player's character sheet -- the whole dispatch no-ops"))))
+
+(deftest test-player-set-level-self-controlled-accepted
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn my-uuid)
+      (set-controller! conn player-id [:user/uuid my-uuid])
+      (dispatch conn :player/set-level player-id 5)
+      (is (= (:player/level (entity @conn player-id)) 5)
+          "a connected player may level up the character for the seat
+           they themselves control, even though they aren't the host"))))
+
+(deftest test-player-set-level-rejected-for-other-connected-controller
+  (let [conn (ds/conn-from-db (initial-data true))
+        guest-uuid (random-uuid)]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (add-conn! conn guest-uuid)
+      (set-controller! conn player-id [:user/uuid guest-uuid])
+      (dispatch conn :player/set-level player-id 5)
+      (is (nil? (:player/level (entity @conn player-id)))
+          "the host has no authority over a connected, assigned
+           controller's own character sheet"))))
+
+(deftest test-player-add-item
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/add-item player-id "Boots of Striding" "+1 movement")
+      (dispatch conn :player/add-item player-id "Minor Potion" nil)
+      (let [items (player-items conn player-id)
+            boots (first (filter (comp #{"Boots of Striding"} :item/name) items))
+            potion (first (filter (comp #{"Minor Potion"} :item/name) items))]
+        (is (= (count items) 2))
+        (is (= (:item/description boots) "+1 movement"))
+        (is (nil? (:item/description potion))
+            "an absent/blank description is simply omitted, not stored as
+             an empty string")
+        (is (not (:item/equipped? boots)) "items start unequipped")))))
+
+(deftest test-player-toggle-item-equipped
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/add-item player-id "Boots of Striding" nil)
+      (let [item-id (:db/id (first (player-items conn player-id)))]
+        (dispatch conn :player/toggle-item-equipped item-id true)
+        (is (:item/equipped? (entity @conn item-id)))
+        (dispatch conn :player/toggle-item-equipped item-id false)
+        (is (false? (:item/equipped? (entity @conn item-id))))))))
+
+(deftest test-player-remove-item
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/add-item player-id "Boots of Striding" nil)
+      (dispatch conn :player/add-item player-id "Minor Potion" nil)
+      (let [item-id (:db/id (first (player-items conn player-id)))]
+        (dispatch conn :player/remove-item item-id)
+        (is (= (count (player-items conn player-id)) 1))
+        (is (nil? (:db/id (entity @conn item-id))))))))
+
+(deftest test-player-toggle-item-equipped-rejected-for-other-connected-controller
+  (let [conn (ds/conn-from-db (initial-data true))
+        guest-uuid (random-uuid)]
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/add-item player-id "Boots of Striding" nil)
+      (let [item-id (:db/id (first (player-items conn player-id)))]
+        (add-conn! conn guest-uuid)
+        (set-controller! conn player-id [:user/uuid guest-uuid])
+        (dispatch conn :player/toggle-item-equipped item-id true)
+        (is (not (:item/equipped? (entity @conn item-id)))
+            "the host has no authority over a connected, assigned
+             controller's own item")))))
+
+(deftest test-player-remove-item-self-controlled-accepted
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (dispatch conn :player/create :npc)
+    (let [player-id (:db/id (first (root-players conn)))]
+      (dispatch conn :player/add-item player-id "Boots of Striding" nil)
+      (add-conn! conn my-uuid)
+      (set-controller! conn player-id [:user/uuid my-uuid])
+      (let [item-id (:db/id (first (player-items conn player-id)))]
+        (dispatch conn :player/remove-item item-id)
+        (is (nil? (:db/id (entity @conn item-id)))
+            "a connected player may remove an item from the character
+             sheet they themselves control")))))
+
+(deftest test-player-import-character
+  (let [conn (ds/conn-from-db (initial-data true))
+        data {:name "Brute" :level 4 :experience 60 :gold 35
+              :items [{:name "Boots of Striding" :description "+1 movement" :equipped? true}
+                      {:name "Minor Potion"}]
+              :deck [{:rank "minus-1"} {:rank "plus-1" :effect "push" :amount 2}]}]
+    (dispatch conn :player/import-character data)
+    (let [player (first (root-players conn))]
+      (is (= (:player/name player) "Brute"))
+      (is (= (:player/level player) 4))
+      (is (= (:player/experience player) 60))
+      (is (= (:player/gold player) 35))
+      (is (= (count (:player/items player)) 2))
+      (let [boots (first (filter (comp #{"Boots of Striding"} :item/name) (:player/items player)))]
+        (is (:item/equipped? boots))
+        (is (= (:item/description boots) "+1 movement")))
+      (let [deck (:player/attack-deck player)]
+        (is (some? deck))
+        (is (= (count (:deck/cards deck)) 2))
+        (is (every? (comp #{:draw} :card/location) (:deck/cards deck)))
+        (let [effect-card (first (filter (comp #{:push} :card/effect) (:deck/cards deck)))]
+          (is (some? effect-card))
+          (is (= (:card/effect-amount effect-card) 2)))))))
+
+(deftest test-player-import-character-malformed-input-degrades-gracefully
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/import-character {})
+    (let [player (first (root-players conn))]
+      (is (= (:player/name player) "Imported Character")
+          "a missing name falls back to a sensible default")
+      (is (nil? (:player/level player)))
+      (is (empty? (:player/items player)))
+      (is (nil? (:player/attack-deck player))
+          "no deck data -- no deck is created at all"))))
+
+(deftest test-player-import-character-wrong-shapes-never-throw
+  (testing "fields PRESENT but the wrong shape -- a truncated or
+            hand-edited .character.edn, as opposed to an empty one.
+            Every case must import to a poorer character, never blow up
+            the transaction and lose the whole roster."
+    (doseq [[label blob]
+            [["card entry with no rank"      {:deck [{}]}]
+             ["numeric rank"                 {:deck [{:rank 42}]}]
+             ["unrecognised rank"            {:deck [{:rank "totally-bogus"}]}]
+             ["deck is not a collection"     {:deck "not-a-list"}]
+             ["items is not a collection"    {:items "not-a-list"}]
+             ["item is not a map"            {:items [42]}]
+             ["item with nil name"           {:items [{:name nil}]}]
+             ["non-string description"       {:items [{:name "Rope" :description 42}]}]
+             ["non-string name"              {:name 42}]
+             ["level as a string"            {:level "four"}]]]
+      (let [conn (ds/conn-from-db (initial-data true))]
+        (is (some? (try (dispatch conn :player/import-character blob)
+                        (first (root-players conn))
+                        (catch :default e
+                          (is false (str label " threw: " (ex-message e)))
+                          nil)))
+            (str label " still produces a player"))))))
+
+(deftest test-player-import-character-sanitizes-card-and-item-data
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :player/import-character
+              {:name "  Spellweaver  "
+               :deck [{:rank "plus-1"}
+                      {:rank "totally-bogus"}
+                      {:rank "minus-1" :effect "not-an-effect"}
+                      {:rank "plus-0" :effect "push" :amount "two"}
+                      {:rank "plus-2" :effect "stun" :amount 9}]
+               :items [{:name "Cloak"}
+                       {:name ""}
+                       {:name "Boots" :description 42}
+                       42]})
+    (let [player (first (root-players conn))
+          cards (:deck/cards (:player/attack-deck player))
+          by-rank (into {} (map (juxt :card/rank identity)) cards)]
+      (is (= (:player/name player) "Spellweaver")
+          "the name is trimmed, not stored with its padding")
+      (is (= (count cards) 4)
+          "the unrecognised rank is dropped; the other four survive")
+      (is (nil? (:totally-bogus by-rank))
+          "an unknown rank never reaches :card/rank, where value returns nil for it")
+      (is (nil? (:card/effect (:minus-1 by-rank)))
+          "an unrecognised effect is dropped but its card is kept")
+      (is (nil? (:card/effect-amount (:plus-0 by-rank)))
+          "a non-numeric amount is dropped rather than stored as a string")
+      (is (= (:card/effect (:plus-0 by-rank)) :push)
+          "...while the effect itself still applies")
+      (is (nil? (:card/effect-amount (:plus-2 by-rank)))
+          "an amount on a flag-only effect is ignored, as add-effect-cards does")
+      (is (= (count (:player/items player)) 2)
+          "the blank-named item and the non-map are both dropped")
+      (is (= (set (map :item/name (:player/items player))) #{"Cloak" "Boots"}))
+      (let [boots (first (filter (comp #{"Boots"} :item/name) (:player/items player)))]
+        (is (nil? (:item/description boots))
+            "a non-string description is dropped, not rendered into the panel")))))
 
 ;; --- Prop variables, copies, and physical piles ---
 (defn ^:private scene-props [conn]
@@ -1851,6 +2383,61 @@
   (dispatch conn :props-images/create-many
             [[{:hash hash :name hash :size 1 :width 1 :height 1}
               {:hash hash :name hash :size 1 :width 1 :height 1}]]))
+
+(deftest test-default-cell-px-baseline
+  (testing "a campaign-wide pixel-per-cell baseline, so a host whose whole
+            asset set shares one density doesn't have to calibrate each
+            image by hand. grid-size is 70, so a 140px-per-cell baseline
+            should halve everything placed after it."
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "tile")
+
+      (testing "no baseline set -- images land at native size, as before"
+        (dispatch conn :props/create-many (Vec2. 0 0) "tile" 1)
+        (is (= (:object/scale (first (scene-props conn))) 1)))
+
+      (dispatch conn :root/change-default-cell-px 140)
+      (testing "with a baseline, a newly placed prop drops pre-scaled"
+        (dispatch conn :props/create-many (Vec2. 0 0) "tile" 1)
+        (is (= (:object/scale (last (scene-props conn))) 0.5)
+            "70 / 140"))
+
+      (testing "already-placed props are untouched -- a default for new
+                placements, not a retroactive rescale"
+        (is (= (:object/scale (first (scene-props conn))) 1)))
+
+      (testing "clearing it reverts to native size"
+        (dispatch conn :root/change-default-cell-px 0)
+        (is (nil? (:root/default-cell-px (entity @conn [:db/ident :root]))))
+        (dispatch conn :props/create-many (Vec2. 0 0) "tile" 1)
+        (is (= (:object/scale (last (scene-props conn))) 1))))))
+
+(deftest test-default-cell-px-is-overridden-by-per-image-calibration
+  (testing "the baseline is the fallback; an image calibrated with
+            'Save scale as default' keeps its own density"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "tile")
+      (dispatch conn :root/change-default-cell-px 140)
+      ;; calibrate this specific image to 35px per cell by placing a copy
+      ;; at scale 2 and saving that as its default
+      (dispatch conn :props/create-many (Vec2. 0 0) "tile" 1)
+      (let [id (:db/id (first (scene-props conn)))]
+        (transact! conn [{:db/id id :object/scale 2}])
+        (dispatch conn :image/set-cell-scale id)
+        (is (= (:image/cell-px (entity @conn [:image/hash "tile"])) 35))
+        (dispatch conn :props/create-many (Vec2. 0 0) "tile" 1)
+        (is (= (:object/scale (last (scene-props conn))) 2)
+            "70 / 35 from the image's own calibration, not 70 / 140 from
+             the baseline")))))
+
+(deftest test-default-cell-px-host-only
+  (let [conn (ds/conn-from-db (initial-data false))
+        my-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid my-uuid}])
+    (add-conn! conn my-uuid)
+    (dispatch conn :root/change-default-cell-px 140)
+    (is (nil? (:root/default-cell-px (entity @conn [:db/ident :root])))
+        "campaign-wide setup, same concern the host-only Scene panel covers")))
 
 (deftest test-props-create-many-stack-layout
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -2022,7 +2609,7 @@
       (dispatch conn :memory/start ids)
       (let [minigame-id (minigame-viewing-id conn)
             second-player-id (second (memory-players (entity @conn minigame-id)))]
-        (dispatch conn :player/set-controller second-player-id [:user/uuid guest-uuid])
+        (set-controller! conn second-player-id [:user/uuid guest-uuid])
         (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
           (dispatch conn :memory/flip card-id)
           (is (:object/hidden (entity @conn card-id))
@@ -2195,7 +2782,7 @@
       (dispatch conn :memory/start ids)
       (let [minigame-id (minigame-viewing-id conn)
             [first-id second-id] (memory-players (entity @conn minigame-id))]
-        (dispatch conn :player/set-controller second-id [:user/uuid guest-uuid])
+        (set-controller! conn second-id [:user/uuid guest-uuid])
         (dispatch conn :player/set-active first-id false)
         (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
           (dispatch conn :memory/flip card-id)
@@ -2609,6 +3196,40 @@
               "index 1 is benched -- the stored index skips straight to
                index 2 instead of landing on a benched seat"))))))
 
+(deftest test-go-fish-benched-seat-at-the-stored-index-does-not-deadlock
+  (testing "the case the test above does NOT cover: the benched seat is
+            the one :minigame/turn-index itself points at. The turn player
+            resolves forward past them while the stored index stays put,
+            so anything computed from the raw index is off by a seat --
+            and since the computed 'next seat' then came out as the asker
+            themselves, no target was legal at all. :go-fish/ask is the
+            only writer of the index, so the table stayed locked forever."
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (set-enabled-elements! conn #{:go-fish/game :go-fish/book-scoring})
+      (dispatch conn :player/create :human)
+      (dispatch conn :player/create :human)
+      (dispatch conn :player/create :human)
+      (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+        (dispatch conn :go-fish/start ids)
+        (let [minigame-id (minigame-viewing-id conn)]
+          (clear-cards-to-draw! conn (go-fish-deck (entity @conn minigame-id)))
+          (let [[first-id second-id third-id] (go-fish-players (entity @conn minigame-id))
+                twos (filter (comp #{:two} :card/rank)
+                             (:deck/cards (go-fish-deck (entity @conn minigame-id))))]
+            ;; bench the seat the STORED index points at
+            (dispatch conn :player/set-active first-id false)
+            (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+                "sanity: the stored index still points at the benched seat")
+            ;; second-id is now the resolved turn player; third-id is
+            ;; genuinely the seat after them
+            (move-cards! conn second-id [(first twos)])
+            (move-cards! conn third-id (rest twos))
+            (dispatch conn :go-fish/ask minigame-id second-id third-id :two)
+            (is (= (count (go-fish-hand (entity @conn minigame-id) second-id)) (count twos))
+                "asking the genuinely-next seat is legal and the matching
+                 twos transfer -- previously this ask was rejected, with no
+                 legal target available to anyone")))))))
+
 ;; --- Old Maid (example game) ---
 (defn ^:private scene-old-maid [conn]
   (:camera/scene (:user/camera (user conn))))
@@ -2886,10 +3507,17 @@
       ;; p1's ROSTER controller is roster-guest, but this ONE session
       ;; overrides p1's SEAT to seat-guest -- the local viewer here IS
       ;; seat-guest, so the per-session override must win.
-      (dispatch conn :player/set-controller p1 [:user/uuid roster-guest])
+      (set-controller! conn p1 [:user/uuid roster-guest])
       (dispatch conn :old-maid/start [p1 p2])
       (let [minigame-id (minigame-viewing-id conn)]
-        (dispatch conn :minigame/set-controller minigame-id p1 seat-guest)
+        ;; Set the seat override directly rather than through
+        ;; :minigame/set-controller: that event is host-only (see
+        ;; test-minigame-set-controller-host-only) and the viewer here is
+        ;; deliberately a guest. What this test is about is which
+        ;; controller WINS once both are set, not who may set them.
+        (let [seat (first (filter (comp #{p1} :db/id :seat/player)
+                                  (:minigame/seats (entity @conn minigame-id))))]
+          (transact! conn [{:db/id (:db/id seat) :seat/controller [:user/uuid seat-guest]}]))
         (clear-old-maid-cards-to-draw! conn (entity @conn minigame-id))
         (let [[a b] (two-different-ranks-one-card-each (entity @conn minigame-id))]
           (move-cards! conn p1 [a])

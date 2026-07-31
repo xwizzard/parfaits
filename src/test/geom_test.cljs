@@ -168,3 +168,40 @@
              ((geom/iso-inverse-matrix :iso-square-vertical) (vec/div v 2))))
       (is (= (geom/screen->scene-vec v 2 :iso-hex-flat-vertical)
              ((geom/iso-inverse-matrix :iso-hex-flat-vertical) (vec/div v 2)))))))
+
+(defn ^:private y-range
+  "The [min max] y of a quad's corners."
+  [pts]
+  (let [ys (map #(.-y %) pts)]
+    [(apply min ys) (apply max ys)]))
+
+(deftest test-line-points-band-is-centred-on-the-line
+  (testing "line-points returns a quad `width` to either side of the
+            segment. The horizontal branch is a separate special case, so
+            it needs pinning independently -- it used to add `ay` into the
+            two far corners, which only cancels at ay = 0 (exactly what
+            the one masking call site passes, hiding it there)."
+    (let [w 35]
+      (testing "horizontal at y = 0 -- the case that always worked"
+        (is (= (y-range (geom/line-points (Segment. (Vec2. 0 0) (Vec2. 200 0)) w))
+               [-35 35])))
+
+      (testing "horizontal away from the origin"
+        (is (= (y-range (geom/line-points (Segment. (Vec2. 0 100) (Vec2. 200 100)) w))
+               [65 135])
+            "a 70-wide band centred on y=100, not a 30-wide band below it")
+        (is (= (y-range (geom/line-points (Segment. (Vec2. 0 -70) (Vec2. 200 -70)) w))
+               [-105 -35])
+            "and correct for negative y too"))
+
+      (testing "the horizontal branch agrees with the general branch in the limit"
+        (let [exact (y-range (geom/line-points (Segment. (Vec2. 0 100) (Vec2. 200 100)) w))
+              near  (y-range (geom/line-points (Segment. (Vec2. 0 100) (Vec2. 200 100.0001)) w))]
+          (is (< (abs (- (first exact) (first near))) 0.01))
+          (is (< (abs (- (second exact) (second near))) 0.01))))
+
+      (testing "a horizontal line lies inside its own bounding rect"
+        ;; this is what selection, viewport culling and paste bounds rely on
+        (let [seg (Segment. (Vec2. 0 100) (Vec2. 200 100))
+              rect (geom/bounding-rect (geom/line-points seg w))]
+          (is (<= (.-y (.-a rect)) 100 (.-y (.-b rect)))))))))
