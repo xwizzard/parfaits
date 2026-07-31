@@ -2454,21 +2454,16 @@
   ^{:doc "Removes the given mini-game session entirely -- its seats and
           its owned deck (and every card in it), if it has one, all
           cascade via :db/isComponent, the same one-retraction cleanup
-          :deck/remove already relies on. A game with no deck (Memory)
-          instead tracks its cards as borrowed, NON-component refs in
-          :minigame/props (mirroring :scene/initiative's own 'refs to
-          entities really owned elsewhere' shape) -- since retracting
-          the session can't cascade to those for free, they're
-          explicitly retracted here too, so this one generic event
-          stays every game's teardown regardless of which shape its
-          state takes. Any participant, not just the host, may end
+          :deck/remove already relies on. Memory's cards cascade the
+          same way via :minigame/cards -- they used to be borrowed
+          scene props that had to be retracted by hand here, which is
+          exactly the coupling that let main-game actions reach into a
+          running table. Any participant, not just the host, may end
           their own table -- mirrors how anyone may start one (see
           :old-maid/start)."}
   event-tx-fn :minigame/remove
-  [data _ minigame-id]
-  (into [[:db/retractEntity minigame-id]]
-        (map (fn [prop] [:db/retractEntity (:db/id prop)]))
-        (:minigame/props (ds/entity data minigame-id))))
+  [_ _ minigame-id]
+  [[:db/retractEntity minigame-id]])
 
 (defmethod
   ^{:doc "Sets which of the scene's mini-game sessions the local user is
@@ -3502,16 +3497,22 @@
 ;; therefore UNCHANGED by this port.
 
 (defn ^:private memory-cards
-  "`minigame`'s own Memory cards -- i.e. its :minigame/props."
+  "`minigame`'s own Memory cards -- :minigame/cards, a :db/isComponent
+   collection the session owns outright. Deliberately NOT scene props:
+   the cards are drawn as part of the session's own :minigame/table
+   object, so nothing in the main game can select, drag, delete or sweep
+   them, and :minigame/remove cascades to them for free."
   [minigame]
-  (:minigame/props minigame))
+  (:minigame/cards minigame))
 
 (defn ^:private memory-face-up
   "The subset of `minigame`'s memory-cards that are currently revealed
    -- 0, 1, or 2 at any time (:memory/flip refuses a 3rd until
-   :memory/resolve clears the board back to 0 or 2->0)."
+   :memory/resolve clears the board back to 0 or 2->0). Face-up is the
+   card's own :memory/face-up? flag rather than the generic
+   :object/hidden, since these are no longer scene objects at all."
   [minigame]
-  (remove :object/hidden (memory-cards minigame)))
+  (filter :memory/face-up? (memory-cards minigame)))
 
 (defn ^:private memory-player-active?
   "True if roster player-id refers to a still-existing, still-active
@@ -3537,113 +3538,177 @@
         (if corrected
           (ds/entity data (nth players corrected)))))))
 
-(defn ^:private memory-authorized-for-turn?
-  "True if the local viewer speaks for `minigame`'s current turn player
-   -- the same player/authority? primitive :objects/toggle-hidden's
-   authorized-to-hide? already uses for object ownership, just pointed
-   at 'whose turn is it' instead of 'who owns this object', fed the
-   current turn seat's effective controller (see minigame-controller-
-   uuid). No game in progress (or an unassigned turn player) falls back
-   to host-only, the same default authority? always uses."
-  [data minigame]
+(defn ^:private memory-authorized-for-player?
+  "True if the local viewer speaks for seated roster player
+   `turn-player-id` at `minigame` -- the same player/authority? primitive
+   :objects/toggle-hidden's authorized-to-hide? already uses for object
+   ownership, just pointed at a turn seat instead of an object owner,
+   fed that seat's effective controller (see minigame-controller-uuid).
+   An unseated/nil player falls back to host-only, the same default
+   authority? always uses.
+
+   Takes the player explicitly rather than reading the current turn off
+   `minigame`, because a flip that auto-resolves the previous turn has
+   to be judged against whoever holds the turn AFTER that resolution --
+   see :memory/flip."
+  [data minigame turn-player-id]
   (let [user (ds/entity data [:db/ident :user])
         connected (into #{} (map :user/uuid) (:session/conns (ds/entity data [:db/ident :session])))
-        turn-player-id (:db/id (memory-turn-player data minigame))
         seat (some #(if (= (:db/id (:seat/player %)) turn-player-id) %) (:minigame/seats minigame))]
     (player/authority? (:user/uuid user) (:user/host user) connected
                         (if seat (minigame-controller-uuid seat)))))
 
+(defn ^:private memory-authorized-for-turn?
+  "True if the local viewer speaks for `minigame`'s CURRENT turn player."
+  [data minigame]
+  (memory-authorized-for-player? data minigame (:db/id (memory-turn-player data minigame))))
+
+(defn ^:private memory-settle
+  "The transaction settling `minigame`'s outstanding turn, together with
+   the id of the player whose turn it is once that settlement lands. nil
+   when there is nothing to settle (fewer than two cards face-up).
+
+   A match retracts both cards and scores the turn player, who plays
+   again. A mismatch turns both back face-down and passes to the next
+   active seat.
+
+   Split out from :memory/resolve because settling is reachable two ways
+   now: explicitly, via that event, and implicitly, when a player flips
+   their next card while a finished turn is still lying on the table."
+  [data minigame]
+  (let [face-up (memory-face-up minigame)]
+    (if (= (count face-up) 2)
+      (let [[a b] face-up
+            turn-id (:db/id (memory-turn-player data minigame))]
+        (if (memory/pair? a b)
+          (let [scores (or (:minigame/scores minigame) {})]
+            ;; :minigame/cards is a component collection, so retracting
+            ;; the card is the whole cleanup -- no scene-props bookkeeping.
+            {:tx [[:db/retractEntity (:db/id a)]
+                  [:db/retractEntity (:db/id b)]
+                  {:db/id (:db/id minigame)
+                   :minigame/scores (update scores turn-id (fnil inc 0))}]
+             :turn-player-id turn-id})
+          (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
+                active? (partial memory-player-active? data)
+                ;; Advance from the seat that actually just played, not
+                ;; from the raw stored index -- the same reason
+                ;; :old-maid/draw bases its step on `drawer-index`. When
+                ;; the stored index points at a since-benched seat, the
+                ;; turn player is resolved forward past them but the
+                ;; stored index is not, so stepping from the raw value
+                ;; hands the player who just missed a second turn.
+                turn-idx (first (keep-indexed (fn [i id] (if (= id turn-id) i)) players))
+                next-idx (or (turn-order/next-turn-index players active? turn-idx) turn-idx)]
+            {:tx [[:db/retract (:db/id a) :memory/face-up?]
+                  [:db/retract (:db/id b) :memory/face-up?]
+                  {:db/id (:db/id minigame) :minigame/turn-index next-idx}]
+             :turn-player-id (if (and next-idx (< next-idx (count players)))
+                               (nth players next-idx))}))))))
+
 (defmethod
-  ^{:doc "Starts a new Memory session seated by exactly
-          `participant-ids` -- rejected if fewer than 2 are given, or
-          if :memory/game isn't actually enabled on the scene's own
-          game-type (checked here, not just gated in the UI, since any
-          connected participant may dispatch this). Deals 22 matching
-          pairs (44 cards total, see ogres.app.memory/deal) as face-
-          down, shared props in a grid at the current camera point,
-          tracked as this session's own :minigame/props (see minigame-
-          create-tx) rather than added to :scene/decks -- Memory has no
-          deck at all. Host-driven like every other setup action in
-          this app used to be -- now anyone may start a table, same as
-          :old-maid/start."}
-  event-tx-fn :memory/start
-  [data _ participant-ids]
+  ^{:doc "Places an empty Memory table on the current scene: a
+          :minigame/table scene object at the camera point, holding no
+          cards and seating nobody. Rejected if :memory/game isn't
+          enabled on the scene's own game-type (checked here, not just
+          gated in the UI, since any connected participant may dispatch
+          this).
+
+          Placing and starting are two events on purpose. A table's
+          dimensions lock as soon as cards are dealt onto it (see
+          scale-locked?), so this is the state in which it can be
+          dragged and resized to fit the scene -- position and size are
+          settled first, then :memory/start deals into whatever frame
+          was arranged.
+
+          The felt is drawn at its full-deck footprint from the moment
+          it is placed (memory/table-footprint), so what gets sized here
+          is exactly what the deal will fill."}
+  event-tx-fn :memory/place-table
+  [data _]
   (let [user (ds/entity data [:db/ident :user])
         {point :camera/point scene :camera/scene} (:user/camera user)
         scene-id (:db/id scene)
-        enabled (:game-type/enabled-elements (:scene/game-type scene))
-        participant-ids (vec (distinct participant-ids))]
-    (if (and (contains? enabled :memory/game) (>= (count participant-ids) 2))
-      (let [;; Card faces are a fixed 200x280 native size (see
-            ;; memory/value-image-hash/provider.state's card-back-svg)
-            ;; with no :image/cell-px calibration to auto-shrink them
-            ;; (unlike a normal uploaded prop) -- :card-scale/:card-
-            ;; spacing explicitly size and space them so the dealt grid
-            ;; doesn't overlap itself (grid-size, 70, is a token-cell
-            ;; unit and far too small for a 200x280 image at scale 1).
-            card-scale 0.4
-            card-spacing 120
-            cards (memory/deal 22 8 card-spacing)
-            values (into #{} (map :memory/value) cards)
-            ;; Card ids -1..-44 (indexed's default offset/step) -- the
-            ;; session/seat ids below start past this whole range, the
-            ;; same "reserve a block, then continue past it" idiom
-            ;; deck-create-tx's own card-ids-then-deck-id already uses.
-            indexed-cards (vec (sequence (indexed) cards))
-            minigame-id (- (inc (count indexed-cards)))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))]
+    (if (contains? enabled :memory/game)
+      (let [minigame-id -1
             label (minigame-label (:scene/minigames scene) :memory "Memory")
-            shell-tx (minigame-create-tx minigame-id :memory label nil participant-ids)]
-        ;; concat throughout, deliberately NOT (into (into ...) ...) --
-        ;; `into` conj's onto the front of anything that isn't already a
-        ;; vector, and concat's own result never is one, so nesting into
-        ;; here would silently reorder the image-upsert maps and card
-        ;; :db/add vectors relative to each other. Order is load-bearing
-        ;; below (images before the cards that reference them), so this
-        ;; whole tx-data is assembled with concat, which always preserves
-        ;; append order regardless of each piece's own collection type.
+            [w h] (memory/table-footprint)
+            scale memory/default-scale
+            ;; A table scales about its middle (geom/object-transform),
+            ;; so a shrunk one sits inset from its stored origin by half
+            ;; the shrink. Offset the origin by that much and the table
+            ;; lands where the camera is actually looking.
+            inset (vec/Vec2. (* (/ w 2) (- 1 scale)) (* (/ h 2) (- 1 scale)))]
         (concat
-         shell-tx
+         (minigame-create-tx minigame-id :memory label nil [])
          (minigame-attach-tx scene-id minigame-id)
-         [{:db/id minigame-id :minigame/props (mapv first indexed-cards)}]
-         ;; Each of the 22 distinct value-face images must be asserted
-         ;; as its own real entity (identified by its own :image/hash)
-         ;; BEFORE any card can reference it via a [:image/hash ...]
-         ;; lookup ref -- unlike a map-form entity's own :db/id, a
-         ;; lookup ref used as the VALUE of a ref-typed attribute
-         ;; (:prop/image below) does NOT auto-vivify a new entity if
-         ;; nothing has ever asserted that identity; it requires the
-         ;; referenced entity to already exist. A fresh, ID-LESS map
-         ;; (no explicit :db/id) is what actually creates-or-merges by
-         ;; unique identity in DataScript -- using a lookup ref itself
-         ;; AS :db/id only resolves against an entity that already
-         ;; exists, the same "must pre-exist" requirement as using it
-         ;; in a ref attribute's value position; this matches
-         ;; provider/state.cljs's seed-props-images/seed-game-types,
-         ;; which likewise never assert an explicit :db/id for their
-         ;; upserts. The shared card-back (:prop/image-alt) doesn't
-         ;; need this -- it's already a real entity via that same
-         ;; seed, at boot.
-         (map
-          (fn [value]
-            {:image/hash (memory/value-image-hash value)
-             :image/name (str "Memory " value)
-             :image/size 0
-             :image/width 200
-             :image/height 280})
-          values)
-         (mapcat
-          (fn [[id card]]
-            (let [value (:memory/value card)]
-              [[:db/add id :object/type :prop/prop]
-               [:db/add id :object/point (vec/add point (:point card))]
-               [:db/add id :object/scale card-scale]
-               [:db/add id :prop/image [:image/hash (memory/value-image-hash value)]]
-               [:db/add id :prop/image-alt [:image/hash state/card-back-hash]]
-               [:db/add id :object/hidden true]
-               [:db/add id :object/shared? true]
-               [:db/add id :object/variables {:memory/value value}]
-               [:db/add scene-id :scene/props id]]))
-          indexed-cards)))
+         [{:db/id minigame-id
+           :object/type :minigame/table
+           :object/point (vec/sub point inset)
+           :object/scale scale}]))
+      [])))
+
+(defmethod
+  ^{:doc "Deals a full standard 52-card deck (see ogres.app.memory/deal)
+          onto the already-placed table `table-id`, seating exactly
+          `participant-ids` -- rejected if fewer than 2 are given, if
+          :memory/game isn't enabled on the scene's own game-type, if
+          `table-id` isn't an empty Memory table, or if it already holds
+          cards (dealing twice onto one table would strand the first
+          deal's entities).
+
+          Pairs match on rank AND colour, which splits one deck into
+          exactly 26 pairs with nothing left over.
+
+          The cards are not scene props and hold no coordinates: each
+          carries a rank, a suit and a grid index, and the table's
+          :object/point and :object/scale place them (memory/card-
+          offset). That is what lets the whole board drag and scale as
+          one unit, and what keeps every prop-wide action in the app
+          away from a running game.
+
+          Also switches the scene to :scene/neutral-authority? so the
+          host gets no automatic X-ray over face-down cards -- an
+          impartial-dealer table, see authorized-to-hide?."}
+  event-tx-fn :memory/start
+  [data _ table-id participant-ids]
+  (let [user (ds/entity data [:db/ident :user])
+        scene (:camera/scene (:user/camera user))
+        enabled (:game-type/enabled-elements (:scene/game-type scene))
+        table (if (some? table-id) (ds/entity data table-id))
+        participant-ids (vec (distinct participant-ids))]
+    (if (and (contains? enabled :memory/game)
+             (>= (count participant-ids) 2)
+             (= (:object/type table) :minigame/table)
+             (= (:minigame/kind table) :memory)
+             (empty? (:minigame/cards table)))
+      (let [cards (memory/deal)
+            ;; Card ids -1..-52, then the seats past that whole block --
+            ;; the same "reserve a block, then continue past it" idiom
+            ;; deck-create-tx's card-ids-then-deck-id uses.
+            card-ids (mapv (comp - inc) (range (count cards)))
+            seat-base (- (inc (count cards)))
+            seats (into []
+                        (map-indexed
+                         (fn [i player-id]
+                           {:db/id (- seat-base i)
+                            :seat/player player-id
+                            :seat/order i}))
+                        participant-ids)]
+        (concat
+         seats
+         [{:db/id table-id
+           :minigame/seats (mapv :db/id seats)
+           :minigame/turn-index 0
+           :minigame/cards card-ids}
+          [:db.fn/call assoc-scene :scene/neutral-authority? true]]
+         ;; No image entities at all: a card face is drawn inline from
+         ;; its rank and suit, so a table pulls in nothing from the main
+         ;; game's image gallery.
+         (map (fn [id index card]
+                (assoc card :db/id id :memory/index index))
+              card-ids (range) cards)))
       [])))
 
 (defmethod
@@ -3681,14 +3746,37 @@
   event-tx-fn :memory/flip
   [data _ card-id]
   (let [card (ds/entity data card-id)
-        minigame (first (:minigame/_props card))]
+        ;; :minigame/cards is :db/isComponent, so this reverse ref
+        ;; resolves to the single owning session directly.
+        minigame (:minigame/_cards card)
+        face-up (if minigame (memory-face-up minigame))
+        ;; Turns settle themselves: a finished turn still lying on the
+        ;; table is cleared by this very flip rather than by a separate
+        ;; Resolve click, exactly as a player would sweep up the last
+        ;; two cards as they reach for the next one.
+        settle (if (= (count face-up) 2) (memory-settle data minigame))
+        ;; Which means authority is judged against whoever holds the
+        ;; turn AFTER that settlement -- on a mismatch that is the next
+        ;; player, not the one who just missed. Checking the pre-settle
+        ;; turn instead would let the missing player keep flipping and
+        ;; lock everyone else out.
+        turn-player-id (if settle
+                         (:turn-player-id settle)
+                         (:db/id (memory-turn-player data minigame)))]
+    ;; The :user/dragging retract is unconditional and predates the
+    ;; rebuild: a click on a card arrives through dnd-kit's own
+    ;; zero-delta drag, so the drag has to be released whether or not
+    ;; the flip itself is allowed.
     (into [[:db/retract [:db/ident :user] :user/dragging]]
           (if (and minigame
-                   (memory-authorized-for-turn? data minigame)
-                   (:memory/value (:object/variables card))
-                   (:object/hidden card)
-                   (< (count (memory-face-up minigame)) 2))
-            [[:db/add card-id :object/hidden false]]))))
+                   (memory-authorized-for-player? data minigame turn-player-id)
+                   (some? (:card/rank card))
+                   (not (:memory/face-up? card))
+                   (<= (count face-up) 2))
+            ;; Settling only happens alongside a flip that is actually
+            ;; going through, so clicking an already face-up card (or
+            ;; anything else refused above) leaves the table untouched.
+            (concat (:tx settle) [[:db/add card-id :memory/face-up? true]])))))
 
 (defmethod
   ^{:doc "Resolves `minigame-id`'s current turn once exactly 2 of its
@@ -3699,35 +3787,19 @@
           again, same as a real game of Memory). A mismatch flips both
           back face-down and advances :minigame/turn-index to the next
           player, wrapping around (ogres.app.turn-order/next-turn-
-          index)."}
+          index).
+
+          Turns normally settle themselves the moment somebody flips
+          their next card (see :memory/flip and memory-settle), so this
+          is the explicit path: useful to end a turn without starting
+          the next one, and REQUIRED for the game's final pair, where
+          there is no next card left to click and so nothing to trigger
+          an automatic settlement."}
   event-tx-fn :memory/resolve
   [data _ minigame-id]
-  (let [minigame (ds/entity data minigame-id)
-        face-up (if minigame (memory-face-up minigame))]
-    (if (and minigame (memory-authorized-for-turn? data minigame) (= (count face-up) 2))
-      (let [[a b] face-up
-            turn-id (:db/id (memory-turn-player data minigame))
-            match? (= (:memory/value (:object/variables a))
-                      (:memory/value (:object/variables b)))]
-        (if match?
-          (let [scores (or (:minigame/scores minigame) {})]
-            [[:db/retractEntity (:db/id a)]
-             [:db/retractEntity (:db/id b)]
-             {:db/id minigame-id :minigame/scores (update scores turn-id (fnil inc 0))}])
-          (let [players (mapv (comp :db/id :seat/player) (minigame-seats minigame))
-                active? (partial memory-player-active? data)
-                ;; Advance from the seat that actually just played, not
-                ;; from the raw stored index -- the same reason
-                ;; :old-maid/draw bases its step on `drawer-index`. When
-                ;; the stored index points at a since-benched seat, the
-                ;; turn player is resolved forward past them but the
-                ;; stored index is not, so stepping from the raw value
-                ;; hands the player who just missed a second turn.
-                turn-idx (first (keep-indexed (fn [i id] (if (= id turn-id) i)) players))
-                next-idx (or (turn-order/next-turn-index players active? turn-idx) turn-idx)]
-            [[:db/add (:db/id a) :object/hidden true]
-             [:db/add (:db/id b) :object/hidden true]
-             {:db/id minigame-id :minigame/turn-index next-idx}])))
+  (let [minigame (ds/entity data minigame-id)]
+    (if (and minigame (memory-authorized-for-turn? data minigame))
+      (or (:tx (memory-settle data minigame)) [])
       [])))
 
 ;; --- Go Fish (example game) ---

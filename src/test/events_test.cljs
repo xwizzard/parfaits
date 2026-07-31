@@ -9,6 +9,7 @@
             [ogres.app.events :refer [event-tx-fn]]
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
+            [ogres.app.memory :as memory]
             [ogres.app.old-maid :as old-maid]
             [ogres.app.props :as props]
             [ogres.app.provider.state :refer [initial-data]]
@@ -2553,8 +2554,39 @@
 (defn ^:private memory-session [conn]
   (first (memory-sessions conn)))
 
+(defn ^:private start-memory!
+  "Places a table and deals onto it, returning the table's id.
+
+   Placing and dealing are two separate events -- a table is positioned
+   and sized while empty, and locks its dimensions once cards land on it
+   -- so every test that just wants a game already running goes through
+   this. :memory/place-table points :user/minigame-viewing at the table
+   it placed, which is what makes the id unambiguous even when a scene
+   already has other tables on it."
+  [conn ids]
+  (dispatch conn :memory/place-table)
+  (let [table-id (minigame-viewing-id conn)]
+    (dispatch conn :memory/start table-id ids)
+    table-id))
+
 (defn ^:private memory-cards [minigame]
-  (:minigame/props minigame))
+  (:minigame/cards minigame))
+
+(defn ^:private memory-matching-pair
+  "Two cards from `minigame` that really do pair -- same rank, same
+   colour, different suit (ogres.app.memory/pair?). The deck is shuffled
+   every deal, so tests find a pair rather than assuming positions."
+  [minigame]
+  (let [cards (vec (memory-cards minigame))]
+    (first (for [a cards b cards :when (memory/pair? a b)] [a b]))))
+
+(defn ^:private memory-mismatched-pair
+  "Two distinct cards from `minigame` that do NOT pair."
+  [minigame]
+  (let [cards (vec (memory-cards minigame))]
+    (first (for [a cards b cards
+                 :when (and (not= (:db/id a) (:db/id b)) (not (memory/pair? a b)))]
+             [a b]))))
 
 (defn ^:private memory-players
   [minigame]
@@ -2567,7 +2599,7 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame (memory-session conn)
             cards (memory-cards minigame)
             players (memory-players minigame)]
@@ -2580,22 +2612,111 @@
         (is (nil? (:minigame/scores minigame)))
         (is (empty? (:scene/decks (scene-memory conn)))
             "Memory has no deck at all -- nothing lands in :scene/decks")
-        (is (= (count cards) 44))
-        (is (every? :object/hidden cards) "every card deals face-down")
-        (is (every? :object/shared? cards) "every card is a public toggle")
-        (is (= (frequencies (map (comp :memory/value :object/variables) cards))
-               (into {} (map (fn [v] [v 2])) (range 22)))
-            "22 values, exactly 2 copies each")))))
+        (is (= (count cards) 52) "a full standard deck")
+        (is (every? (complement :memory/face-up?) cards) "every card deals face-down")
+        (is (= (into #{} (map :card/suit) cards) (set memory/suits))
+            "all four suits")
+        (is (= (into #{} (map :card/rank) cards) (set memory/ranks))
+            "all thirteen ranks")
+        (is (= (count (into #{} (map (juxt :card/rank :card/suit)) cards)) 52)
+            "each exact card dealt once -- one deck, no duplicates")
+        (is (= (set (map :memory/index cards)) (set (range 52)))
+            "each card holds its grid slot; position is derived from the
+             table, which is what makes the board one movable object")
+        (is (= (:object/type minigame) :minigame/table)
+            "the session IS the scene object")
+        (is (= (:object/scale minigame) memory/default-scale))
+        (is (empty? (:scene/props (scene-memory conn)))
+            "no cards leak into :scene/props -- nothing in the main game
+             can select, drag, delete or sweep a running table")))))
+
+(deftest test-memory-place-table
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :memory/place-table)
+    (let [table (memory-session conn)]
+      (is (some? table) "a table exists before anyone is seated")
+      (is (= (:object/type table) :minigame/table)
+          "the session IS the scene object, placed empty")
+      (is (= (:object/scale table) memory/default-scale))
+      (is (empty? (memory-cards table))
+          "placing deals nothing -- the felt is an empty frame until
+           :memory/start")
+      (is (empty? (:minigame/seats table))
+          "and seats nobody, so the table can be positioned before the
+           players are even decided")
+      (is (= (:minigame/label table) "Memory 1")))))
+
+(deftest test-memory-place-table-then-scale-then-start
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/place-table)
+      (let [table-id (minigame-viewing-id conn)]
+        ;; The whole point of splitting the events: size the table while
+        ;; it is empty, then deal into the frame that was arranged.
+        (dispatch conn :object/change-scale table-id 0.5)
+        (dispatch conn :memory/start table-id ids)
+        (let [table (entity @conn table-id)]
+          (is (= (:object/scale table) 0.5)
+              "the deal lands on the table as sized, and does not reset
+               the scale the host arranged")
+          (is (= (count (memory-cards table)) 52))
+          (is (= (memory-players table) ids))
+          (is (= (count (memory-sessions conn)) 1)
+              "starting deals onto the placed table rather than making a
+               second one"))))))
+
+(deftest test-memory-start-refuses-to-deal-twice
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          table-id (start-memory! conn ids)
+          card-ids (set (map :db/id (memory-cards (entity @conn table-id))))]
+      (dispatch conn :memory/start table-id ids)
+      (let [table (entity @conn table-id)]
+        (is (= (count (memory-cards table)) 52)
+            "a second deal onto an occupied table is refused -- dealing
+             again would strand the first deal's card entities")
+        (is (= (set (map :db/id (memory-cards table))) card-ids)
+            "the original cards are exactly the ones still in play")))))
+
+(deftest test-memory-start-requires-a-table
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          ;; The scene itself: a real entity that is emphatically not a
+          ;; table, so this exercises the type check rather than the
+          ;; does-it-exist check.
+          scene-id (:db/id (scene-memory conn))]
+      (is (some? scene-id))
+      (dispatch conn :memory/start scene-id ids)
+      (is (empty? (memory-sessions conn))
+          "an object that is not an empty Memory table is not something
+           a deck can be dealt onto")
+      (is (empty? (:minigame/cards (entity @conn scene-id)))
+          "and nothing is written onto it either"))))
 
 (deftest test-memory-start-rejected-without-element-enabled
   (let [conn (ds/conn-from-db (initial-data true))]
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (dispatch conn :memory/place-table)
       (is (empty? (memory-sessions conn))
-          "rejected -- :memory/start checks :memory/game is actually
-           enabled on the scene's own game-type"))))
+          "rejected -- :memory/place-table checks :memory/game is
+           actually enabled on the scene's own game-type, so no table
+           is ever placed to deal onto")
+      (dispatch conn :memory/start nil ids)
+      (is (empty? (memory-sessions conn))
+          "and :memory/start re-checks rather than trusting that a
+           caller went through place-table first"))))
 
 (deftest test-memory-flip-turn-enforcement
   (let [conn (ds/conn-from-db (initial-data false))
@@ -2606,36 +2727,141 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
             second-player-id (second (memory-players (entity @conn minigame-id)))]
         (set-controller! conn second-player-id [:user/uuid guest-uuid])
         (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
           (dispatch conn :memory/flip card-id)
-          (is (:object/hidden (entity @conn card-id))
+          (is (not (:memory/face-up? (entity @conn card-id)))
               "index 0's turn (unassigned -> host-only) -- this guest,
                mapped only to index 1, may not flip yet")
           ;; fast-forward to the 2nd player's turn for testing purposes
           (transact! conn [{:db/id minigame-id :minigame/turn-index 1}])
           (dispatch conn :memory/flip card-id)
-          (is (not (:object/hidden (entity @conn card-id)))
+          (is (not (not (:memory/face-up? (entity @conn card-id))))
               "index 1's turn -- this guest, as that player's controller,
                may flip"))))))
 
-(deftest test-memory-flip-refuses-third-card
+(deftest test-memory-auto-resolve-authority-follows-the-new-turn
+  ;; The load-bearing case for auto-resolve. Player 1 misses; the two
+  ;; cards are still face-up, so the STORED turn still says player 1.
+  ;; The next card is reached for by player 2 -- whose flip must be
+  ;; judged against the turn as it will stand once the miss settles,
+  ;; not as it stands before.
+  (let [conn (ds/conn-from-db (initial-data false))
+        guest-uuid (random-uuid)]
+    (transact! conn [{:db/id [:db/ident :user] :user/uuid guest-uuid}])
+    (add-conn! conn guest-uuid)
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          minigame-id (start-memory! conn ids)
+          [p1 p2] (memory-players (entity @conn minigame-id))
+          [a b] (memory-mismatched-pair (entity @conn minigame-id))
+          [c d] (remove (comp #{(:db/id a) (:db/id b)} :db/id)
+                        (memory-cards (entity @conn minigame-id)))]
+      ;; Player 1 takes the turn and misses. Driven as player 1's own
+      ;; controller so the miss is genuinely theirs.
+      (set-controller! conn p1 [:user/uuid guest-uuid])
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 0))
+
+      ;; Still player 1's controller: reaching for a third card would
+      ;; settle the miss and pass the turn away, so this must be refused
+      ;; -- otherwise a player who missed could keep flipping forever.
+      (dispatch conn :memory/flip (:db/id c))
+      (is (not (:memory/face-up? (entity @conn (:db/id c))))
+          "the player who just missed cannot start the next turn")
+      (is (not (not (:memory/face-up? (entity @conn (:db/id a)))))
+          "and their miss is left on the table, unsettled")
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 0))
+
+      ;; Hand the guest player 2 instead: the turn is about to become
+      ;; theirs, so the same click now goes through.
+      (set-controller! conn p1 nil)
+      (set-controller! conn p2 [:user/uuid guest-uuid])
+      (dispatch conn :memory/flip (:db/id d))
+      (is (not (not (:memory/face-up? (entity @conn (:db/id d)))))
+          "the incoming player may reach for the next card, settling the
+           previous player's miss as they do")
+      (is (not (:memory/face-up? (entity @conn (:db/id a))))
+          "which sweeps that miss face-down")
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)))))
+
+(deftest test-memory-flip-auto-resolves-a-mismatch
   (let [conn (ds/conn-from-db (initial-data true))]
     (set-enabled-elements! conn #{:memory/game})
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
-    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
-      (let [[a b c] (take 3 (memory-cards (memory-session conn)))]
-        (dispatch conn :memory/flip (:db/id a))
-        (dispatch conn :memory/flip (:db/id b))
-        (dispatch conn :memory/flip (:db/id c))
-        (is (:object/hidden (entity @conn (:db/id c)))
-            "a 3rd flip is refused while 2 cards are already face-up and
-             awaiting :memory/resolve")))))
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          minigame-id (start-memory! conn ids)
+          [a b] (memory-mismatched-pair (entity @conn minigame-id))
+          c (first (remove (comp #{(:db/id a) (:db/id b)} :db/id)
+                           (memory-cards (entity @conn minigame-id))))]
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+          "the miss is still sitting on the table, turn not yet passed")
+      (dispatch conn :memory/flip (:db/id c))
+      (is (not (:memory/face-up? (entity @conn (:db/id a))))
+          "reaching for the next card sweeps the missed pair face-down")
+      (is (not (:memory/face-up? (entity @conn (:db/id b)))))
+      (is (not (not (:memory/face-up? (entity @conn (:db/id c)))))
+          "and the card that was reached for is face-up as the first of
+           the new turn -- one click, not two")
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
+          "the missed turn passed on as part of the same settlement")
+      (is (= (count (memory-cards (entity @conn minigame-id))) 52)
+          "a mismatch takes nothing off the table"))))
+
+(deftest test-memory-flip-auto-resolves-a-match
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          minigame-id (start-memory! conn ids)
+          [a b] (memory-matching-pair (entity @conn minigame-id))
+          c (first (remove (comp #{(:db/id a) (:db/id b)} :db/id)
+                           (memory-cards (entity @conn minigame-id))))]
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      (is (= (count (memory-cards (entity @conn minigame-id))) 52)
+          "the match stays visible until the player acts again -- taking
+           it away instantly would mean nobody ever sees what matched")
+      (dispatch conn :memory/flip (:db/id c))
+      (is (nil? (:db/id (entity @conn (:db/id a)))) "the pair is claimed")
+      (is (nil? (:db/id (entity @conn (:db/id b)))))
+      (is (= (count (memory-cards (entity @conn minigame-id))) 50))
+      (is (= (:minigame/scores (entity @conn minigame-id)) {(first ids) 1})
+          "scored to the player who found it")
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+          "a match plays again -- the turn does NOT pass")
+      (is (not (not (:memory/face-up? (entity @conn (:db/id c)))))
+          "and their next card is already face-up"))))
+
+(deftest test-memory-flip-face-up-card-leaves-the-table-alone
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          minigame-id (start-memory! conn ids)
+          [a b] (memory-mismatched-pair (entity @conn minigame-id))]
+      (dispatch conn :memory/flip (:db/id a))
+      (dispatch conn :memory/flip (:db/id b))
+      ;; Clicking a card that is already face-up is not "reaching for
+      ;; the next card", so it must not settle the turn out from under
+      ;; the players who are still looking at it.
+      (dispatch conn :memory/flip (:db/id a))
+      (is (not (not (:memory/face-up? (entity @conn (:db/id a)))))
+          "both cards are still face-up")
+      (is (not (not (:memory/face-up? (entity @conn (:db/id b))))))
+      (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+          "and the turn has not passed"))))
 
 (deftest test-memory-flip-clears-user-dragging
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -2643,7 +2869,7 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [card-id (:db/id (first (memory-cards (memory-session conn))))]
         ;; a real onDragStart always precedes the click that triggers a
         ;; flip (use-drag-listener's onDragEnd zero-delta "click" case is
@@ -2667,10 +2893,9 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
-            by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
-            [a b] (first (vals by-value))
+            [a b] (memory-matching-pair (entity @conn minigame-id))
             turn-id (first (memory-players (entity @conn minigame-id)))]
         (dispatch conn :memory/flip (:db/id a))
         (dispatch conn :memory/flip (:db/id b))
@@ -2688,18 +2913,15 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
-            by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
-            [va vb] (take 2 (keys by-value))
-            a (first (by-value va))
-            b (first (by-value vb))]
+            [a b] (memory-mismatched-pair (entity @conn minigame-id))]
         (dispatch conn :memory/flip (:db/id a))
         (dispatch conn :memory/flip (:db/id b))
         (dispatch conn :memory/resolve minigame-id)
-        (is (:object/hidden (entity @conn (:db/id a)))
+        (is (not (:memory/face-up? (entity @conn (:db/id a))))
             "mismatched cards are re-hidden, not removed")
-        (is (:object/hidden (entity @conn (:db/id b))))
+        (is (not (:memory/face-up? (entity @conn (:db/id b)))))
         (is (nil? (:minigame/scores (entity @conn minigame-id)))
             "no score change on a mismatch")
         (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
@@ -2711,10 +2933,10 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)]
         (dispatch conn :memory/resolve minigame-id)
-        (is (= (count (memory-cards (entity @conn minigame-id))) 44)
+        (is (= (count (memory-cards (entity @conn minigame-id))) 52)
             "no-op when nothing is face-up yet")))))
 
 (deftest test-memory-two-simultaneous-sessions-dont-interfere
@@ -2725,9 +2947,9 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [[p1 p2 p3 p4] (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start [p1 p2])
+      (start-memory! conn [p1 p2])
       (let [session-a-id (minigame-viewing-id conn)]
-        (dispatch conn :memory/start [p3 p4])
+        (start-memory! conn [p3 p4])
         (let [session-b-id (minigame-viewing-id conn)
               cards-a (set (map :db/id (memory-cards (entity @conn session-a-id))))
               cards-b (set (map :db/id (memory-cards (entity @conn session-b-id))))]
@@ -2735,8 +2957,7 @@
           (is (= (count (memory-sessions conn)) 2))
           (is (empty? (set/intersection cards-a cards-b))
               "each session owns its own independent set of cards")
-          (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn session-a-id)))
-                [a b] (first (vals by-value))]
+          (let [[a b] (memory-matching-pair (entity @conn session-a-id))]
             (dispatch conn :memory/flip (:db/id a))
             (dispatch conn :memory/flip (:db/id b))
             (dispatch conn :memory/resolve session-a-id)
@@ -2751,14 +2972,14 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
             card-ids (map :db/id (memory-cards (entity @conn minigame-id)))
             seat-ids (map :db/id (:minigame/seats (entity @conn minigame-id)))]
         (dispatch conn :minigame/remove minigame-id)
         (is (nil? (:db/id (entity @conn minigame-id))) "the session itself is retracted")
         (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) card-ids))
-            "every card is retracted too -- :minigame/props is a borrowed,
+            "every card is retracted too -- :minigame/cards is an owned,
              NON-component ref, so :minigame/remove retracts them
              explicitly rather than relying on cascade")
         (is (every? nil? (map (fn [id] (:db/id (entity @conn id))) seat-ids)) "its seats are retracted too")
@@ -2779,14 +3000,14 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
             [first-id second-id] (memory-players (entity @conn minigame-id))]
         (set-controller! conn second-id [:user/uuid guest-uuid])
         (dispatch conn :player/set-active first-id false)
         (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
           (dispatch conn :memory/flip card-id)
-          (is (not (:object/hidden (entity @conn card-id)))
+          (is (not (not (:memory/face-up? (entity @conn card-id))))
               "the stored index still points at index 0, but that player
                is now benched -- the turn cycle skips forward to index 1's
                controller (this guest) live, with no separate event"))))))
@@ -2798,14 +3019,11 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
             second-id (second (memory-players (entity @conn minigame-id)))]
         (dispatch conn :player/set-active second-id false)
-        (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
-              [va vb] (take 2 (keys by-value))
-              a (first (by-value va))
-              b (first (by-value vb))]
+        (let [[a b] (memory-mismatched-pair (entity @conn minigame-id))]
           (dispatch conn :memory/flip (:db/id a))
           (dispatch conn :memory/flip (:db/id b))
           (dispatch conn :memory/resolve minigame-id)
@@ -2820,14 +3038,11 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)
             second-id (second (memory-players (entity @conn minigame-id)))]
         (dispatch conn :player/remove second-id)
-        (let [by-value (group-by (comp :memory/value :object/variables) (memory-cards (entity @conn minigame-id)))
-              [va vb] (take 2 (keys by-value))
-              a (first (by-value va))
-              b (first (by-value vb))]
+        (let [[a b] (memory-mismatched-pair (entity @conn minigame-id))]
           (dispatch conn :memory/flip (:db/id a))
           (dispatch conn :memory/flip (:db/id b))
           (dispatch conn :memory/resolve minigame-id)
@@ -2841,7 +3056,7 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)]
         ;; both seated players benched at once -- not just one, since
         ;; :memory/start now requires >= 2 participants.
@@ -2849,7 +3064,7 @@
           (dispatch conn :player/set-active id false))
         (let [card-id (:db/id (first (memory-cards (entity @conn minigame-id))))]
           (dispatch conn :memory/flip card-id)
-          (is (not (:object/hidden (entity @conn card-id)))
+          (is (not (not (:memory/face-up? (entity @conn card-id))))
               "every seated player benched at once -- memory-turn-player
                degrades to nil rather than throwing, and
                memory-authorized-for-turn?'s existing turn-continuity
@@ -4694,7 +4909,7 @@
     (dispatch conn :player/create :human)
     (dispatch conn :player/create :human)
     (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
-      (dispatch conn :memory/start ids)
+      (start-memory! conn ids)
       (is (:scene/neutral-authority? (scene-memory conn))
           "starting a table doesn't touch the scene-wide flag -- it was
            already true (a manual DM setting) and stays true")

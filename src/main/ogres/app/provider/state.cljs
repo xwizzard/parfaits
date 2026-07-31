@@ -24,7 +24,11 @@
    :initiative/played    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :initiative/turn      {:db/valueType :db.type/ref}
    :minigame/deck        {:db/valueType :db.type/ref :db/isComponent true}
-   :minigame/props       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
+   ;; A Memory session owns its cards outright rather than borrowing
+   ;; scene props, so tearing the session down cascades to them and no
+   ;; main-game action can reach them. Replaces :minigame/props.
+   :minigame/cards       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   :memory/image         {:db/valueType :db.type/ref}
    :minigame/seats       {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :object/owner         {:db/valueType :db.type/ref}
    :player/attack-deck   {:db/valueType :db.type/ref :db/isComponent true}

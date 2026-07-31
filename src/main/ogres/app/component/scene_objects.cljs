@@ -1,6 +1,7 @@
 (ns ogres.app.component.scene-objects
   (:require [clojure.string :refer [join]]
             [ogres.app.component :refer [icon]]
+            [ogres.app.component.card-pile :as card-pile]
             [ogres.app.component.scene-context-menu :refer [context-menu]]
             [ogres.app.component.scene-pattern :refer [pattern]]
             [ogres.app.const :refer [grid-size hex-radius]]
@@ -9,6 +10,7 @@
             [ogres.app.hooks :as hooks]
             [ogres.app.matrix :as matrix]
             [ogres.app.modifiers :as modifiers]
+            [ogres.app.memory :as memory]
             [ogres.app.player :as player]
             [ogres.app.segment :as seg :refer [Segment]]
             [ogres.app.util :as util]
@@ -115,18 +117,10 @@
   (or (:object/shared? entity)
       (object-authority? viewer-uuid host? connected-uuids entity)))
 
-(defn ^:private memory-card-hidden?
-  "True if `entity` is a still-face-down Memory card (carries a
-   :memory/value in :object/variables AND :object/hidden is true) --
-   used to flag scene-object DOM nodes with :data-memory-hidden so a
-   plain click can flip the card directly instead of just selecting
-   it (see use-drag-listener's onDragEnd). Reads correctly for every
-   viewer regardless of authority, since resolve-hidden only ever
-   swaps the rendered image key -- it leaves :object/hidden and
-   :object/variables themselves untouched."
-  [entity]
-  (boolean (and (:memory/value (:object/variables entity))
-                (:object/hidden entity))))
+;; Memory cards used to be scene props flagged here so a click could
+;; flip them; they are now drawn inside their own :minigame/table and
+;; carry :data-memory-hidden themselves (see minigame-card), so the
+;; scene-object level no longer knows anything about Memory.
 
 (defn ^:private resolve-hidden
   "Resolves how a token/prop entity should render given whether the
@@ -421,6 +415,16 @@
         :hex-flat (get anchor-nudge-hex-flat-angles code)
         nil)))
 
+(defn ^:private scale-locked?
+  "True when `entity`'s dimensions must not change. A mini-game table
+   locks while it still holds cards: resizing mid-game would rescale the
+   board under the players. It unlocks once the game is over (every pair
+   matched, so no cards remain) and the table is just an empty frame
+   waiting to be cleared."
+  [entity]
+  (and (= (:object/type entity) :minigame/table)
+       (seq (:minigame/cards entity))))
+
 (defui ^:private ^:memo object-prop-scale
   [{:keys [point size angle]}]
   (let [option #js {"id" (str "resize/" point) "data" #js {"type" "resize" "point" point}}
@@ -617,6 +621,172 @@
               ($ :circle {:cx (+ bx gap) :cy by :r r})
               ($ :g {:transform (str "translate(" (- (+ bx gap) (/ isz 2)) "," (- by (/ isz 2)) ")")}
                 ($ icon {:name "x" :size isz})))))))))
+
+(defui ^:private minigame-card-back
+  "A face-down card, drawn inline rather than loaded as an image. Keeping
+   it here means a table depends on no seeded prop asset at all -- the
+   last thread tying a mini-game to the main game's image gallery. The
+   motif is a plain lattice: generic enough for any card game, and
+   readable at the size a whole 8x6 board is usually viewed at."
+  []
+  ($ :<>
+    ($ :rect.scene-minigame-card-face
+      {:width memory/card-width :height memory/card-height :rx 14})
+    ($ :rect.scene-minigame-card-frame
+      {:x 12 :y 12 :width (- memory/card-width 24) :height (- memory/card-height 24) :rx 8})
+    ($ :rect.scene-minigame-card-lattice
+      {:x 12 :y 12 :width (- memory/card-width 24) :height (- memory/card-height 24)
+       :rx 8 :fill "url(#minigame-card-lattice)"})
+    ;; The four suits, reusing the same symbols the card panels use
+    ;; rather than redrawing them -- a generic playing-card back, not a
+    ;; Memory-specific one. Memory's own cards have no suit (they pair
+    ;; by number); this is decoration on the FACE-DOWN side only.
+    ($ :g.scene-minigame-card-motif
+      {:transform (str "translate(" (- (/ memory/card-width 2) 44) ", "
+                       (- (/ memory/card-height 2) 44) ")")}
+      (for [[dx dy nm] [[0 0 "suit-spade-fill"] [44 0 "suit-heart-fill"]
+                        [0 44 "suit-diamond-fill"] [44 44 "suit-club-fill"]]]
+        ($ :g {:key nm :transform (str "translate(" dx ", " dy ")")}
+          ($ icon {:name nm :size 44}))))))
+
+(def ^:private suit-icon-names
+  {:clubs "suit-club-fill" :diamonds "suit-diamond-fill"
+   :hearts "suit-heart-fill" :spades "suit-spade-fill"})
+
+(defui ^:private minigame-card-face
+  "A face-up card, drawn from its rank and suit rather than loaded as an
+   image -- corner index top-left and bottom-right (rotated, as on a real
+   card) plus a large centre pip. Red for hearts and diamonds, black for
+   clubs and spades; the colour is half of what makes a pair, so it has
+   to be legible at a glance across a 52-card board."
+  [{card :card}]
+  (let [suit (:card/suit card)
+        rank (:card/rank card)
+        label (get card-pile/rank-short rank)
+        icon-name (get suit-icon-names suit)]
+    ($ :g.scene-minigame-card-face-group
+      {:data-color (name (memory/suit-color suit))}
+      ($ :rect.scene-minigame-card-face
+        {:width memory/card-width :height memory/card-height :rx 14})
+      ($ :text.scene-minigame-card-index {:x 20 :y 52} label)
+      ($ :g {:transform "translate(14, 60)"}
+        ($ icon {:name icon-name :size 30}))
+      ($ :g {:transform (str "translate(" (- (/ memory/card-width 2) 45) ", "
+                             (- (/ memory/card-height 2) 45) ")")}
+        ($ icon {:name icon-name :size 90}))
+      ;; the far corner repeats the index upside-down, as a real card does
+      ($ :g {:transform (str "rotate(180, " (/ memory/card-width 2) ", "
+                             (/ memory/card-height 2) ")")}
+        ($ :text.scene-minigame-card-index {:x 20 :y 52} label)
+        ($ :g {:transform "translate(14, 60)"}
+          ($ icon {:name icon-name :size 30}))))))
+
+(defui ^:private minigame-card [props]
+  (let [{card :card} props
+        face-up? (:memory/face-up? card)]
+    ($ :g.scene-minigame-card
+      {:transform (memory/card-offset (:memory/index card))
+       ;; Each card carries its own data-id, so use-drag-listener's
+       ;; zero-delta (click) branch resolves to the CARD while a real
+       ;; drag still bubbles to the table group and moves the whole
+       ;; board. Same closest("[data-id]") mechanism the loose props
+       ;; used, without the cards being scene objects.
+       :data-id (:db/id card)
+       :data-memory-hidden (not face-up?)}
+      (if face-up?
+        ($ minigame-card-face {:card card})
+        ($ minigame-card-back))
+      ($ :rect.scene-minigame-card-bounds
+        {:width memory/card-width :height memory/card-height :rx 14}))))
+
+(defui ^:private minigame-table-content [props]
+  (let [{cards :minigame/cards} (:entity props)
+        [w h] (memory/table-footprint)]
+    ($ :<>
+      ($ :defs
+        ;; One lattice tile, reused by every card back on this table.
+        ($ :pattern
+          {:id "minigame-card-lattice" :width 24 :height 24
+           :patternUnits "userSpaceOnUse"}
+          ($ :path.scene-minigame-card-lattice-path
+            {:d "M0,12 L12,0 L24,12 L12,24 Z"})))
+      ;; The felt. Drawn first so it sits under the cards, and sized from
+      ;; the same footprint the bounding rect uses -- what you see is
+      ;; exactly what you grab.
+      ($ :rect.scene-minigame-felt {:width w :height h :rx 24})
+      (for [card (sort-by :memory/index cards)]
+        ($ minigame-card {:key (:db/id card) :card card})))))
+
+;; Scale handles for a table, mirroring object-prop-edit but scale-only:
+;; a table has no rotation and no image anchor to place, and its felt is
+;; drawn from a fixed footprint rather than an image's dimensions.
+(defui ^:private object-minigame-table-edit [props]
+  (let [{{id :db/id
+          object-scale :object/scale
+          [{zoom :camera/scale}] :camera/_selected} :entity
+         transform :transform} props
+        [w h] (memory/table-footprint)
+        [scale set-scale] (uix/use-state object-scale)
+        dispatch (hooks/use-dispatch)
+        bounds (Segment. vec/zero (Vec2. w h))
+        center (seg/midpoint bounds)
+        get-scale
+        (fn [^js/Object event]
+          (let [data (.. event -active -data -current)
+                dx (.-x (.-delta event))
+                dy (.-y (.-delta event))]
+            (-> (vec/shift (transform (.-point data)) dx dy)
+                (vec/dist center)
+                (/ (vec/dist center)))))]
+    (uix/use-effect
+     (fn [] (set-scale object-scale)) [object-scale])
+    (use-dnd-monitor
+     #js {"onDragMove"
+          (fn [event]
+            (case (.. event -active -data -current -type)
+              "resize" (set-scale (get-scale event))
+              nil))
+          "onDragEnd"
+          (fn [event]
+            (case (.. event -active -data -current -type)
+              "resize" (dispatch :object/change-scale id (get-scale event))
+              nil))})
+    ($ :g.scene-minigame-table
+      {:style
+       {:transform
+        (-> (matrix/translate matrix/identity center)
+            (matrix/scale scale)
+            (matrix/translate (vec/mul center -1)))}}
+      (:children props)
+      (for [point (geom/rect-points bounds)]
+        ($ object-prop-scale
+          {:key point
+           :point point
+           :size (/ 8 scale zoom)
+           :angle (vec/angle (vec/sub (transform point) center))})))))
+
+(defui ^:private object-minigame-table [props]
+  (let [{{id :db/id
+          [{selected :camera/selected
+            [{user :root/_user}] :user/_camera
+            zoom :camera/scale
+            {grid-type :scene/grid-type} :camera/scene}] :camera/_selected} :entity} props
+        mod-scale (uix/use-memo (fn [] (modifiers/scale-fn zoom grid-type)) [zoom grid-type])
+        transform (geom/object-transform (:entity props))
+        selected (into #{} (map :db/id) selected)]
+    ;; A table is movable whenever it is placed, but its dimensions lock
+    ;; the moment a game is dealt onto it -- resizing mid-game would
+    ;; rescale the board out from under the players (see scale-locked?).
+    (if (and (some? user)
+             (not (scale-locked? (:entity props)))
+             (= #{id} selected))
+      ($ dnd-context
+        #js {"modifiers" #js [mod-scale modifiers/trunc]}
+        ($ object-minigame-table-edit
+          (assoc props :transform transform)
+          ($ minigame-table-content props)))
+      ($ :g.scene-minigame-table {:style {:transform transform}}
+        ($ minigame-table-content props)))))
 
 (defui ^:private object-prop [props]
   (let [{{id :db/id
@@ -908,6 +1078,7 @@
                   :token/token ($ object-token props)
                   :note/note ($ object-note props)
                   :prop/prop ($ object-prop props)
+                  :minigame/table ($ object-minigame-table props)
                   ;; Board pieces are the ground/map plane itself -- like
                   ;; shapes (the default branch below), they're meant to
                   ;; deform along with the projected grid on an isometric
@@ -951,7 +1122,13 @@
                  (let [^js node (.. event -target (closest "[data-id]"))
                        id (if (= ident "selected") (js/Number (.. node -dataset -id)) ident)]
                    (if (= "true" (.. node -dataset -memoryHidden))
-                     (dispatch :memory/flip id)
+                     ;; Always the CLICKED node's own id, never the dragged
+                     ;; element's: a mini-game card is not itself draggable
+                     ;; (its table is), so `ident` here is the table, while
+                     ;; the card carries its id on the node closest to the
+                     ;; pointer. Using `ident` flipped the table instead of
+                     ;; the card and silently did nothing.
+                     (dispatch :memory/flip (js/Number (.. node -dataset -id)))
                      (dispatch :objects/select id shift)))
                  (if (= ident "selected")
                    (dispatch :objects/translate-selected delta)
@@ -1054,6 +1231,25 @@
            [:shape/points :default [vec/zero]]
            [:shape/color :default "red"]
            [:shape/pattern :default :solid]]}
+         ;; Mini-game tables. The session entity IS the scene object --
+         ;; it carries :object/point/:object/scale and draws its own
+         ;; owned :minigame/cards, so a running game is one movable,
+         ;; scalable unit rather than N loose props.
+         {:scene/minigames
+          [:db/id
+           :object/type
+           [:object/point :default vec/zero]
+           [:object/scale :default 1]
+           {:minigame/cards
+            [:db/id :memory/index [:memory/face-up? :default false]
+             :card/rank :card/suit]}
+           ;; Selection state, so a placed table can draw its own scale
+           ;; handles the same way a selected prop does.
+           {:camera/_selected
+            [[:camera/scale :default 1]
+             :camera/selected
+             {:camera/scene [[:scene/grid-type :default :square]]}
+             {:user/_camera [:root/_user]}]}]}
          {:scene/props
           [:db/id
            [:object/type :default :prop/prop]
@@ -1154,6 +1350,7 @@
             shapes :scene/shapes
             tokens :scene/tokens
             props :scene/props
+            minigames :scene/minigames
             board :scene/board
             notes :scene/notes}
            :camera/scene}
@@ -1203,10 +1400,18 @@
         ;; -- either normal, placeholder-swapped, or dropped), so only
         ;; shapes/notes (no owner concept, still plain host-only) go
         ;; through `visible?` here.
+        ;; A mini-game table sits directly above the prop band and below
+        ;; shapes/notes/tokens -- it IS the table the game is played on,
+        ;; so props can decorate under it while every token stays on top
+        ;; of it. Only sessions that actually placed themselves on the
+        ;; scene (:object/type set) render; the hand-based games have no
+        ;; canvas presence at all.
+        tables (filter (comp #{:minigame/table} :object/type) minigames)
         rest-entities
         (concat
          (filter back? sorted-tokens)
          (sort compare-objects (remove forward? resolved-props))
+         tables
          (sort compare-objects (filter visible? shapes))
          (sort compare-objects (filter visible? notes))
          (remove back? sorted-tokens)
@@ -1265,8 +1470,7 @@
                                :data-locked (boolean lock)
                                :data-color (:user/color user)
                                :data-type (name (keyword (namespace (:object/type entity))))
-                               :data-id id
-                               :data-memory-hidden (memory-card-hidden? entity)}
+                               :data-id id}
                               ($ object {:entity entity :grid-type grid-type})
                               (if-let [portal (deref portal)]
                                 ($ object-hint
@@ -1335,8 +1539,7 @@
                                      :data-drag-remote (some? user)
                                      :data-drag-local (.-isDragging drag)
                                      :data-color (:user/color user)
-                                     :data-id id
-                                     :data-memory-hidden (memory-card-hidden? entity)}
+                                     :data-id id}
                                     ($ object {:entity entity :grid-type grid-type})
                                     (if-let [portal (deref portal)]
                                       ($ object-hint

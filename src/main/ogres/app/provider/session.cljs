@@ -120,8 +120,8 @@
     ;; :image/change-thumbnail-request above: republished locally here
     ;; so the HOST is the one to actually dispatch and mint entities.
     :minigame/create-request
-    (let [{{kind :kind participant-ids :participant-ids} :data} message]
-      (publish :minigame/create kind participant-ids))
+    (let [{{kind :kind participant-ids :participant-ids table-id :table-id} :data} message]
+      (publish :minigame/create kind participant-ids table-id))
 
     :cursor/moved
     (let [{src :src {[x y] :coord} :data} message]
@@ -327,26 +327,30 @@
     ;; and the :minigame/create subscription below).
     (hooks/use-subscribe :minigame/create-request
       (uix/use-callback
-       (fn [kind participant-ids]
+       (fn [kind participant-ids table-id]
          (let [session (ds/entity @conn [:db/ident :session])]
            (if-let [host (-> session :session/host :user/uuid)]
              (on-send-text
               {:type :event
                :dst host
                :data
+               ;; table-id is only meaningful for games played on an
+               ;; already-placed scene object (Memory); the hand-based
+               ;; games send nil and ignore it.
                {:name :minigame/create-request
                 :kind kind
-                :participant-ids participant-ids}})))) [conn on-send-text]))
+                :participant-ids participant-ids
+                :table-id table-id}})))) [conn on-send-text]))
 
     ;; The host's own handling of a relayed session-creation request --
     ;; dispatches the game-specific start event that actually mints the
     ;; session's entities. One case per ported game.
     (hooks/use-subscribe :minigame/create
       (uix/use-callback
-       (fn [kind participant-ids]
+       (fn [kind participant-ids table-id]
          (case kind
            :old-maid (dispatch :old-maid/start participant-ids)
-           :memory (dispatch :memory/start participant-ids)
+           :memory (dispatch :memory/start table-id participant-ids)
            :go-fish (dispatch :go-fish/start participant-ids)
            :crazy-eights (dispatch :crazy-eights/start participant-ids)
            :rummy (dispatch :rummy/start participant-ids)

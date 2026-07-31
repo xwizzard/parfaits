@@ -2,6 +2,7 @@
   (:require [clojure.math :refer [floor ceil]]
             [ogres.app.const :refer [grid-size half-size hex-radius hex-width hex-row]]
             [ogres.app.matrix :as matrix]
+            [ogres.app.memory :as memory]
             [ogres.app.segment :as seg :refer [Segment]]
             [ogres.app.vec :as vec :refer [Vec2]]))
 
@@ -427,6 +428,20 @@
   (let [rad (/ (* (or size 5) grid-size) 10)]
     (Segment. (vec/shift src (- rad)) (vec/shift src rad))))
 
+;; A mini-game table is defined by its origin {A} and the unscaled size
+;; of the card grid it draws, scaled by :object/scale. The cards
+;; themselves hold no coordinates -- see ogres.app.memory/card-offset --
+;; which is exactly what makes the whole board one movable, scalable
+;; object rather than N independent props.
+(defmethod object-bounding-rect :minigame/table
+  [{src :object/point scale :object/scale}]
+  (let [[w h] (memory/table-footprint)
+        s (or scale 1)
+        mid (Vec2. (/ w 2) (/ h 2))
+        arm (Vec2. (* (/ w 2) s) (* (/ h 2) s))
+        ctr (vec/add src mid)]
+    (Segment. (vec/sub ctr arm) (vec/add ctr arm))))
+
 ;; Circles are defined by points {A, B} where A is the center and B is
 ;; some point on the circumference.
 (defmethod object-bounding-rect :shape/circle
@@ -561,6 +576,20 @@
     (-> (matrix/translate matrix/identity center)
         (matrix/scale (or scale 1))
         (matrix/rotate (or rotation 0))
+        (matrix/translate (vec/mul center -1)))))
+
+;; A table scales about its middle, like every other scalable object --
+;; which is also what lets the generic corner handles work on it: all four
+;; corners sit the same distance from the center, so one radius ratio is
+;; the scale factor no matter which corner is dragged. Anchoring at the
+;; origin instead would put a handle exactly on the anchor and divide by
+;; zero the moment it moved.
+(defmethod object-transform :minigame/table
+  [{scale :object/scale}]
+  (let [[w h] (memory/table-footprint)
+        center (seg/midpoint (Segment. vec/zero (Vec2. w h)))]
+    (-> (matrix/translate matrix/identity center)
+        (matrix/scale (or scale 1))
         (matrix/translate (vec/mul center -1)))))
 
 (defmethod object-transform :board/piece

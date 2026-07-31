@@ -493,3 +493,76 @@
 .scene-object-anchor-cancel:hover circle {
   stroke: var(--color-danger-500);
 }
+
+/* A mini-game table draws its own owned cards (see scene_objects'
+   object-minigame-table). The cards are not scene objects, so none of
+   the .scene-prop-* rules above apply to them. */
+.scene-minigame-table {
+  cursor: var(--scene-object-cursor, default);
+}
+
+/* The felt -- the table surface itself, and the thing you grab to move
+   the board. Sized from memory/table-size, the same footprint the
+   bounding rect uses, so the visible edge is the draggable edge. */
+.scene-minigame-felt {
+  fill: #35654d;
+  stroke-width: 3px;
+  stroke: #244634;
+}
+
+.scene-minigame-card-image {
+  pointer-events: none;
+}
+
+/* A face-up card. Colour comes from the suit -- red for hearts and
+   diamonds, black for clubs and spades -- and is set on the group so
+   both the corner index and the reused suit symbols pick it up. */
+.scene-minigame-card-face-group {
+  color: #1c1c1c;
+
+  &[data-color="red"] {
+    color: #a3232c;
+  }
+}
+
+.scene-minigame-card-index {
+  fill: currentColor;
+  font-family: sans-serif;
+  font-size: 52px;
+  font-weight: 700;
+}
+
+/* Face-down cards are drawn inline (minigame-card-back) rather than
+   loaded as an image, so a table needs no seeded prop asset at all. */
+.scene-minigame-card-face {
+  fill: #f7f5ef;
+  stroke-width: 2px;
+  stroke: #b9b3a4;
+}
+
+.scene-minigame-card-frame {
+  fill: none;
+  stroke-width: 3px;
+  stroke: #7d2b34;
+}
+
+.scene-minigame-card-lattice-path {
+  fill: none;
+  stroke-width: 2px;
+  stroke: #7d2b34;
+  stroke-opacity: 0.35;
+}
+
+/* The suit cluster inherits `color`, which is what the reused suit
+   symbols fill against (they are drawn with currentColor). */
+.scene-minigame-card-motif {
+  color: #7d2b34;
+}
+
+/* Transparent rather than `fill: none`: this rect is the card's click
+   target (a click flips it -- see use-drag-listener's zero-delta
+   branch), and an SVG shape with no fill is not hit-testable. It also
+   keeps a card clickable if its face image fails to load. */
+.scene-minigame-card-bounds {
+  fill: transparent;
+}

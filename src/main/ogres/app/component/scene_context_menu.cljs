@@ -528,14 +528,12 @@
         ;; ogres.app.props/pile) across every selected prop.
         pile-ids (into #{} (map (comp :pile/id :object/variables)) data)
         pile-id (if (and (= (count pile-ids) 1) (some? (first pile-ids))) (first pile-ids))
-        ;; A single selected Memory card (see ogres.app.memory) routes
-        ;; the familiar hide/reveal control through the turn-gated
-        ;; :memory/flip event instead of the generic :objects/toggle-
-        ;; hidden-selected -- every Memory card is already
-        ;; :object/shared? true, so the generic authority check would
-        ;; pass for anyone regardless of turn; :memory/flip is what
-        ;; actually enforces 'players take turns'.
-        memory-value (and (= (count data) 1) (:memory/value (:object/variables entity)))]
+        ;; This menu used to special-case a selected Memory card, routing
+        ;; its hide/reveal through :memory/flip -- back when Memory dealt
+        ;; its cards as scene props and they could turn up here at all.
+        ;; A card now belongs to its own :minigame/table and is never a
+        ;; prop, so the prop menu no longer knows Memory exists.
+        ]
     (if anchor-editing?
       ;; While actively dragging the grid-anchor marker (see
       ;; object-prop-edit in scene_objects.cljs), the confirm/cancel
@@ -606,28 +604,18 @@
              ($ action-hide
                {:value (every? :object/hidden data)
                 :disabled
-                (if memory-value
-                  ;; Already face-up -- only :memory/resolve may re-hide
-                  ;; it (on a mismatch); manual re-hiding is disallowed.
-                  ;; Left ENABLED while face-down for any connected
-                  ;; viewer -- :memory/flip itself is what enforces
-                  ;; whose turn it is, this is just a UX courtesy, not
-                  ;; the real gate.
-                  (not (:object/hidden entity))
-                  ;; Not just `(:host props)` -- see the identical comment
-                  ;; in context-menu-token's action-hide; the same
-                  ;; exclusive-controller/shared?/:default-authority
-                  ;; logic applies to props.
-                  (not (every? #(or (:object/shared? %)
-                                     (player/authority?
-                                      (:viewer-uuid props) (:default-authority props) (:connected-uuids props)
-                                      (get-in % [:object/owner :player/controller :user/uuid])))
-                                data)))
+                ;; Not just `(:host props)` -- see the identical comment
+                ;; in context-menu-token's action-hide; the same
+                ;; exclusive-controller/shared?/:default-authority
+                ;; logic applies to props.
+                (not (every? #(or (:object/shared? %)
+                                   (player/authority?
+                                    (:viewer-uuid props) (:default-authority props) (:connected-uuids props)
+                                    (get-in % [:object/owner :player/controller :user/uuid])))
+                              data))
                 :on-change
                 (fn []
-                  (if memory-value
-                    (dispatch :memory/flip id)
-                    (dispatch :objects/toggle-hidden-selected)))})
+                  (dispatch :objects/toggle-hidden-selected))})
              ($ action-lock
                {:value (every? :object/locked data)
                 :disabled (not (:host props))

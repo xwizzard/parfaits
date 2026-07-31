@@ -43,8 +43,8 @@
            [:minigame/scores :default nil]
            {:minigame/seats
             [:db/id [:seat/order :default 0] {:seat/player [:db/id]}]}
-           {:minigame/props
-            [:db/id [:object/hidden :default false] [:object/variables :default nil]]}]}]}]}]}
+           {:minigame/cards
+            [:db/id [:memory/face-up? :default false] :memory/value]}]}]}]}]}
    {:root/players [:db/id :player/name :player/color :player/kind [:player/active :default true]]}])
 
 (defn ^:private memory-sessions [scene]
@@ -63,8 +63,8 @@
         turn-players (mapv (comp :db/id :seat/player) (sort-by :seat/order (:minigame/seats selected)))
         turn-index (:minigame/turn-index selected)
         scores (:minigame/scores selected)
-        cards (:minigame/props selected)
-        face-up (remove :object/hidden cards)]
+        cards (:minigame/cards selected)
+        face-up (filter :memory/face-up? cards)]
     {:host host
      :players-by-id players-by-id
      :sessions sessions
@@ -75,6 +75,10 @@
                       (fn [id] (:player/active (players-by-id id)))
                       (or turn-index 0))
      :scores (or scores {})
+     ;; A table is placed first and dealt into later, so "has seats" --
+     ;; not "exists" -- is what separates an empty frame waiting to be
+     ;; positioned from a game in progress.
+     :started? (boolean (seq turn-players))
      :finished? (and selected (seq turn-players) (empty? cards))
      :face-up-count (count face-up)}))
 
@@ -83,7 +87,7 @@
         publish (hooks/use-publish)
         result (hooks/use-query query [:db/ident :root])
         host (:user/host (:root/user result))
-        {:keys [players-by-id sessions selected turn-players current-index scores finished?]}
+        {:keys [players-by-id sessions selected turn-players current-index scores finished? started?]}
         (memory-state result)]
     ($ :.form-memory
       ($ :header ($ :h2 "Memory"))
@@ -101,11 +105,12 @@
       (cond
         (not selected)
         ($ :.form-notice
-          "Deal 22 matching pairs (44 cards) face-down onto this scene as
-           a shared Memory table, seated by whichever subset of the
-           roster you pick below. Any connected player may flip cards on
-           their own turn. Several tables can run at once, each with its
-           own participants.")
+          "Place an empty Memory table on this scene, drag and resize it
+           to fit, then deal a standard 52-card deck face-down onto it.
+           Pairs match on rank and colour, so one deck makes 26 pairs.
+           Any connected player may flip cards on their own turn, and
+           several tables can run at once, each with its own
+           participants.")
 
         finished?
         (let [winner-ids (turn-order/winners scores)]
@@ -120,6 +125,13 @@
                   ($ :span (:player/name (players-by-id id)))
                   ($ :span (get scores id 0)))))))
 
+        (not started?)
+        ($ :.form-notice
+          "Empty table placed. Select it on the scene to drag it into
+           position and resize it from its corners -- its dimensions
+           lock once the cards are dealt. Then pick who is playing and
+           start the table below.")
+
         :else
         ($ :ul.memory-turn-order
           (for [[i id] (map-indexed vector turn-players)
@@ -132,14 +144,24 @@
               ($ :span.memory-turn-color)
               ($ :span.memory-turn-name (:player/name entity))
               ($ :span.memory-turn-score (get scores id 0))))))
-      ($ minigame/new-session-form
-        {:players (:root/players result)
-         :submit-label "Start table"
-         :on-submit
-         (fn [ids]
-           (if host
-             (dispatch :memory/start ids)
-             (publish :minigame/create-request :memory ids)))}))))
+      ;; Placing mints entities, so it stays with the host for the same
+      ;; reason starting is relayed to them (see :minigame/create-request)
+      ;; -- there is no cross-peer entity-id partitioning. The host lays
+      ;; out the board; any participant can then start a game on it.
+      (if host
+        ($ :button.button.button-neutral
+          {:type "button" :on-click #(dispatch :memory/place-table)}
+          ($ icon {:name "plus-circle-fill" :size 16})
+          "Place table"))
+      (if (and selected (not started?))
+        ($ minigame/new-session-form
+          {:players (:root/players result)
+           :submit-label "Start table"
+           :on-submit
+           (fn [ids]
+             (if host
+               (dispatch :memory/start (:db/id selected) ids)
+               (publish :minigame/create-request :memory ids (:db/id selected))))})))))
 
 (defui ^:memo actions []
   (let [dispatch (hooks/use-dispatch)
