@@ -2569,16 +2569,26 @@
     (dispatch conn :memory/start table-id ids)
     table-id))
 
+(def ^:private default-deck
+  "Cards a table deals at the default size -- tests assert against this
+   rather than a literal, so re-tuning the default doesn't require
+   editing every Memory test."
+  (memory/deck-size memory/default-difficulty))
+
 (defn ^:private memory-cards [minigame]
   (:minigame/cards minigame))
 
 (defn ^:private memory-matching-pair
-  "Two cards from `minigame` that really do pair -- same rank, same
-   colour, different suit (ogres.app.memory/pair?). The deck is shuffled
-   every deal, so tests find a pair rather than assuming positions."
+  "Two DISTINCT cards from `minigame` that pair -- the two copies of one
+   card (ogres.app.memory/pair?). The deal is shuffled every time, so
+   tests find a pair rather than assuming positions. The distinct-id
+   guard is load-bearing now that a match means two identical faces:
+   without it every card trivially pairs with itself."
   [minigame]
   (let [cards (vec (memory-cards minigame))]
-    (first (for [a cards b cards :when (memory/pair? a b)] [a b]))))
+    (first (for [a cards b cards
+                 :when (and (not= (:db/id a) (:db/id b)) (memory/pair? a b))]
+             [a b]))))
 
 (defn ^:private memory-mismatched-pair
   "Two distinct cards from `minigame` that do NOT pair."
@@ -2612,15 +2622,22 @@
         (is (nil? (:minigame/scores minigame)))
         (is (empty? (:scene/decks (scene-memory conn)))
             "Memory has no deck at all -- nothing lands in :scene/decks")
-        (is (= (count cards) 52) "a full standard deck")
+        (is (= (count cards) default-deck) "a full deal at the default size")
         (is (every? (complement :memory/face-up?) cards) "every card deals face-down")
         (is (= (into #{} (map :card/suit) cards) (set memory/suits))
-            "all four suits")
-        (is (= (into #{} (map :card/rank) cards) (set memory/ranks))
-            "all thirteen ranks")
-        (is (= (count (into #{} (map (juxt :card/rank :card/suit)) cards)) 52)
-            "each exact card dealt once -- one deck, no duplicates")
-        (is (= (set (map :memory/index cards)) (set (range 52)))
+            "both suits")
+        (is (= (into #{} (map :card/rank) cards)
+               (set (memory/ranks-for-difficulty memory/default-difficulty)))
+            "the ranks this size deals -- faces always, numbered ranks
+             added by difficulty")
+        (is (= (count (into #{} (map (juxt :card/rank :card/suit)) cards))
+               (quot default-deck 2))
+            "half as many distinct faces...")
+        (is (every? (fn [[_ n]] (= n 2))
+                    (frequencies (map (juxt :card/rank :card/suit) cards)))
+            "...each dealt exactly twice, so a match is two identical
+             cards rather than two merely same-coloured ones")
+        (is (= (set (map :memory/index cards)) (set (range default-deck)))
             "each card holds its grid slot; position is derived from the
              table, which is what makes the board one movable object")
         (is (= (:object/type minigame) :minigame/table)
@@ -2663,11 +2680,114 @@
           (is (= (:object/scale table) 0.5)
               "the deal lands on the table as sized, and does not reset
                the scale the host arranged")
-          (is (= (count (memory-cards table)) 52))
+          (is (= (count (memory-cards table)) default-deck))
           (is (= (memory-players table) ids))
           (is (= (count (memory-sessions conn)) 1)
               "starting deals onto the placed table rather than making a
                second one"))))))
+
+(deftest test-memory-solo-play
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))
+          minigame-id (start-memory! conn ids)
+          table (entity @conn minigame-id)]
+      (is (= (count (memory-cards table)) default-deck)
+          "one player is a real way to play Memory -- there is nothing
+           hidden from an opponent, just a board and your own recall")
+      (is (= (memory-players table) ids))
+      ;; And the turn cycle has to survive having nowhere else to go.
+      (let [[a b] (memory-mismatched-pair table)
+            c (first (remove (comp #{(:db/id a) (:db/id b)} :db/id)
+                             (memory-cards (entity @conn minigame-id))))]
+        (dispatch conn :memory/flip (:db/id a))
+        (dispatch conn :memory/flip (:db/id b))
+        (dispatch conn :memory/flip (:db/id c))
+        (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
+            "a miss passes the turn back to the only player")
+        (is (not (not (:memory/face-up? (entity @conn (:db/id c)))))
+            "who carries straight on")))))
+
+(deftest test-memory-start-refuses-an-empty-roster
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :memory/place-table)
+    (let [table-id (minigame-viewing-id conn)]
+      (dispatch conn :memory/start table-id [])
+      (is (empty? (memory-cards (entity @conn table-id)))
+          "solo is allowed; seating nobody at all is not"))))
+
+(deftest test-memory-table-freezes-in-place-while-a-game-is-on-it
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/place-table)
+      (let [table-id (minigame-viewing-id conn)
+            placed (:object/point (entity @conn table-id))
+            delta (vec/Vec2. 100 100)]
+        ;; Empty: position is still being arranged, so it moves.
+        (dispatch conn :objects/translate table-id delta)
+        (let [moved (:object/point (entity @conn table-id))]
+          (is (not= moved placed) "an empty table can be positioned")
+
+          (dispatch conn :memory/start table-id ids)
+          (dispatch conn :objects/translate table-id delta)
+          (is (= (:object/point (entity @conn table-id)) moved)
+              "once dealt, the table is frozen -- dragging the board
+               mid-game would move every card under the players at once")
+
+          ;; Clearing the board thaws it again.
+          (doseq [card (vec (memory-cards (entity @conn table-id)))]
+            (transact! conn [[:db/retractEntity (:db/id card)]]))
+          (dispatch conn :objects/translate table-id delta)
+          (is (not= (:object/point (entity @conn table-id)) moved)
+              "an emptied table is just a frame again, and repositionable"))))))
+
+(deftest test-memory-difficulty
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :player/create :human)
+    (dispatch conn :player/create :human)
+    (let [ids (mapv :db/id (sort-by :db/id (root-players conn)))]
+      (dispatch conn :memory/place-table 0)
+      (let [table-id (minigame-viewing-id conn)]
+        (is (= (memory/difficulty (entity @conn table-id)) 0)
+            "a table is placed at the size it was asked for")
+        (is (= (memory/table-footprint (entity @conn table-id))
+               (memory/table-size 32))
+            "and the empty felt is already sized for that deal")
+
+        ;; Resizing an undealt table is exactly like repositioning it --
+        ;; part of arranging the frame before anything lands on it.
+        (dispatch conn :memory/change-difficulty table-id memory/max-difficulty)
+        (is (= (memory/difficulty (entity @conn table-id)) memory/max-difficulty))
+        (let [[_ tall] (memory/table-footprint (entity @conn table-id))
+              [_ short] (memory/table-footprint {:memory/difficulty 0})]
+          (is (> tall short) "the felt grew downwards"))
+
+        (dispatch conn :memory/start table-id ids)
+        (is (= (count (memory-cards (entity @conn table-id))) 104)
+            "the deal fills the size that was arranged, not a fixed 52")
+
+        ;; And once it is dealt, the size is as frozen as the position.
+        (dispatch conn :memory/change-difficulty table-id 0)
+        (is (= (memory/difficulty (entity @conn table-id)) memory/max-difficulty)
+            "resizing mid-game is refused -- it would resize the board
+             under the players, same as moving it")
+        (is (= (count (memory-cards (entity @conn table-id))) 104))))))
+
+(deftest test-memory-difficulty-clamps
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (set-enabled-elements! conn #{:memory/game})
+    (dispatch conn :memory/place-table 999)
+    (let [table-id (minigame-viewing-id conn)]
+      (is (= (memory/difficulty (entity @conn table-id)) memory/max-difficulty)
+          "an out-of-range size clamps rather than dealing nonsense")
+      (dispatch conn :memory/change-difficulty table-id -3)
+      (is (= (memory/difficulty (entity @conn table-id)) 0)))))
 
 (deftest test-memory-start-refuses-to-deal-twice
   (let [conn (ds/conn-from-db (initial-data true))]
@@ -2679,7 +2799,7 @@
           card-ids (set (map :db/id (memory-cards (entity @conn table-id))))]
       (dispatch conn :memory/start table-id ids)
       (let [table (entity @conn table-id)]
-        (is (= (count (memory-cards table)) 52)
+        (is (= (count (memory-cards table)) default-deck)
             "a second deal onto an occupied table is refused -- dealing
              again would strand the first deal's card entities")
         (is (= (set (map :db/id (memory-cards table))) card-ids)
@@ -2814,7 +2934,7 @@
            the new turn -- one click, not two")
       (is (= (:minigame/turn-index (entity @conn minigame-id)) 1)
           "the missed turn passed on as part of the same settlement")
-      (is (= (count (memory-cards (entity @conn minigame-id))) 52)
+      (is (= (count (memory-cards (entity @conn minigame-id))) default-deck)
           "a mismatch takes nothing off the table"))))
 
 (deftest test-memory-flip-auto-resolves-a-match
@@ -2829,13 +2949,13 @@
                            (memory-cards (entity @conn minigame-id))))]
       (dispatch conn :memory/flip (:db/id a))
       (dispatch conn :memory/flip (:db/id b))
-      (is (= (count (memory-cards (entity @conn minigame-id))) 52)
+      (is (= (count (memory-cards (entity @conn minigame-id))) default-deck)
           "the match stays visible until the player acts again -- taking
            it away instantly would mean nobody ever sees what matched")
       (dispatch conn :memory/flip (:db/id c))
       (is (nil? (:db/id (entity @conn (:db/id a)))) "the pair is claimed")
       (is (nil? (:db/id (entity @conn (:db/id b)))))
-      (is (= (count (memory-cards (entity @conn minigame-id))) 50))
+      (is (= (count (memory-cards (entity @conn minigame-id))) (- default-deck 2)))
       (is (= (:minigame/scores (entity @conn minigame-id)) {(first ids) 1})
           "scored to the player who found it")
       (is (= (:minigame/turn-index (entity @conn minigame-id)) 0)
@@ -2936,7 +3056,7 @@
       (start-memory! conn ids)
       (let [minigame-id (minigame-viewing-id conn)]
         (dispatch conn :memory/resolve minigame-id)
-        (is (= (count (memory-cards (entity @conn minigame-id))) 52)
+        (is (= (count (memory-cards (entity @conn minigame-id))) default-deck)
             "no-op when nothing is face-up yet")))))
 
 (deftest test-memory-two-simultaneous-sessions-dont-interfere

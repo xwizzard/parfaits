@@ -809,6 +809,8 @@
    :object/type
    :object/point
    [:object/locked :default false]
+   :minigame/cards
+   :memory/difficulty
    [:object/scale :default 1]
    [:object/rotation :default 0]
    :shape/points
@@ -848,7 +850,12 @@
                 ;; put. The `point` check covers an id whose entity was
                 ;; retracted mid-drag (ds/pull-many yields nil for it, and
                 ;; vec/add on nil would throw and lose the whole move).
-                :when (and (some? point) (not (:object/locked entity)))]
+                :when (and (some? point)
+                           (not (:object/locked entity))
+                           ;; A mini-game table freezes while a game is on
+                           ;; it -- dragging the board mid-game would move
+                           ;; every card under the players at once.
+                           (not (memory/table-in-play? entity)))]
             (cond
               (and align? (contains? snap-to-cell-types type))
               {:db/id id :object/point (geom/snap-to-cell entity delta base-type)}
@@ -3625,7 +3632,7 @@
           it is placed (memory/table-footprint), so what gets sized here
           is exactly what the deal will fill."}
   event-tx-fn :memory/place-table
-  [data _]
+  [data _ level]
   (let [user (ds/entity data [:db/ident :user])
         {point :camera/point scene :camera/scene} (:user/camera user)
         scene-id (:db/id scene)
@@ -3633,7 +3640,8 @@
     (if (contains? enabled :memory/game)
       (let [minigame-id -1
             label (minigame-label (:scene/minigames scene) :memory "Memory")
-            [w h] (memory/table-footprint)
+            level (memory/clamp-difficulty level)
+            [w h] (memory/table-footprint {:memory/difficulty level})
             scale memory/default-scale
             ;; A table scales about its middle (geom/object-transform),
             ;; so a shrunk one sits inset from its stored origin by half
@@ -3646,13 +3654,37 @@
          [{:db/id minigame-id
            :object/type :minigame/table
            :object/point (vec/sub point inset)
-           :object/scale scale}]))
+           :object/scale scale
+           :memory/difficulty level}]))
       [])))
 
 (defmethod
-  ^{:doc "Deals a full standard 52-card deck (see ogres.app.memory/deal)
-          onto the already-placed table `table-id`, seating exactly
-          `participant-ids` -- rejected if fewer than 2 are given, if
+  ^{:doc "Resizes an as-yet-undealt table, from 32 cards (aces and court
+          cards alone) up to 104 (every rank, both copies, all four
+          suits) in steps of one numbered rank -- 8 cards a step, since
+          a rank is 4 suits times 2 copies.
+
+          Refused once cards are on the table: the size determines the
+          felt's own footprint, so changing it mid-game would resize the
+          board under the players, exactly what freezing a table in play
+          exists to prevent (see memory/table-in-play?). End or clear
+          the table to pick a different size."}
+  event-tx-fn :memory/change-difficulty
+  [data _ table-id level]
+  (let [table (if (some? table-id) (ds/entity data table-id))]
+    (if (and table
+             (= (:object/type table) :minigame/table)
+             (= (:minigame/kind table) :memory)
+             (empty? (:minigame/cards table)))
+      [[:db/add table-id :memory/difficulty (memory/clamp-difficulty level)]]
+      [])))
+
+(defmethod
+  ^{:doc "Deals the already-placed table `table-id` at its own chosen
+          size (see :memory/change-difficulty and ogres.app.memory/deal)
+          -- two identical copies of every card in play, so a match is
+          two cards that look the same -- seating exactly
+          `participant-ids` -- rejected if none are given, if
           :memory/game isn't enabled on the scene's own game-type, if
           `table-id` isn't an empty Memory table, or if it already holds
           cards (dealing twice onto one table would strand the first
@@ -3679,11 +3711,11 @@
         table (if (some? table-id) (ds/entity data table-id))
         participant-ids (vec (distinct participant-ids))]
     (if (and (contains? enabled :memory/game)
-             (>= (count participant-ids) 2)
+             (>= (count participant-ids) 1)
              (= (:object/type table) :minigame/table)
              (= (:minigame/kind table) :memory)
              (empty? (:minigame/cards table)))
-      (let [cards (memory/deal)
+      (let [cards (memory/deal (memory/difficulty table))
             ;; Card ids -1..-52, then the seats past that whole block --
             ;; the same "reserve a block, then continue past it" idiom
             ;; deck-create-tx's card-ids-then-deck-id uses.

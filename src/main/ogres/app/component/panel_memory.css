@@ -45,3 +45,17 @@
   color: var(--color-blues-700);
   font-weight: bold;
 }
+
+/* Table size picker -- sits above "Place table", and drives the placed
+   table's own size until cards are dealt onto it. */
+.memory-difficulty {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+
+  select {
+    flex: 1;
+    min-width: 0;
+  }
+}

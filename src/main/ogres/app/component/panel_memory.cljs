@@ -26,6 +26,7 @@
             [ogres.app.component :refer [icon]]
             [ogres.app.component.panel-minigame :as minigame]
             [ogres.app.hooks :as hooks]
+            [ogres.app.memory :as memory]
             [ogres.app.turn-order :as turn-order]
             [uix.core :as uix :refer [defui $]]))
 
@@ -39,6 +40,7 @@
           [:db/id
            :minigame/kind
            :minigame/label
+           :memory/difficulty
            [:minigame/turn-index :default 0]
            [:minigame/scores :default nil]
            {:minigame/seats
@@ -88,7 +90,11 @@
         result (hooks/use-query query [:db/ident :root])
         host (:user/host (:root/user result))
         {:keys [players-by-id sessions selected turn-players current-index scores finished? started?]}
-        (memory-state result)]
+        (memory-state result)
+        ;; The size the NEXT table gets placed at. Once a table exists
+        ;; and is still empty, the select drives its stored size instead.
+        [pending-difficulty set-pending-difficulty]
+        (uix/use-state memory/default-difficulty)]
     ($ :.form-memory
       ($ :header ($ :h2 "Memory"))
       ($ minigame/session-list
@@ -144,19 +150,45 @@
               ($ :span.memory-turn-color)
               ($ :span.memory-turn-name (:player/name entity))
               ($ :span.memory-turn-score (get scores id 0))))))
+      ;; Size is settled before the deal, alongside position and scale --
+      ;; it decides the felt's own footprint, so it locks with everything
+      ;; else the moment cards land (see :memory/change-difficulty).
+      (if (and host (or (not selected) (not started?)))
+        ($ :label.memory-difficulty
+          ($ :span "Size")
+          ($ :select
+            {:value (str (if (and selected (not started?))
+                           (memory/difficulty selected)
+                           pending-difficulty))
+             :on-change
+             (fn [event]
+               (let [level (js/parseInt (.. event -target -value) 10)]
+                 (set-pending-difficulty level)
+                 (if (and selected (not started?))
+                   (dispatch :memory/change-difficulty (:db/id selected) level))))}
+            (for [level (range 0 (inc memory/max-difficulty))
+                  :let [n (memory/deck-size level)]]
+              ($ :option {:key level :value (str level)}
+                (str n " cards / " (quot n 2) " pairs"
+                     (cond (zero? level) " -- aces and faces"
+                           (= level memory/max-difficulty) " -- everything"
+                           :else "")))))))
       ;; Placing mints entities, so it stays with the host for the same
       ;; reason starting is relayed to them (see :minigame/create-request)
       ;; -- there is no cross-peer entity-id partitioning. The host lays
       ;; out the board; any participant can then start a game on it.
       (if host
         ($ :button.button.button-neutral
-          {:type "button" :on-click #(dispatch :memory/place-table)}
+          {:type "button" :on-click #(dispatch :memory/place-table pending-difficulty)}
           ($ icon {:name "plus-circle-fill" :size 16})
           "Place table"))
       (if (and selected (not started?))
         ($ minigame/new-session-form
           {:players (:root/players result)
            :submit-label "Start table"
+           ;; Memory alone is a real way to play it -- there is nothing
+           ;; hidden from an opponent, just a board and your own recall.
+           :min-players 1
            :on-submit
            (fn [ids]
              (if host

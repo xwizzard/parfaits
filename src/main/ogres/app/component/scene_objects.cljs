@@ -415,16 +415,6 @@
         :hex-flat (get anchor-nudge-hex-flat-angles code)
         nil)))
 
-(defn ^:private scale-locked?
-  "True when `entity`'s dimensions must not change. A mini-game table
-   locks while it still holds cards: resizing mid-game would rescale the
-   board under the players. It unlocks once the game is over (every pair
-   matched, so no cards remain) and the table is just an empty frame
-   waiting to be cleared."
-  [entity]
-  (and (= (:object/type entity) :minigame/table)
-       (seq (:minigame/cards entity))))
-
 (defui ^:private ^:memo object-prop-scale
   [{:keys [point size angle]}]
   (let [option #js {"id" (str "resize/" point) "data" #js {"type" "resize" "point" point}}
@@ -701,7 +691,7 @@
 
 (defui ^:private minigame-table-content [props]
   (let [{cards :minigame/cards} (:entity props)
-        [w h] (memory/table-footprint)]
+        [w h] (memory/table-footprint (:entity props))]
     ($ :<>
       ($ :defs
         ;; One lattice tile, reused by every card back on this table.
@@ -725,7 +715,7 @@
           object-scale :object/scale
           [{zoom :camera/scale}] :camera/_selected} :entity
          transform :transform} props
-        [w h] (memory/table-footprint)
+        [w h] (memory/table-footprint (:entity props))
         [scale set-scale] (uix/use-state object-scale)
         dispatch (hooks/use-dispatch)
         bounds (Segment. vec/zero (Vec2. w h))
@@ -778,7 +768,7 @@
     ;; the moment a game is dealt onto it -- resizing mid-game would
     ;; rescale the board out from under the players (see scale-locked?).
     (if (and (some? user)
-             (not (scale-locked? (:entity props)))
+             (not (memory/table-in-play? (:entity props)))
              (= #{id} selected))
       ($ dnd-context
         #js {"modifiers" #js [mod-scale modifiers/trunc]}
@@ -1240,6 +1230,7 @@
            :object/type
            [:object/point :default vec/zero]
            [:object/scale :default 1]
+           :memory/difficulty
            {:minigame/cards
             [:db/id :memory/index [:memory/face-up? :default false]
              :card/rank :card/suit]}
@@ -1500,6 +1491,11 @@
               bounds (transduce bound-xf geom/bounding-rect-rf entities)
               locked (or (some dragging selected)
                          (and (= (count selected) 1) (:object/locked (first select)))
+                         ;; A table with a game on it does not move; see
+                         ;; memory/table-in-play?. Enforced in :objects/
+                         ;; translate-many too -- this only stops the drag
+                         ;; gesture from looking like it will work.
+                         (some memory/table-in-play? select)
                          (and (not host)
                               (some
                                (fn [entity]

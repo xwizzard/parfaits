@@ -74,54 +74,118 @@
      (+ (* 2 table-padding) (- (* (rows n-cards) (+ card-height card-gap)) card-gap))]))
 
 (def suits
-  "The four suits, in the order the standard-52 deck definition lists
-   them (game-type/core-decks) so a Memory board and a dealt deck read
-   the same way."
+  "All four suits. Safe to deal every suit because a match means two
+   IDENTICAL cards -- the king of spades pairs only with the other king
+   of spades, never with the king of clubs. (Under the old rank-and-
+   colour rule those two did match, which is why clubs and diamonds had
+   to be dropped; identical-matching removes that constraint.)"
   [:clubs :diamonds :hearts :spades])
 
+(def face-ranks
+  "Aces and the court cards -- dealt at every size, so even the smallest
+   game has four visually distinct ranks rather than four adjacent pip
+   counts that are easy to confuse at a glance."
+  [:ace :jack :queen :king])
+
+(def numbered-ranks
+  "The pip ranks, added one at a time to make the game harder."
+  [:two :three :four :five :six :seven :eight :nine :ten])
+
 (def ranks
+  "Every rank a card face may show, in reading order."
   [:ace :two :three :four :five :six :seven :eight :nine :ten
    :jack :queen :king])
 
-(def deck-size
-  "Cards in a full deal -- the whole standard deck."
-  (* (count suits) (count ranks)))
+(def ^:const copies
+  "How many of each card a deal contains. Two, so every card has exactly
+   one identical partner."
+  2)
+
+(def max-difficulty
+  "The hardest game: every numbered rank added on top of the faces."
+  (count numbered-ranks))
+
+(def ^:const default-difficulty
+  "Two numbered ranks on top of the faces -- 48 cards, which fills the
+   same four rows the fixed 52-card deal used to, so the table lands at
+   its familiar size unless asked otherwise."
+  2)
+
+(defn clamp-difficulty
+  [level]
+  (max 0 (min max-difficulty (or level default-difficulty))))
+
+(defn ranks-for-difficulty
+  "The ranks dealt at `level`: the faces always, plus `level` numbered
+   ranks counting up from the two."
+  [level]
+  (into face-ranks (take (clamp-difficulty level) numbered-ranks)))
+
+(defn deck-size
+  "Cards dealt at `level` -- 32 at the easiest (aces and faces alone),
+   104 at the hardest (the whole double deck), one numbered rank and so
+   8 cards per step between."
+  [level]
+  (* (count suits) copies (count (ranks-for-difficulty level))))
+
+(defn difficulty
+  "A table's chosen size, defaulted."
+  [entity]
+  (clamp-difficulty (:memory/difficulty entity)))
+
+(defn table-in-play?
+  "True when `entity` is a Memory table with cards still on it -- a game
+   in progress.
+
+   Such a table is frozen in place: neither movable nor resizable, since
+   either would shift the board out from under the players mid-game. It
+   thaws once the last pair is claimed and the table is an empty frame
+   again, ready to be repositioned or cleared."
+  [entity]
+  (and (= (:object/type entity) :minigame/table)
+       (seq (:minigame/cards entity))))
 
 (defn table-footprint
-  "The unscaled [width height] of a table, whatever it currently holds.
+  "The unscaled [width height] of `entity`, whatever it currently holds.
 
-   Deliberately NOT a function of the cards still in play: a table is
-   placed empty and later dealt into, and matched pairs leave the board
-   as the game runs. Sizing the felt to the live card count would grow
-   the table the moment a game started and shrink it under the players
-   with every pair they found."
-  []
-  (table-size deck-size))
+   Sized from the table's CHOSEN difficulty, not the cards on it: a
+   table is placed empty and dealt into later, and matched pairs leave
+   the board as the game runs. Sizing the felt to the live card count
+   would grow the table the moment a game started and shrink it under
+   the players with every pair they found.
+
+   Width is the same at every size -- the grid is always `columns`
+   wide -- so making a game harder extends the table downwards only."
+  [entity]
+  (table-size (deck-size (difficulty entity))))
 
 (def ^:private red-suits #{:hearts :diamonds})
 
 (defn suit-color
-  "A suit's colour, :red or :black. This is half of what makes a pair --
-   see `pair?`."
+  "A suit's colour, :red or :black -- how a card face is drawn. NOT part
+   of the match rule any more; see `pair?`."
   [suit]
   (if (contains? red-suits suit) :red :black))
 
 (defn pair?
-  "True if two cards match. A single deck holds only one of each exact
-   card, so pairs are matched on RANK AND COLOUR: the two black kings
-   make a pair, as do the two red kings. That partitions all 52 cards
-   into exactly 26 pairs with nothing left over, which is why the whole
-   deck is dealt rather than a subset."
+  "True if two cards show the same face -- same rank, same suit. The deal
+   holds exactly two of each card (see `copies`), so this partitions all
+   52 into 26 pairs with nothing left over.
+
+   Expects two DIFFERENT cards. Every caller compares two distinct
+   face-up cards, and a card cannot be flipped while already face-up, so
+   a card is never handed to this alongside itself."
   [a b]
   (and (= (:card/rank a) (:card/rank b))
-       (= (suit-color (:card/suit a)) (suit-color (:card/suit b)))
-       (not= (:card/suit a) (:card/suit b))))
+       (= (:card/suit a) (:card/suit b))))
 
 (defn deal
-  "A shuffled standard 52-card deck in grid order, index 0 first -- a
-   vector of {:card/rank :card/suit} maps. Position is not dealt: a
-   card's index in this vector IS its grid slot, and card-offset turns
-   that into coordinates at render time."
-  []
+  "A shuffled deal at `level`, in grid order, index 0 first -- a vector
+   of {:card/rank :card/suit} maps, two identical copies of every card
+   in play. Position is not dealt: a card's index in this vector IS its
+   grid slot, and card-offset turns that into coordinates at render
+   time."
+  [level]
   (shuffle
-   (into [] (for [suit suits rank ranks] {:card/rank rank :card/suit suit}))))
+   (into [] (for [suit suits rank (ranks-for-difficulty level) _ (range copies)]
+              {:card/rank rank :card/suit suit}))))

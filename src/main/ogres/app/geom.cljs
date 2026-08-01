@@ -434,8 +434,8 @@
 ;; which is exactly what makes the whole board one movable, scalable
 ;; object rather than N independent props.
 (defmethod object-bounding-rect :minigame/table
-  [{src :object/point scale :object/scale}]
-  (let [[w h] (memory/table-footprint)
+  [{src :object/point scale :object/scale :as entity}]
+  (let [[w h] (memory/table-footprint entity)
         s (or scale 1)
         mid (Vec2. (/ w 2) (/ h 2))
         arm (Vec2. (* (/ w 2) s) (* (/ h 2) s))
@@ -585,8 +585,8 @@
 ;; origin instead would put a handle exactly on the anchor and divide by
 ;; zero the moment it moved.
 (defmethod object-transform :minigame/table
-  [{scale :object/scale}]
-  (let [[w h] (memory/table-footprint)
+  [{scale :object/scale :as entity}]
+  (let [[w h] (memory/table-footprint entity)
         center (seg/midpoint (Segment. vec/zero (Vec2. w h)))]
     (-> (matrix/translate matrix/identity center)
         (matrix/scale (or scale 1))

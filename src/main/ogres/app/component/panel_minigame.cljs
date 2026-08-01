@@ -72,17 +72,21 @@
   "A participant checkbox list, grouped by roster kind (human/NPC),
    plus a 'Start table' submit -- `players` is the whole roster
    (:root/players), `on-submit` is called with the vector of selected
-   player ids. Requires at least 2 selected participants, mirroring
-   :old-maid/start's own minimum (checked there too, since this UI
-   gate alone isn't authoritative -- see its docstring)."
-  [{:keys [players on-submit submit-label]}]
+   player ids.
+
+   `min-players` defaults to 2, mirroring :old-maid/start's own minimum
+   (checked there too, since this UI gate alone isn't authoritative --
+   see its docstring). Games that are playable solo pass 1: Memory
+   against yourself is a real way to play it, whereas a one-handed game
+   of War is not."
+  [{:keys [players on-submit submit-label min-players] :or {min-players 2}}]
   (let [[selected set-selected] (uix/use-state #{})
         toggle (fn [id] (set-selected (fn [s] (if (contains? s id) (disj s id) (conj s id)))))]
     ($ :form.minigame-new-session
       {:on-submit
        (fn [event]
          (.preventDefault event)
-         (if (>= (count selected) 2)
+         (if (>= (count selected) min-players)
            (do (on-submit (vec selected))
                (set-selected #{}))))}
       (for [[kind entities] (group-by :player/kind players)]
@@ -97,7 +101,7 @@
               ($ icon {:name "check" :size 20})
               (:player/name entity)))))
       ($ :button.button.button-neutral
-        {:type "submit" :disabled (< (count selected) 2)}
+        {:type "submit" :disabled (< (count selected) min-players)}
         ($ icon {:name "plus" :size 16})
         (or submit-label "Start table")))))
 
