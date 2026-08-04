@@ -333,11 +333,15 @@
      :color       that effect's accent, for the fill behind the glyph --
                   absent when the effect has taken the whole card instead
      :field-color the colour the CARD takes: the effect's own where it has
-                  one, otherwise (Heal alone) a fixed neutral
+                  one, otherwise (Heal, and any :custom effect) a fixed
+                  neutral
      :element-color the orb an element's glyph sits in, at the brightness
                   the printed card gives it
      :plain-medallion? true when the glyph sits straight on the field,
                   with no accent drawn behind it
+     :custom-text a :custom effect's prose, when the card has one -- the
+                  medallion becomes a page to write it on rather than a
+                  glyph, and none of :effect-icon/:amount/:caption apply
      :amount      the effect's quantity, when it has one
      :amount-label that quantity as it should read, signed where the
                   effect adds rather than reduces
@@ -361,73 +365,84 @@
    each component is drawn; this only says which components exist."
   ([kind]
    (card-face kind nil))
-  ([kind {:keys [effect amount rolling? target reduced?]}]
+  ([kind {:keys [effect amount rolling? target reduced? text]}]
    (let [base (get faces kind {:fill :neutral :value (str kind)})
          base (if reduced? (merge base (get reduced-faces kind)) base)
          ;; A reduced face replaces Null's glyph with a numeral, so drop
          ;; any glyph the base kind had once a value is present.
-         base (if (:value base) (dissoc base :glyph) base)
-         face
-         (cond-> base
-           ;; An element's glyph depends on WHICH element, which rides in
-           ;; the amount rather than in the effect itself.
-           (= effect :element)
-           (merge {:effect-icon (get element-icons amount "am-fire")
-                   :caption element-caption}
-                  (get element-colors amount))
+         base (if (:value base) (dissoc base :glyph) base)]
+     (if (= effect :custom)
+       ;; A custom effect is prose, not a symbol -- there is no glyph to
+       ;; reach for, and the printed cards do not reach for one either:
+       ;; they draw the sentence itself on a light disc. None of the
+       ;; glyph/amount/caption machinery below applies, so this returns
+       ;; early rather than threading a "no, not this one" through it.
+       ;; The field takes the same fixed neutral Heal does -- whatever a
+       ;; custom effect actually does, the card has nothing more specific
+       ;; to say with its colour than "this is the effect".
+       (cond-> (assoc base :field-color neutral-field :custom-text text)
+         rolling? (assoc :rolling? true))
+       (let [face
+             (cond-> base
+               ;; An element's glyph depends on WHICH element, which rides in
+               ;; the amount rather than in the effect itself.
+               (= effect :element)
+               (merge {:effect-icon (get element-icons amount "am-fire")
+                       :caption element-caption}
+                      (get element-colors amount))
 
-           (and (not= effect :element) (contains? effect-icons effect))
-           (merge {:effect-icon (get effect-icons effect)}
-                  ;; An effect that takes no quantity leaves the caption
-                  ;; slot empty, so it spends it naming itself. Two
-                  ;; conditions can look alike at panel size -- poison and
-                  ;; wound are both a dark mark on a pale field -- and the
-                  ;; word settles it without the reader learning a glyph.
-                  ;; The ones that DO carry a number keep it there; a
-                  ;; number is the fact you cannot infer from the symbol.
-                  (if (not (:amount? (get effect-kinds effect)))
-                    {:caption (:label (get effect-kinds effect))})
-                  (get effect-colors effect))
+               (and (not= effect :element) (contains? effect-icons effect))
+               (merge {:effect-icon (get effect-icons effect)}
+                      ;; An effect that takes no quantity leaves the caption
+                      ;; slot empty, so it spends it naming itself. Two
+                      ;; conditions can look alike at panel size -- poison and
+                      ;; wound are both a dark mark on a pale field -- and the
+                      ;; word settles it without the reader learning a glyph.
+                      ;; The ones that DO carry a number keep it there; a
+                      ;; number is the fact you cannot infer from the symbol.
+                      (if (not (:amount? (get effect-kinds effect)))
+                        {:caption (:label (get effect-kinds effect))})
+                      (get effect-colors effect))
 
-           ;; Shield 1, Pierce 3, Push 1 -- the quantity belongs with the
-           ;; glyph. An element's "amount" is which element, not how much,
-           ;; so it never renders as a number.
-           (and effect (not= effect :element) (number? amount))
-           (assoc :amount amount
-                  ;; Heal and Add Target ADD -- they read "+1", where
-                  ;; Pierce reduces and reads a plain "3".
-                  :amount-label (str (if (:signed? (get effect-kinds effect)) "+") amount))
+               ;; Shield 1, Pierce 3, Push 1 -- the quantity belongs with the
+               ;; glyph. An element's "amount" is which element, not how much,
+               ;; so it never renders as a number.
+               (and effect (not= effect :element) (number? amount))
+               (assoc :amount amount
+                      ;; Heal and Add Target ADD -- they read "+1", where
+                      ;; Pierce reduces and reads a plain "3".
+                      :amount-label (str (if (:signed? (get effect-kinds effect)) "+") amount))
 
-           ;; ...unless the quantity reads better as a phrase, in which
-           ;; case it takes the caption slot and leaves the number slot
-           ;; empty rather than saying the same thing twice.
-           (and effect (number? amount) (amount-caption effect amount))
-           (-> (assoc :caption (amount-caption effect amount))
-               (dissoc :amount-label))
+               ;; ...unless the quantity reads better as a phrase, in which
+               ;; case it takes the caption slot and leaves the number slot
+               ;; empty rather than saying the same thing twice.
+               (and effect (number? amount) (amount-caption effect amount))
+               (-> (assoc :caption (amount-caption effect amount))
+                   (dissoc :amount-label))
 
-           rolling?
-           (assoc :rolling? true)
+               rolling?
+               (assoc :rolling? true)
 
-           ;; The qualifier the printed cards write beneath the glyph --
-           ;; every heal and shield card in the class decks is Self. It
-           ;; shares the caption slot with the element verb above, and
-           ;; wins it: a stated target is more specific than "Create".
-           (and effect target)
-           (assoc :target target
-                  :caption (get target-labels target (name target))))]
-     (if (:effect-icon face)
-       ;; The accent is read here, before anything below might dissoc it.
-       (let [accent (:color face)]
-         (-> face
-             (assoc :field-color (or (:field face) neutral-field))
-             (cond->
-               ;; The card is already painted the effect's colour, so a
-               ;; diamond in that same colour would only be a seam -- goes
-               ;; plain, and its own accent goes with it. Heal alone has no
-               ;; :field, so this never fires for it: it keeps painting
-               ;; `accent` behind the glyph, which is what tells it apart
-               ;; from its own neutral background.
-               (:field face) (-> (assoc :plain-medallion? true) (dissoc :color))
-               (= effect :element) (assoc :element-color accent))
-             (dissoc :field)))
-       (dissoc face :field)))))
+               ;; The qualifier the printed cards write beneath the glyph --
+               ;; every heal and shield card in the class decks is Self. It
+               ;; shares the caption slot with the element verb above, and
+               ;; wins it: a stated target is more specific than "Create".
+               (and effect target)
+               (assoc :target target
+                      :caption (get target-labels target (name target))))]
+         (if (:effect-icon face)
+           ;; The accent is read here, before anything below might dissoc it.
+           (let [accent (:color face)]
+             (-> face
+                 (assoc :field-color (or (:field face) neutral-field))
+                 (cond->
+                   ;; The card is already painted the effect's colour, so a
+                   ;; diamond in that same colour would only be a seam -- goes
+                   ;; plain, and its own accent goes with it. Heal alone has no
+                   ;; :field, so this never fires for it: it keeps painting
+                   ;; `accent` behind the glyph, which is what tells it apart
+                   ;; from its own neutral background.
+                   (:field face) (-> (assoc :plain-medallion? true) (dissoc :color))
+                   (= effect :element) (assoc :element-color accent))
+                 (dissoc :field)))
+           (dissoc face :field)))))))

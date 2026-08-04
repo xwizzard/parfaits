@@ -47,10 +47,11 @@
   "Display text for one drawn/held kind + its optional attached effect,
    e.g. \"+1\" or \"+1 Push 2\" -- \"-2\" instead of \"Null\"/\"CURSE\"
    or \"+2\" instead of \"2x\"/\"BLESS\" when `reduced?` (the Reduced
-   Randomness variant) is on."
-  [kind effect amount reduced?]
+   Randomness variant) is on. A :custom effect has no fixed label to look
+   up -- its own prose, `text`, stands in for one."
+  [kind effect amount reduced? text]
   (let [label (if reduced? (get reduced-randomness-label kind (kind-label kind)) (kind-label kind))
-        effect-text (attack-deck/effect-label effect amount)]
+        effect-text (if (= effect :custom) text (attack-deck/effect-label effect amount))]
     (if effect-text (str label " " effect-text) label)))
 
 (defui attack-card
@@ -61,15 +62,15 @@
    Nothing here identifies which deck the card belongs to -- that lives
    on the deck itself (:player/attack-deck, :scene/monster-attack-deck),
    so the face carries only the modifier and what is attached to it."
-  [{:keys [kind effect amount rolling? target reduced? size] :or {size :sm}}]
+  [{:keys [kind effect amount rolling? target reduced? text size] :or {size :sm}}]
   (let [{:keys [fill value glyph effect-icon wings wing-glyph shuffle?
-                color field-color plain-medallion? element-color]
+                color field-color plain-medallion? element-color custom-text]
          card-rolling? :rolling?
          card-amount :amount-label
          card-caption :caption}
         (attack-deck/card-face kind {:effect effect :amount amount
                                      :rolling? rolling? :target target
-                                     :reduced? reduced?})
+                                     :reduced? reduced? :text text})
         ;; An effect, when the card has one, always owns the medallion --
         ;; the modifier demotes to the small chip below instead, whatever
         ;; its own value. The quantity rides with the glyph, as it does on
@@ -86,7 +87,14 @@
                  (if glyph ($ icon {:name glyph :size 26}) value))
         medallion
         ($ :.attack-card-medallion
-          (if effect-icon
+          (cond
+            ;; A custom effect is prose, not a glyph -- the medallion
+            ;; becomes a page to write it on rather than a diamond, as the
+            ;; printed cards draw it.
+            custom-text
+            ($ :.attack-card-prose custom-text)
+
+            effect-icon
             ;; Kept in the tree even when nothing is drawn behind the
             ;; glyph: this element carries the rotation the stacked
             ;; glyph-over-number layout is built on, so removing it would
@@ -105,6 +113,8 @@
                :data-caption (if card-caption "true")
                :data-effect (if effect (name effect))}
               centre)
+
+            :else
             ($ :.attack-card-value centre)))]
     ($ :.attack-card
       {:data-fill (name fill)
@@ -118,7 +128,7 @@
                 ;; The one colour drawn at its own brightness: an element's
                 ;; orb is the bright thing on the printed card.
                 element-color (assoc "--am-element" element-color))
-       :aria-label (draw-text kind effect amount reduced?)}
+       :aria-label (draw-text kind effect amount reduced? text)}
       (if wings
         ($ :.attack-card-wing {:data-wings (name wings)}
           ($ :svg.attack-card-lens {:viewBox "0 0 1469 1000"}
@@ -133,7 +143,7 @@
       ;; the printed cards write it there regardless, since the chip costs
       ;; nothing to read at that size the way a redundant "+0" would in
       ;; the medallion itself.
-      (if effect-icon
+      (if (or effect-icon custom-text)
         ($ :.attack-card-chip (if glyph ($ icon {:name glyph :size 14}) value)))
       ;; Rolling: resolves and the draw continues. Its own corner, since a
       ;; card can be rolling AND carry an effect.
@@ -311,7 +321,10 @@
       ($ :ul.attack-deck-effect-list
         (for [{:keys [kind effect amount count]} groups]
           ($ :li.attack-deck-effect-item {:key (str kind "-" effect "-" amount)}
-            ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount reduced?) " x" count))
+            ;; No card here ever carries :custom -- the composition editor's
+            ;; own effect picker only offers the fixed vocabulary -- so text
+            ;; is always nil, harmlessly, per draw-text's own fallback.
+            ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount reduced? nil) " x" count))
             ($ :button.button.button-danger
               {:type "button" :disabled disabled?
                :on-click #(dispatch :attack-deck/remove-effect-cards deck-id kind effect amount 1)}
@@ -331,7 +344,7 @@
         ($ :ul.attack-deck-effect-list
           (for [{:keys [kind effect amount count]} groups]
             ($ :li.attack-deck-effect-item {:key (str "temp-" kind "-" effect "-" amount)}
-              ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount reduced?) " x" count))
+              ($ :span.attack-deck-effect-item-label (str (draw-text kind effect amount reduced? nil) " x" count))
               ($ :button.button.button-danger
                 {:type "button" :disabled disabled?
                  :on-click

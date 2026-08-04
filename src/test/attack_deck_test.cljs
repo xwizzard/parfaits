@@ -429,3 +429,44 @@
   (testing "a stated target still wins the slot from a name"
     (is (= (:caption (attack-deck/card-face :plus-0 {:effect :invisible :target :self}))
            "Self"))))
+
+(deftest test-custom-effect-card
+  ;; No Gloomhaven class carries one of these -- every printed instance
+  ;; found while checking this was Frosthaven's -- so nothing here is
+  ;; exercised by the class-deck table today. It exists for whichever
+  ;; source eventually supplies that data.
+  (testing "a custom effect is prose, not a symbol"
+    (let [f (attack-deck/card-face :plus-1 {:effect :custom :text "Add +2 for each ally adjacent to the target."})]
+      (is (= (:custom-text f) "Add +2 for each ally adjacent to the target."))
+      (is (nil? (:effect-icon f)) "there is no glyph to reach for")
+      (is (nil? (:caption f)) "or a caption slot underneath one")
+      (is (nil? (:amount f)))))
+
+  (testing "the field is the same fixed neutral Heal sits on"
+    ;; Measured on the printed cards (Coral, Banner Spear, Boneshaper):
+    ;; the field is the ordinary brown parchment a plain +0 is printed on,
+    ;; not a colour derived from what the custom effect happens to do.
+    (is (= (:field-color (attack-deck/card-face :plus-1 {:effect :custom :text "x"}))
+           attack-deck/neutral-field))
+    (is (nil? (:plain-medallion? (attack-deck/card-face :plus-1 {:effect :custom :text "x"})))
+        "there is no diamond to strip the paint from in the first place"))
+
+  (testing "the modifier still shows, whatever its kind"
+    ;; The printed custom cards keep the ordinary chip -- a custom effect
+    ;; explaining itself in prose does not also excuse the modifier from
+    ;; being shown.
+    (doseq [kind [:plus-0 :plus-1 :plus-2]]
+      (is (= (:value (attack-deck/card-face kind {:effect :custom :text "x"}))
+             (:value (attack-deck/card-face kind)))
+          (str kind " keeps its own numeral"))))
+
+  (testing "rolling still carries onto a custom card"
+    (is (:rolling? (attack-deck/card-face :plus-0 {:effect :custom :text "x" :rolling? true})))
+    (is (not (:rolling? (attack-deck/card-face :plus-0 {:effect :custom :text "x"})))))
+
+  (testing "custom is deliberately outside the fixed vocabulary"
+    ;; It has no :label/:amount?, unlike every effect the composition
+    ;; editor can actually offer -- a custom effect is never something a
+    ;; GM assembles from the generic push/pull/condition parts, only
+    ;; something a data source supplies pre-written.
+    (is (not (contains? attack-deck/effect-kinds :custom)))))

@@ -381,6 +381,40 @@
   fill: #fff;
 }
 
+/* A custom effect is prose, not a symbol -- there is no glyph for it, so
+   the medallion becomes a page to write the sentence on instead, the way
+   the printed cards draw it. Sized close to the medallion's own circle
+   rather than inscribed the way a diamond is (74%), since text needs
+   the room a symbol does not.
+
+   The disc's colour and the dark ink on it were both measured off three
+   printed custom-effect cards (Coral, Banner Spear, Boneshaper) -- a
+   light warm grey, not pure white, consistent across all three. Body
+   text, not the numeral face: this is prose to read, not a display
+   digit, so it inherits the app's own serif rather than asking for
+   Pirata Numerals the way every other glyph on the card does. */
+.attack-card-prose {
+  width: 94%;
+  height: 94%;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10%;
+  background: oklch(0.82 0.008 48.6);
+  box-shadow: inset 0 0 0 calc(var(--w) * 0.006) rgb(0 0 0 / 12%);
+  color: oklch(0.22 0.01 60);
+  font-size: calc(var(--w) / 1.535 * 0.082);
+  line-height: 1.18;
+  overflow: hidden;
+  /* A source that hands this component one long unbroken token (a raw
+     key, a URL) would otherwise overflow the disc outright rather than
+     wrap -- ordinary prose never triggers this, but nothing guarantees
+     the text always is ordinary prose. */
+  overflow-wrap: anywhere;
+}
+
 /* The modifier demotes to this chip once an effect owns the medallion --
    the printed Frosthaven arrangement: a small circle in the modifier's
    own sign colour (var(--am-sign), not the card's field -- the field is
