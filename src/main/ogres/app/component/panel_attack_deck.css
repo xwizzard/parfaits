@@ -610,7 +610,7 @@
 
 .attack-card-choice-orb {
   position: absolute;
-  width: 46%;
+  width: 42%;
   aspect-ratio: 1;
   border-radius: 50%;
   display: grid;
@@ -619,8 +619,13 @@
   box-shadow: 0 0 0 calc(var(--w) * 0.0096) #fff;
 }
 
-.attack-card-choice-orb[data-slot="a"] { top: 4%; left: 4%; }
-.attack-card-choice-orb[data-slot="b"] { bottom: 4%; right: 4%; }
+/* Pushed further toward their own corners than a bare 46%/4% pairing
+   would put them -- that sized each orb's bounding box to touch the
+   container's exact centre, leaving only the inscribed circle's own
+   corner clearance between it and "or". This opens real daylight along
+   the diagonal instead. */
+.attack-card-choice-orb[data-slot="a"] { top: 1%; left: 1%; }
+.attack-card-choice-orb[data-slot="b"] { bottom: 1%; right: 1%; }
 
 .attack-card-choice-orb .icon {
   width: 60%;
