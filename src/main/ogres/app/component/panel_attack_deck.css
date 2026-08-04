@@ -640,18 +640,21 @@
   opacity: 0.45;
 }
 
-/* Rolling flag: a green diamond in the top-right, as the printed perk
-   cards have it. Its own slot rather than sharing the shuffle corner,
-   because a card can be rolling and carry an effect at once. */
+/* Rolling flag: a green diamond on the right, vertically centred -- the
+   printed cards mirror the chip's own left-side centring rather than
+   pinning it to a corner, measured across four decks in both editions
+   (GH and FH alike, centre-y 0.496-0.501 every time). Its own slot
+   rather than sharing the shuffle corner, because a card can be rolling
+   and carry an effect at once. */
 .attack-card-rolling {
   position: absolute;
   right: 4.5%;
-  top: 7%;
+  top: 50%;
   width: calc(var(--w) * 0.145);
   aspect-ratio: 1;
   display: grid;
   place-items: center;
-  transform: rotate(45deg);
+  transform: translateY(-50%) rotate(45deg);
   border-radius: 12%;
   background: oklch(0.545 0.150 149);
   box-shadow: inset 0 0 0 calc(var(--w) * 0.006) rgb(255 255 255 / 65%);
