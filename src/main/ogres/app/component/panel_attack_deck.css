@@ -569,6 +569,80 @@
   transform: rotate(-45deg) translate(0, -40%);
 }
 
+/* A two-element choice card (see attack-deck/card-face's :element-half
+   branch) -- deliberately NOT the printed cards' own graphic, a single
+   pill split into two halves with no divider, which is exactly the kind
+   of shape that reads as ambiguous at panel size (does it mean both? one
+   of two? blended?). Instead this borrows Frosthaven's own visual
+   language for an unambiguous choice from a card that already draws one
+   clearly: Trapper's rolling "Push 2 or Pull 2", two options offset on a
+   diagonal, split by a slash with "or" between them. No diamond here --
+   a choice is two whole orbs, not one glyph -- so this sits in the
+   medallion on its own rather than inside .attack-card-diamond. */
+.attack-card-choice {
+  position: relative;
+  width: 88%;
+  aspect-ratio: 1;
+}
+
+/* The slash: one bar along the diagonal, rotated rather than drawn with
+   a diagonal gradient axis -- a rotated element measures its own gap in
+   plain horizontal percentages, where a gradient's diagonal axis would
+   need trigonometry to land the same gap at the same physical size.
+   rotate(-45deg) tips a horizontal bar's right end up and left end down,
+   which is the "/" (bottom-left-to-top-right) the printed reference card
+   has, not a "\". The middle third is carved out transparent for "or" to
+   sit in -- open air, not a same-colour box painted over the line, which
+   read as a visible seam against anything but an exactly flat field. */
+.attack-card-choice::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 78%;
+  height: calc(var(--w) * 0.007);
+  transform: translate(-50%, -50%) rotate(-45deg);
+  background: linear-gradient(90deg,
+    rgb(255 255 255 / 70%) 0 38%,
+    transparent 38% 62%,
+    rgb(255 255 255 / 70%) 62% 100%);
+}
+
+.attack-card-choice-orb {
+  position: absolute;
+  width: 46%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--am-choice);
+  box-shadow: 0 0 0 calc(var(--w) * 0.0096) #fff;
+}
+
+.attack-card-choice-orb[data-slot="a"] { top: 4%; left: 4%; }
+.attack-card-choice-orb[data-slot="b"] { bottom: 4%; right: 4%; }
+
+.attack-card-choice-orb .icon {
+  width: 60%;
+  height: 60%;
+  fill: #fff;
+}
+
+/* Sits in the slash's own carved-out gap -- open air behind it, not a
+   box painted over the line, so this needs no field colour of its own
+   to hide anything. */
+.attack-card-choice-or {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.13);
+  color: #fff;
+  text-shadow: 0 calc(var(--w) * 0.006) 0 rgb(0 0 0 / 30%);
+  z-index: 1;
+}
+
 /* The caption beneath the glyph: a target where the card states one,
    otherwise what an element card does with its symbol. Small caps-ish,
    since it is a word among symbols. */

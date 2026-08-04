@@ -47,11 +47,16 @@
   "Display text for one drawn/held kind + its optional attached effect,
    e.g. \"+1\" or \"+1 Push 2\" -- \"-2\" instead of \"Null\"/\"CURSE\"
    or \"+2\" instead of \"2x\"/\"BLESS\" when `reduced?` (the Reduced
-   Randomness variant) is on. A :custom effect has no fixed label to look
-   up -- its own prose, `text`, stands in for one."
+   Randomness variant) is on. Neither :custom nor :element-half has a
+   fixed label to look up in ogres.app.attack-deck/effect-kinds -- a
+   custom effect's own prose, or a choice card's own \"Air or Earth\",
+   stands in for one instead (`text`, whichever of the two the caller
+   passed)."
   [kind effect amount reduced? text]
   (let [label (if reduced? (get reduced-randomness-label kind (kind-label kind)) (kind-label kind))
-        effect-text (if (= effect :custom) text (attack-deck/effect-label effect amount))]
+        effect-text (if (contains? #{:custom :element-half} effect)
+                      text
+                      (attack-deck/effect-label effect amount))]
     (if effect-text (str label " " effect-text) label)))
 
 (defui attack-card
@@ -65,7 +70,7 @@
   [{:keys [kind effect amount rolling? target reduced? text size] :or {size :sm}}]
   (let [{:keys [fill value glyph effect-icon wings wing-glyph shuffle?
                 color field-color plain-medallion? element-color
-                custom-text custom-segments]
+                custom-text custom-segments choice-a choice-b choice-text]
          card-rolling? :rolling?
          card-amount :amount-label
          card-caption :caption}
@@ -106,6 +111,21 @@
                     segment))
                 custom-segments))
 
+            ;; A two-element choice card has no single glyph either -- two
+            ;; orbs and a divider instead of one glyph in a diamond (see
+            ;; attack-deck/card-face's :element-half branch for why this
+            ;; deliberately does not reuse the printed cards' own split-
+            ;; pill graphic).
+            choice-a
+            ($ :.attack-card-choice
+              ($ :.attack-card-choice-orb
+                {:data-slot "a" :style {"--am-choice" (:color choice-a)}}
+                ($ icon {:name (:icon choice-a) :size 22}))
+              ($ :.attack-card-choice-orb
+                {:data-slot "b" :style {"--am-choice" (:color choice-b)}}
+                ($ icon {:name (:icon choice-b) :size 22}))
+              ($ :span.attack-card-choice-or "or"))
+
             effect-icon
             ;; Kept in the tree even when nothing is drawn behind the
             ;; glyph: this element carries the rotation the stacked
@@ -142,8 +162,10 @@
                 element-color (assoc "--am-element" element-color))
        ;; card-face's own :custom-text, not the raw `text` prop -- a
        ;; screen reader wants the chip read as "+2", not as its raw
-       ;; %game.attackmodifier.plus2% token.
-       :aria-label (draw-text kind effect amount reduced? custom-text)}
+       ;; %game.attackmodifier.plus2% token. A choice card has no fixed
+       ;; label either (see :element-half), so its own :choice-text
+       ;; stands in the same way.
+       :aria-label (draw-text kind effect amount reduced? (or custom-text choice-text))}
       (if wings
         ($ :.attack-card-wing {:data-wings (name wings)}
           ($ :svg.attack-card-lens {:viewBox "0 0 1469 1000"}
@@ -158,7 +180,7 @@
       ;; the printed cards write it there regardless, since the chip costs
       ;; nothing to read at that size the way a redundant "+0" would in
       ;; the medallion itself.
-      (if (or effect-icon custom-text)
+      (if (or effect-icon custom-text choice-a)
         ($ :.attack-card-chip (if glyph ($ icon {:name glyph :size 14}) value)))
       ;; Rolling: resolves and the draw continues. Its own corner, since a
       ;; card can be rolling AND carry an effect.

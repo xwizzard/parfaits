@@ -398,6 +398,12 @@
                   vector of strings and inline chip maps
                   ({:chip \"+2\" :sign :positive}), see
                   `parse-custom-text`
+     :choice-a    the first of a two-element choice card's options
+                  ({:icon :color}), see below -- absent otherwise
+     :choice-b    the second option, same shape as :choice-a
+     :choice-text \"Air or Earth\" -- a plain-text description of a choice
+                  card for an aria-label, the same job :custom-text does
+                  for a :custom effect's own prose
      :amount      the effect's quantity, when it has one
      :amount-label that quantity as it should read, signed where the
                   effect adds rather than reduces
@@ -410,6 +416,19 @@
      :wings       :bless or :curse, for the two one-shot kinds
      :wing-glyph  the identity mark carried in those wings
      :shuffle?    whether the card triggers a reshuffle when drawn
+
+   A two-element choice card (gloomhavensecretariat's own \"elementHalf\" --
+   despite the name, confirmed against the real rule rather than assumed:
+   it is a plain choice of ONE of the two listed elements, at full
+   strength, not a half-strength infusion of either) has no glyph of its
+   own either -- the medallion holds two element orbs instead of one, see
+   :choice-a/:choice-b. The original printed graphic (two element icons
+   crammed into a single split pill, no divider) is exactly the kind of
+   thing that reads as ambiguous at a glance, so this deliberately does
+   NOT reproduce it; the layout instead borrows Frosthaven's own visual
+   language for a choice from a card that already draws one unambiguously
+   -- Trapper's rolling \"Push 2 or Pull 2\": two options, offset, split by
+   a slash with \"or\" between them.
 
    A card carrying BOTH a modifier and an effect gives the medallion to
    the EFFECT and demotes the modifier -- whatever its own kind, including
@@ -427,7 +446,8 @@
          ;; A reduced face replaces Null's glyph with a numeral, so drop
          ;; any glyph the base kind had once a value is present.
          base (if (:value base) (dissoc base :glyph) base)]
-     (if (= effect :custom)
+     (cond
+       (= effect :custom)
        ;; A custom effect is prose, not a symbol -- there is no glyph to
        ;; reach for. The sentence sits directly on the field, no disc
        ;; behind it, since the field is already the fixed neutral this
@@ -444,6 +464,25 @@
                         :custom-text (custom-plain-text segments)
                         :custom-segments segments)
            rolling? (assoc :rolling? true)))
+
+       (= effect :element-half)
+       ;; Two options, neither owning a glyph slot of its own -- see the
+       ;; docstring above for why this does not reuse the single-:element
+       ;; branch below. `amount` carries the pair directly, in source
+       ;; order (gloomhavensecretariat's own "air|earth" split on "|" by
+       ;; whoever builds this map); which one is choice-a vs choice-b has
+       ;; no game meaning; the view just draws two circles.
+       (let [[a b] amount]
+         (cond-> (assoc base
+                        :field-color neutral-field
+                        :choice-a (merge {:icon (get element-icons a "am-fire")}
+                                         (select-keys (get element-colors a) [:color]))
+                        :choice-b (merge {:icon (get element-icons b "am-fire")}
+                                         (select-keys (get element-colors b) [:color]))
+                        :choice-text (str (str/capitalize (name a)) " or " (str/capitalize (name b))))
+           rolling? (assoc :rolling? true)))
+
+       :else
        (let [face
              (cond-> base
                ;; An element's glyph depends on WHICH element, which rides in

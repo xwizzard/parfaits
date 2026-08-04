@@ -506,3 +506,54 @@
   (testing "nil text carries through as nil, not an empty vector"
     (is (nil? (:custom-segments (attack-deck/card-face :plus-1 {:effect :custom}))))
     (is (nil? (:custom-text (attack-deck/card-face :plus-1 {:effect :custom}))))))
+
+(deftest test-element-half-choice-card
+  ;; gloomhavensecretariat's own "elementHalf" -- despite the name, the
+  ;; real rule (confirmed with the user rather than assumed) is a plain
+  ;; choice of ONE of the two listed elements at FULL strength, not a
+  ;; half-strength infusion of either -- "strong/waning/inert" is a
+  ;; separate mechanism. This deliberately does not reuse :element's own
+  ;; single-glyph-in-a-diamond branch: a choice needs two whole orbs, not
+  ;; one glyph, so it gets its own early return the same way :custom does.
+  (testing "both options carry their own icon and colour"
+    (let [f (attack-deck/card-face :plus-1 {:effect :element-half :amount [:air :earth]})]
+      (is (= (:choice-a f) {:icon "am-air" :color "#9cb1bd"}))
+      (is (= (:choice-b f) {:icon "am-earth" :color "#88a63f"}))
+      (is (nil? (:effect-icon f)) "there is no single glyph to reach for")
+      (is (nil? (:caption f)) "or a caption slot underneath one")))
+
+  (testing "order is preserved, not normalised"
+    ;; Which one lands in :choice-a vs :choice-b has no game meaning --
+    ;; the view just draws two circles -- but the pair should still read
+    ;; back in the order it was given rather than being silently reordered.
+    (let [f (attack-deck/card-face :plus-1 {:effect :element-half :amount [:earth :air]})]
+      (is (= (:icon (:choice-a f)) "am-earth"))
+      (is (= (:icon (:choice-b f)) "am-air"))))
+
+  (testing "a plain-text description for an aria-label"
+    (is (= (:choice-text (attack-deck/card-face :plus-1 {:effect :element-half :amount [:air :earth]}))
+           "Air or Earth")))
+
+  (testing "the field is the same fixed neutral Heal and custom effects sit on"
+    ;; No single element owns the card the way a plain :element card's
+    ;; field does -- two elements share it, so it stays neutral rather
+    ;; than picking one of the two hues to wash the field with.
+    (is (= (:field-color (attack-deck/card-face :plus-1 {:effect :element-half :amount [:air :earth]}))
+           attack-deck/neutral-field)))
+
+  (testing "the modifier still shows, whatever its kind"
+    (doseq [kind [:plus-0 :plus-1 :plus-2]]
+      (is (= (:value (attack-deck/card-face kind {:effect :element-half :amount [:air :earth]}))
+             (:value (attack-deck/card-face kind)))
+          (str kind " keeps its own numeral"))))
+
+  (testing "rolling still carries onto a choice card"
+    (is (:rolling? (attack-deck/card-face :plus-0 {:effect :element-half :amount [:air :earth] :rolling? true})))
+    (is (not (:rolling? (attack-deck/card-face :plus-0 {:effect :element-half :amount [:air :earth]})))))
+
+  (testing "element-half is deliberately outside the fixed vocabulary"
+    ;; Same reasoning as :custom: a choice of two elements is never
+    ;; something the composition editor's generic effect-card form
+    ;; assembles one count at a time, only something a data source
+    ;; supplies pre-built.
+    (is (not (contains? attack-deck/effect-kinds :element-half)))))
