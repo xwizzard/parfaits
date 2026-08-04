@@ -695,20 +695,22 @@
    (used nowhere else yet), rather than a hand-drawn badge or a font
    glyph: a cancel mark is exactly what it already draws, at a size
    comparable to every other small corner mark on these cards (the
-   shuffle/rolling marks). Overlaps the disc's own lower-left, matching
-   where the printed card's own cancel mark sits. */
+   shuffle/rolling marks). Overlaps the disc's own lower-right corner. */
 .attack-card-consume-spent {
   position: absolute;
   bottom: -8%;
-  left: -8%;
+  right: -8%;
   width: 46%;
   aspect-ratio: 1;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  /* Every other small mark on these cards (shuffle, rolling) rims itself
-     the same way -- a ring drawn on the wrapper, exactly matching the
-     icon's own circular fill beneath it. */
+  /* Opaque, not just rimmed -- the icon's own X is a cut-out (evenodd),
+     transparent by construction, so without a solid backing the wild
+     disc's own colours show straight through the hole instead of a
+     clean cancel mark. Every other small mark on these cards (shuffle,
+     rolling) is the same shape: a solid disc first, the glyph on top. */
+  background: #fff;
   box-shadow: 0 0 0 calc(var(--w) * 0.006) #fff;
 }
 
