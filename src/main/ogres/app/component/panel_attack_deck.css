@@ -344,18 +344,21 @@
 
    A circle is also the one shape that does not care that the medallion's
    copy of the glyph is counter-rotated 45 degrees inside its diamond. */
-/* Shifted down to put the glyph-and-word pair back on the card's middle.
-   An element raises its glyph further than the shared rule does and then
-   drops a word below it, which left the pair sitting 7.6% of card height
-   high. Moving the box moves both and leaves the spacing between them
-   alone, where correcting the raise would have closed the gap the smaller
-   orb just opened.
+/* --orb-glyph sizes the orb itself and is wanted whether or not a caption
+   ends up below it. The downward shift is not: it exists purely to put a
+   glyph-and-word PAIR back on the card's middle, after an element raises
+   its glyph further than the shared rule does and then drops a word below
+   it, which otherwise left the pair sitting 7.6% of card height high --
+   see the [data-caption] rule below, where the shift actually applies.
 
    The standalone translate property applies before the transform, so this
    is a straight drop in the card's own axes rather than along the
    diamond's rotated ones. */
 .attack-card-diamond[data-effect="element"] {
   --orb-glyph: calc(var(--w) / 1.535 * 0.335);
+}
+
+.attack-card-diamond[data-effect="element"][data-caption] {
   translate: 0 calc(var(--w) / 1.535 * 0.076);
 }
 
@@ -564,8 +567,11 @@
 
 /* The stacked raise is a percentage of the glyph, so a smaller glyph rises
    less and gives back the clearance the smaller orb just won. Restated
-   here against the orb's own size rather than the shared 34%. */
-.attack-card-diamond[data-effect="element"] .icon {
+   here against the orb's own size rather than the shared 34%. Only when a
+   caption is actually there to raise it FOR -- an element has none of its
+   own, so a plain orb (no stated target) stays on the diamond's ordinary
+   centred transform instead of rising to leave a gap under nothing. */
+.attack-card-diamond[data-effect="element"][data-caption] .icon {
   transform: rotate(-45deg) translate(0, -40%);
 }
 

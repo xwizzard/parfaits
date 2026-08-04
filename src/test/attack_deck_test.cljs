@@ -378,22 +378,16 @@
   (testing "a target needs an effect to qualify"
     (is (nil? (:target (attack-deck/card-face :plus-1 {:target :self}))))))
 
-(deftest test-element-cards-say-what-they-do
-  (testing "an element glyph is a noun, so the card names the verb"
-    ;; Without it the card shows a flame and leaves the reader to guess
-    ;; whether it consumes fire, requires it, or makes it.
+(deftest test-element-cards-have-no-caption-of-their-own
+  (testing "the orb already says which element -- no verb needed beneath it"
     (doseq [e [:fire :ice :air :earth :light :dark]]
-      (is (= (:caption (attack-deck/card-face :plus-0 {:effect :element :amount e}))
-             "Create")
+      (is (nil? (:caption (attack-deck/card-face :plus-0 {:effect :element :amount e})))
           (str (name e) " card"))))
 
-  (testing "every element says it, in one wording"
-    (is (= 1 (count (into #{}
-                          (map #(:caption (attack-deck/card-face :plus-1 {:effect :element :amount %})))
-                          (keys attack-deck/element-colors))))))
-
-  (testing "a stated target still wins the slot"
-    ;; One caption slot, and a named target is the more specific fact.
+  (testing "a stated target still fills the slot"
+    ;; No shipped class data gives an element a target, but nothing rules
+    ;; it out, and the slot is empty rather than occupied, so this just
+    ;; fills it instead of overriding anything.
     (is (= (:caption (attack-deck/card-face :plus-0 {:effect :element :amount :fire :target :self}))
            "Self")))
 

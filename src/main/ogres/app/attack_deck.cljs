@@ -253,12 +253,6 @@
   "How an effect's target reads on the card."
   {:self "Self" :ally "Ally"})
 
-(def ^:private element-caption
-  "What an element card DOES, spelled out beneath the glyph. A bare
-   element symbol says which element without saying what happens to it,
-   and this is the one effect whose glyph is a noun rather than a verb."
-  "Create")
-
 (def ^:private element-icons
   "Which element an :element effect infuses. The amount carries the
    element rather than a quantity, so the glyph comes from it."
@@ -409,8 +403,9 @@
                   effect adds rather than reduces
      :target      who the effect applies to, when the card says
      :caption     the word beneath the glyph -- a target (\"Self\"), a
-                  phrase (\"Push 1\"), an element's verb (\"Create\"), or a
-                  condition's own name
+                  phrase (\"Push 1\"), or a condition's own name. An
+                  element has none of its own; the orb already says which
+                  element, and only a stated target fills the slot
      :rolling?    whether the card is a rolling modifier -- it resolves and
                   the draw continues, rather than ending it
      :wings       :bless or :curse, for the two one-shot kinds
@@ -486,10 +481,13 @@
        (let [face
              (cond-> base
                ;; An element's glyph depends on WHICH element, which rides in
-               ;; the amount rather than in the effect itself.
+               ;; the amount rather than in the effect itself. No caption --
+               ;; the orb already says which element; a stated target (rare,
+               ;; no shipped class data has one) still fills the slot below,
+               ;; the same "a target beats no caption at all" the flag-only
+               ;; effects already fall back to.
                (= effect :element)
-               (merge {:effect-icon (get element-icons amount "am-fire")
-                       :caption element-caption}
+               (merge {:effect-icon (get element-icons amount "am-fire")}
                       (get element-colors amount))
 
                (and (not= effect :element) (contains? effect-icons effect))
@@ -525,9 +523,10 @@
                (assoc :rolling? true)
 
                ;; The qualifier the printed cards write beneath the glyph --
-               ;; every heal and shield card in the class decks is Self. It
-               ;; shares the caption slot with the element verb above, and
-               ;; wins it: a stated target is more specific than "Create".
+               ;; every heal and shield card in the class decks is Self. An
+               ;; element leaves the slot empty otherwise, so a stated
+               ;; target (no shipped class data has one, but nothing rules
+               ;; it out) simply fills it rather than overriding anything.
                (and effect target)
                (assoc :target target
                       :caption (get target-labels target (name target))))]
