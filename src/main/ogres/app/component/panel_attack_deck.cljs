@@ -47,14 +47,14 @@
   "Display text for one drawn/held kind + its optional attached effect,
    e.g. \"+1\" or \"+1 Push 2\" -- \"-2\" instead of \"Null\"/\"CURSE\"
    or \"+2\" instead of \"2x\"/\"BLESS\" when `reduced?` (the Reduced
-   Randomness variant) is on. Neither :custom nor :element-half has a
-   fixed label to look up in ogres.app.attack-deck/effect-kinds -- a
-   custom effect's own prose, or a choice card's own \"Air or Earth\",
-   stands in for one instead (`text`, whichever of the two the caller
-   passed)."
+   Randomness variant) is on. None of :custom/:element-half/:element-
+   consume has a fixed label to look up in ogres.app.attack-deck/effect-
+   kinds -- a custom effect's own prose, a choice card's own \"Air or
+   Earth\", or a consume card's own description stands in for one instead
+   (`text`, whichever of the three the caller passed)."
   [kind effect amount reduced? text]
   (let [label (if reduced? (get reduced-randomness-label kind (kind-label kind)) (kind-label kind))
-        effect-text (if (contains? #{:custom :element-half} effect)
+        effect-text (if (contains? #{:custom :element-half :element-consume} effect)
                       text
                       (attack-deck/effect-label effect amount))]
     (if effect-text (str label " " effect-text) label)))
@@ -70,7 +70,8 @@
   [{:keys [kind effect amount rolling? target reduced? text size] :or {size :sm}}]
   (let [{:keys [fill value glyph effect-icon wings wing-glyph shuffle?
                 color field-color plain-medallion? element-color
-                custom-text custom-segments choice-a choice-b choice-text]
+                custom-text custom-segments choice-a choice-b choice-text
+                consume? consume-text]
          card-rolling? :rolling?
          card-amount :amount-label
          card-caption :caption}
@@ -126,6 +127,19 @@
                 ($ icon {:name (:icon choice-b) :size 22}))
               ($ :span.attack-card-choice-or "or"))
 
+            ;; A spend-one-for-a-different-one card: two "could be any
+            ;; element" discs (see attack-deck/card-face's :element-
+            ;; consume branch), the first marked spent. Neither disc names
+            ;; a specific element, so unlike :choice-a/:choice-b there is
+            ;; no icon/colour to pass in -- the wild disc IS the glyph.
+            consume?
+            ($ :.attack-card-consume
+              ($ :.attack-card-consume-wild
+                ($ :span.attack-card-consume-spent
+                  ($ icon {:name "x-circle-fill" :color "oklch(0.505 0.213 27.518)"})))
+              ($ :span.attack-card-consume-arrow "→")
+              ($ :.attack-card-consume-wild))
+
             effect-icon
             ;; Kept in the tree even when nothing is drawn behind the
             ;; glyph: this element carries the rotation the stacked
@@ -162,10 +176,10 @@
                 element-color (assoc "--am-element" element-color))
        ;; card-face's own :custom-text, not the raw `text` prop -- a
        ;; screen reader wants the chip read as "+2", not as its raw
-       ;; %game.attackmodifier.plus2% token. A choice card has no fixed
-       ;; label either (see :element-half), so its own :choice-text
-       ;; stands in the same way.
-       :aria-label (draw-text kind effect amount reduced? (or custom-text choice-text))}
+       ;; %game.attackmodifier.plus2% token. A choice or consume card has
+       ;; no fixed label either (see :element-half/:element-consume), so
+       ;; its own :choice-text/:consume-text stands in the same way.
+       :aria-label (draw-text kind effect amount reduced? (or custom-text choice-text consume-text))}
       (if wings
         ($ :.attack-card-wing {:data-wings (name wings)}
           ($ :svg.attack-card-lens {:viewBox "0 0 1469 1000"}
@@ -180,7 +194,7 @@
       ;; the printed cards write it there regardless, since the chip costs
       ;; nothing to read at that size the way a redundant "+0" would in
       ;; the medallion itself.
-      (if (or effect-icon custom-text choice-a)
+      (if (or effect-icon custom-text choice-a consume?)
         ($ :.attack-card-chip (if glyph ($ icon {:name glyph :size 14}) value)))
       ;; Rolling: resolves and the draw continues. Its own corner, since a
       ;; card can be rolling AND carry an effect.

@@ -551,3 +551,43 @@
     ;; assembles one count at a time, only something a data source
     ;; supplies pre-built.
     (is (not (contains? attack-deck/effect-kinds :element-half)))))
+
+(deftest test-element-consume-card
+  ;; The one real instance is Geminate's own (confirmed with the user
+  ;; rather than assumed): gloomhavensecretariat's "Wild" is not a 7th
+  ;; element, it is the data's own stand-in for "any" -- this card spends
+  ;; whichever element is currently infused and re-infuses a DIFFERENT one
+  ;; at full strength. Neither side names a specific element, so there is
+  ;; no :amount to carry at all, unlike :element-half's own pair.
+  (testing "a plain marker, no amount/icon/colour to carry"
+    (let [f (attack-deck/card-face :plus-1 {:effect :element-consume})]
+      (is (:consume? f))
+      (is (nil? (:effect-icon f)) "there is no single glyph to reach for")
+      (is (nil? (:amount f)))
+      (is (nil? (:caption f)))))
+
+  (testing "a plain-text description for an aria-label"
+    (is (= (:consume-text (attack-deck/card-face :plus-1 {:effect :element-consume}))
+           "Consume an element, infuse a different one")))
+
+  (testing "the field is the same fixed neutral heal/custom/element-half sit on"
+    ;; No single element or accent owns the card -- two "could be any"
+    ;; discs share it, same reasoning as :element-half's own field.
+    (is (= (:field-color (attack-deck/card-face :plus-1 {:effect :element-consume}))
+           attack-deck/neutral-field)))
+
+  (testing "the modifier still shows, whatever its kind"
+    (doseq [kind [:plus-0 :plus-1 :plus-2]]
+      (is (= (:value (attack-deck/card-face kind {:effect :element-consume}))
+             (:value (attack-deck/card-face kind)))
+          (str kind " keeps its own numeral"))))
+
+  (testing "rolling still carries onto a consume card"
+    (is (:rolling? (attack-deck/card-face :plus-0 {:effect :element-consume :rolling? true})))
+    (is (not (:rolling? (attack-deck/card-face :plus-0 {:effect :element-consume})))))
+
+  (testing "element-consume is deliberately outside the fixed vocabulary"
+    ;; Same reasoning as :custom/:element-half: only one real card uses
+    ;; this shape, and it is not something the composition editor's
+    ;; generic effect-card form assembles one count at a time.
+    (is (not (contains? attack-deck/effect-kinds :element-consume)))))

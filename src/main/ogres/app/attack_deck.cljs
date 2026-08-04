@@ -398,6 +398,11 @@
      :choice-text \"Air or Earth\" -- a plain-text description of a choice
                   card for an aria-label, the same job :custom-text does
                   for a :custom effect's own prose
+     :consume?    true for a spend-one-element-for-a-different-one card
+                  (:element-consume) -- the view draws two \"could be any
+                  element\" discs, the first marked spent
+     :consume-text a plain-text description of that same card, for an
+                  aria-label -- the same job :custom-text/:choice-text do
      :amount      the effect's quantity, when it has one
      :amount-label that quantity as it should read, signed where the
                   effect adds rather than reduces
@@ -476,6 +481,22 @@
                                          (select-keys (get element-colors b) [:color]))
                         :choice-text (str (str/capitalize (name a)) " or " (str/capitalize (name b))))
            rolling? (assoc :rolling? true)))
+
+       (= effect :element-consume)
+       ;; The one real card (Geminate, gloomhavensecretariat's own
+       ;; elementConsume:wild wrapping a nested element:wild) spends
+       ;; whichever element the character currently has infused -- Wild
+       ;; here is not a 7th element, it is the data's own stand-in for
+       ;; \"any\" -- and re-infuses a DIFFERENT one at full strength. Both
+       ;; sides of that trade are the same \"could be any of the six\"
+       ;; glyph, so there is no per-card amount to carry, unlike
+       ;; :element-half's own pair: the view always draws the same two
+       ;; wild discs, spent then fresh.
+       (cond-> (assoc base
+                      :field-color neutral-field
+                      :consume? true
+                      :consume-text "Consume an element, infuse a different one")
+         rolling? (assoc :rolling? true))
 
        :else
        (let [face

@@ -654,6 +654,79 @@
   z-index: 1;
 }
 
+/* A spend-one-element-for-a-different-one card (attack-deck/card-face's
+   :element-consume -- the one real instance is Geminate's own, where
+   gloomhavensecretariat's "Wild" is not a 7th element but its data's own
+   stand-in for "any" -- consume whichever element is currently infused,
+   re-infuse a DIFFERENT one at full strength). Neither side names a
+   specific element, so the disc itself has to say "could be any of the
+   six" -- literally the printed card's own six-wedge pie, at this app's
+   own element colours rather than the reference art's, so a wedge here
+   is the exact same hue that element's own single-element orb uses
+   everywhere else on these cards. This is the one glyph in the whole
+   vocabulary that is not a monotone silhouette on a coloured disc --
+   colour IS what "could be any element" means, there is no separate
+   shape to trace. Order matches the reference component: clockwise from
+   12 o'clock, ice/fire/earth/light/dark/air. */
+.attack-card-consume {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8%;
+  width: 92%;
+}
+
+.attack-card-consume-wild {
+  position: relative;
+  width: 34%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg,
+    #34c2f0 0 60deg,
+    #e45626 60deg 120deg,
+    #88a63f 120deg 180deg,
+    #f4ae1c 180deg 240deg,
+    #163856 240deg 300deg,
+    #9cb1bd 300deg 360deg);
+  box-shadow: 0 0 0 calc(var(--w) * 0.0096) #fff;
+}
+
+/* The left disc's own spent mark -- x-circle-fill, already in the sprite
+   (used nowhere else yet), rather than a hand-drawn badge or a font
+   glyph: a cancel mark is exactly what it already draws, at a size
+   comparable to every other small corner mark on these cards (the
+   shuffle/rolling marks). Overlaps the disc's own lower-left, matching
+   where the printed card's own cancel mark sits. */
+.attack-card-consume-spent {
+  position: absolute;
+  bottom: -8%;
+  left: -8%;
+  width: 46%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  /* Every other small mark on these cards (shuffle, rolling) rims itself
+     the same way -- a ring drawn on the wrapper, exactly matching the
+     icon's own circular fill beneath it. */
+  box-shadow: 0 0 0 calc(var(--w) * 0.006) #fff;
+}
+
+.attack-card-consume-spent .icon {
+  width: 100%;
+  height: 100%;
+}
+
+/* The same "one becomes another" arrow the composition editor's own
+   Replace Card form already uses -- a spent element becoming a fresh one
+   is the same relationship. */
+.attack-card-consume-arrow {
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.16);
+  color: #fff;
+  text-shadow: 0 calc(var(--w) * 0.006) 0 rgb(0 0 0 / 30%);
+}
+
 /* The caption beneath the glyph: a target where the card states one,
    otherwise what an element card does with its symbol. Small caps-ish,
    since it is a word among symbols. */
