@@ -470,3 +470,39 @@
     ;; GM assembles from the generic push/pull/condition parts, only
     ;; something a data source supplies pre-written.
     (is (not (contains? attack-deck/effect-kinds :custom)))))
+
+(deftest test-custom-effect-value-chip
+  ;; gloomhavensecretariat's own custom-effect text embeds the one token
+  ;; this app's renderer understands as a shape rather than a word --
+  ;; %game.attackmodifier.plusN%/minusN% -- the same way a printed custom
+  ;; card embeds a small coloured circle mid-sentence.
+  (testing "plain prose with no token is a single unsplit segment"
+    (let [f (attack-deck/card-face :plus-1 {:effect :custom :text "Add +2 for each ally adjacent to the target."})]
+      (is (= (:custom-text f) "Add +2 for each ally adjacent to the target.")
+          "flattened text is untouched when there is nothing to flatten")))
+
+  (testing "a token mid-sentence becomes a chip, and the plain text keeps its number"
+    (let [f (attack-deck/card-face :plus-1 {:effect :custom :text "If you performed a tides action this round, %game.attackmodifier.plus2% instead."})]
+      (is (= (:custom-text f) "If you performed a tides action this round, +2 instead.")
+          "the flattened text reads naturally, chip standing in for its own number")
+      (is (= (:custom-segments f)
+             ["If you performed a tides action this round, "
+              {:chip "+2" :sign :positive}
+              " instead."])
+          "the view gets the same prose as a vector of strings and chip maps")))
+
+  (testing "minus tokens read negative"
+    (let [f (attack-deck/card-face :plus-1 {:effect :custom :text "%game.attackmodifier.minus1%"})]
+      (is (= (:custom-segments f) [{:chip "-1" :sign :negative}])
+          "a token that opens/closes the sentence leaves no empty string either side")
+      (is (= (:custom-text f) "-1"))))
+
+  (testing "more than one token in the same sentence, each its own chip"
+    (let [f (attack-deck/card-face :plus-1 {:effect :custom :text "%game.attackmodifier.plus1% now, %game.attackmodifier.minus1% later."})]
+      (is (= (:custom-segments f)
+             [{:chip "+1" :sign :positive} " now, " {:chip "-1" :sign :negative} " later."]))
+      (is (= (:custom-text f) "+1 now, -1 later."))))
+
+  (testing "nil text carries through as nil, not an empty vector"
+    (is (nil? (:custom-segments (attack-deck/card-face :plus-1 {:effect :custom}))))
+    (is (nil? (:custom-text (attack-deck/card-face :plus-1 {:effect :custom}))))))

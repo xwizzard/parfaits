@@ -64,7 +64,8 @@
    so the face carries only the modifier and what is attached to it."
   [{:keys [kind effect amount rolling? target reduced? text size] :or {size :sm}}]
   (let [{:keys [fill value glyph effect-icon wings wing-glyph shuffle?
-                color field-color plain-medallion? element-color custom-text]
+                color field-color plain-medallion? element-color
+                custom-text custom-segments]
          card-rolling? :rolling?
          card-amount :amount-label
          card-caption :caption}
@@ -90,9 +91,20 @@
           (cond
             ;; A custom effect is prose, not a glyph -- the medallion
             ;; becomes a page to write it on rather than a diamond, as the
-            ;; printed cards draw it.
-            custom-text
-            ($ :.attack-card-prose custom-text)
+            ;; printed cards draw it. An inline value chip is its own
+            ;; small element in the flow (see attack-deck/parse-custom-
+            ;; text); everything else is plain text needing no wrapper,
+            ;; and only elements need a :key.
+            custom-segments
+            ($ :.attack-card-prose
+              (map-indexed
+                (fn [i segment]
+                  (if (map? segment)
+                    ($ :span.attack-card-prose-chip
+                      {:key i :data-sign (name (:sign segment))}
+                      (:chip segment))
+                    segment))
+                custom-segments))
 
             effect-icon
             ;; Kept in the tree even when nothing is drawn behind the
@@ -128,7 +140,10 @@
                 ;; The one colour drawn at its own brightness: an element's
                 ;; orb is the bright thing on the printed card.
                 element-color (assoc "--am-element" element-color))
-       :aria-label (draw-text kind effect amount reduced? text)}
+       ;; card-face's own :custom-text, not the raw `text` prop -- a
+       ;; screen reader wants the chip read as "+2", not as its raw
+       ;; %game.attackmodifier.plus2% token.
+       :aria-label (draw-text kind effect amount reduced? custom-text)}
       (if wings
         ($ :.attack-card-wing {:data-wings (name wings)}
           ($ :svg.attack-card-lens {:viewBox "0 0 1469 1000"}

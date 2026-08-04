@@ -7,7 +7,8 @@
 
    Deliberately named around the mechanic, not any single game -- a
    future Frosthaven module can reuse this exact namespace the same way
-   multiple card games already share ogres.app.cards.")
+   multiple card games already share ogres.app.cards."
+  (:require [clojure.string :as str]))
 
 (def standard-composition
   "kind -> count for a freshly-created standard 20-card attack modifier
@@ -309,6 +310,54 @@
     nil))
 
 
+(def ^:private value-chip-pattern
+  "The one inline token a custom effect's prose actually spends on
+   something other than a plain word, in gloomhavensecretariat's own
+   text: %game.attackmodifier.plus2%, embedded mid-sentence the same way
+   the printed card embeds a small coloured circle -- \"...this round,
+   [+2 chip] instead\". Everything else a card's prose can reference
+   (action names, item icons, a class's own named mechanics) is assumed
+   already resolved to a plain word by whoever supplies `text`; this is
+   the only markup this app's own renderer understands, because it is
+   the one piece that needs a shape drawn, not a word substituted."
+  #"%game\.attackmodifier\.(plus\d+|minus\d+)%")
+
+(defn ^:private parse-custom-text
+  "A custom effect's prose, split into a vector of plain strings and
+   `{:chip :sign}` maps -- one entry per inline value chip, in the order
+   they appear. nil in, nil out."
+  [text]
+  (when text
+    (into []
+          (comp (map-indexed
+                  (fn [i s]
+                    (if (odd? i)
+                      (let [minus? (str/starts-with? s "minus")]
+                        {:chip (str (if minus? "-" "+") (re-find #"\d+" s))
+                         :sign (if minus? :negative :positive)})
+                      s)))
+                ;; The split lands an empty string on either side of a
+                ;; token that opens or closes the sentence -- drop those,
+                ;; never a chip map (a map is never equal to "").
+                (remove #(= % "")))
+          ;; JS's own String.split, not clojure.string/split -- the
+          ;; browser's split interleaves a capturing group's own matches
+          ;; into the result (text, match, text, match, text...), which
+          ;; is the whole mechanism this relies on; clojure.string/split
+          ;; does not make that guarantee.
+          (.split text value-chip-pattern))))
+
+(defn ^:private custom-plain-text
+  "The same prose flattened back to one string, a chip standing in for
+   its own number -- what an aria-label or a plain-text context wants,
+   where `:custom-segments` is what the view wants to draw. nil in, nil
+   out, matching parse-custom-text -- (apply str nil) would otherwise
+   turn a card with no text at all into an empty string instead of
+   staying nil."
+  [segments]
+  (when segments
+    (apply str (map #(if (map? %) (:chip %) %) segments))))
+
 (def neutral-field
   "The plain parchment brown Heal sits on once the effect owns the
    medallion (see `card-face`) -- not derived from its own accent (a red),
@@ -339,9 +388,16 @@
                   the printed card gives it
      :plain-medallion? true when the glyph sits straight on the field,
                   with no accent drawn behind it
-     :custom-text a :custom effect's prose, when the card has one -- the
-                  medallion becomes a page to write it on rather than a
-                  glyph, and none of :effect-icon/:amount/:caption apply
+     :custom-text a :custom effect's prose, flattened to plain text (an
+                  inline value chip reads as its own number) -- for an
+                  aria-label or anywhere else a flat string is wanted.
+                  Its medallion becomes a page to write the sentence on
+                  rather than a glyph, and none of
+                  :effect-icon/:amount/:caption apply
+     :custom-segments that same prose as the view actually draws it -- a
+                  vector of strings and inline chip maps
+                  ({:chip \"+2\" :sign :positive}), see
+                  `parse-custom-text`
      :amount      the effect's quantity, when it has one
      :amount-label that quantity as it should read, signed where the
                   effect adds rather than reduces
@@ -382,8 +438,12 @@
        ;; The field takes the same fixed neutral Heal does -- whatever a
        ;; custom effect actually does, the card has nothing more specific
        ;; to say with its colour than "this is the effect".
-       (cond-> (assoc base :field-color neutral-field :custom-text text)
-         rolling? (assoc :rolling? true))
+       (let [segments (parse-custom-text text)]
+         (cond-> (assoc base
+                        :field-color neutral-field
+                        :custom-text (custom-plain-text segments)
+                        :custom-segments segments)
+           rolling? (assoc :rolling? true)))
        (let [face
              (cond-> base
                ;; An element's glyph depends on WHICH element, which rides in

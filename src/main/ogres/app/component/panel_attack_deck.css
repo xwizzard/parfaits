@@ -396,9 +396,15 @@
 .attack-card-prose {
   width: 92%;
   padding: 4% 6%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  /* Grid, not flex: an inline value chip sits beside plain text as a
+     sibling node (see attack-deck/parse-custom-text), and flex would lay
+     each sibling out as its own item -- wrapping the sentence one word
+     per line instead of as a paragraph. Grid wraps a contiguous run of
+     inline-level children into a single anonymous block first, so the
+     chip flows inline with the words around it exactly as it would if
+     it were one more character in the sentence. */
+  display: grid;
+  place-items: center;
   text-align: center;
   /* No disc behind it: the card's own field is already the fixed
      neutral this effect sits on, so a lighter circle underneath the
@@ -422,6 +428,31 @@
      always is ordinary prose. */
   overflow-wrap: anywhere;
 }
+
+/* An inline value chip inside custom prose -- the one piece of that prose
+   the printed cards draw as a small coloured circle rather than a word
+   (see attack-deck/parse-custom-text). Sized in em against the prose's
+   own font-size, not against --w directly, so it scales with the
+   surrounding sentence rather than pegging to the card. Positive/negative
+   reuse the same two literals --am-sign resolves to on a positive/negative
+   card ([data-fill="positive"|"negative"]), so a chip mid-sentence reads
+   the same colour a whole card of that sign would. */
+.attack-card-prose-chip {
+  display: inline-grid;
+  place-items: center;
+  width: 1.8em;
+  height: 1.8em;
+  border-radius: 50%;
+  vertical-align: -0.42em;
+  margin: 0 0.12em;
+  color: #fff;
+  font-size: 0.82em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.attack-card-prose-chip[data-sign="positive"] { background: oklch(0.470 0.140 150.5); }
+.attack-card-prose-chip[data-sign="negative"] { background: oklch(0.505 0.213 27.518); }
 
 /* The modifier demotes to this chip once an effect owns the medallion --
    the printed Frosthaven arrangement: a small circle in the modifier's
