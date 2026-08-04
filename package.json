@@ -13,7 +13,7 @@
   "scripts": {
     "build": "npx shadow-cljs release app",
     "start": "npx shadow-cljs watch app",
-    "style": "npx esbuild src/main/ogres/app/resource/root.css --outfile=web/release/ogres.app.css --loader:.svg=dataurl --bundle --minify --watch"
+    "style": "npx esbuild src/main/ogres/app/resource/root.css --outfile=web/release/ogres.app.css --loader:.svg=dataurl --loader:.woff2=dataurl --bundle --minify --watch"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.0.8",

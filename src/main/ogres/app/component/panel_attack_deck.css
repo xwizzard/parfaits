@@ -92,11 +92,6 @@
   margin-top: 8px;
 }
 
-.attack-deck-row-last-drawn {
-  color: var(--color-black-500);
-  font-size: 12px;
-}
-
 .attack-deck-row-buttons {
   display: flex;
   flex-wrap: wrap;
@@ -222,7 +217,450 @@
   font-weight: 700;
 }
 
-.attack-deck-draw-discarded {
-  color: var(--color-black-500);
+/* --- Attack modifier card faces ---------------------------------------
+   The printed cards' geometry, minus everything that only mattered on
+   cardboard: no deck badge (the deck knows what it is), no per-card art,
+   no print marks. What is left is proportional, so one rule set covers
+   every size: a 1.535:1 field, a medallion at 80% of card height, and an
+   effect diamond inscribed in it. */
+.attack-card {
+  --w: 92px;
+  width: var(--w);
+  aspect-ratio: 1.535;
+  border-radius: calc(var(--w) * 0.04);
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  flex: none;
+  background: var(--am-field, var(--am-sign));
+  box-shadow:
+    inset 0 0 0 calc(var(--w) * 0.011) rgb(255 255 255 / 20%),
+    0 1px 3px rgb(0 0 0 / 45%);
+}
+
+.attack-card[data-size="md"] { --w: 150px; }
+
+/* Colour follows the MODIFIER. --am-sign is the same colour named for what
+   it means rather than where it goes: on a card whose effect has taken the
+   field, the sign moves onto the numeral's own disc and the field says
+   something else. Null takes dark ink on a lighter gold, as the printed
+   cards do; everything else is white on a mid tone. */
+.attack-card[data-fill="positive"] { --am-sign: oklch(0.470 0.140 150.5); }
+.attack-card[data-fill="negative"] { --am-sign: oklch(0.505 0.213 27.518); }
+.attack-card[data-fill="neutral"]  { --am-sign: oklch(0.520 0.030 60); }
+.attack-card[data-fill="double"]   { --am-sign: oklch(0.438 0.218 303.5); }
+.attack-card[data-fill="null"] {
+  --am-sign: oklch(0.785 0.152 84);
+  --am-ink: oklch(0.285 0.055 62);
+}
+
+.attack-card-medallion {
+  width: calc(var(--w) / 1.535 * 0.80);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  position: relative;
+  z-index: 1;
+}
+
+.attack-card-value {
+  /* A grid, so whitespace around an inline <svg> cannot shift the glyph
+     off-centre -- text nodes that are only whitespace generate no grid
+     item, where in inline layout they add width. */
+  display: grid;
+  place-items: center;
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.52);
+  line-height: 0.86;
+  color: var(--am-ink, #fff);
+  text-shadow: 0 calc(var(--w) * 0.006) 0 rgb(0 0 0 / 30%);
+}
+
+.attack-card-value .icon { fill: var(--am-ink, #fff); }
+
+/* The shuffle mark stays white on every fill, including the light gold of
+   a Null card, matching the printed cards. */
+/* A dark disc carrying white arrows, as the printed cards have it --
+   white alone reads differently against a light gold Null card than
+   against a purple 2x, so the mark brings its own background. */
+.attack-card-shuffle {
+  position: absolute;
+  right: 4.5%;
+  bottom: 5.5%;
+  width: calc(var(--w) * 0.155);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: oklch(0.20 0.02 260);
+  box-shadow: inset 0 0 0 calc(var(--w) * 0.005) rgb(255 255 255 / 25%);
+  z-index: 2;
+}
+
+.attack-card-shuffle .icon { fill: #fff; }
+
+/* Sized against the medallion, not against this auto-width parent --
+   a percentage here resolves against the glyph's own box. */
+.attack-card-value .icon {
+  width: calc(var(--w) / 1.535 * 0.58);
+  height: calc(var(--w) / 1.535 * 0.58);
+}
+
+/* Effect glyph, in a diamond inscribed in the medallion. */
+/* The effect's own accent fills the diamond -- the same colour its token
+   badge uses, so a status reads the same on a card as it does on a token.
+   The translucent black is only the fallback for an effect with no accent
+   of its own. */
+.attack-card-diamond {
+  width: 74%;
+  aspect-ratio: 1;
+  transform: rotate(45deg);
+  border-radius: 12%;
+  background: rgb(0 0 0 / 13%);
+  display: grid;
+  place-items: center;
+  box-shadow: inset 0 0 0 2px rgb(255 255 255 / 50%);
+}
+
+/* A drop and a shield are round-shouldered shapes, and the printed cards
+   set both of them in a circle rather than a diamond -- true whether the
+   effect is painting its own accent (Heal) or sitting plain on a field
+   that is already its colour (Shield). The box stays rotated; a circle
+   does not care. */
+.attack-card-diamond[data-effect="heal"],
+.attack-card-diamond[data-effect="shield"] {
+  border-radius: 50%;
+}
+
+/* An element is drawn in an orb, which is how the printed cards set them
+   apart from every other effect.
+
+   Everything about the orb is derived from --orb-glyph, the size of the
+   glyph inside it, so the disc, its rim and the clearance between them
+   scale together and one number moves the whole thing. The 9% is the
+   clearance the glyph's CORNERS need: these symbols fill their box, so a
+   circle drawn on the box itself would cut the snowflake's arms.
+
+   A circle is also the one shape that does not care that the medallion's
+   copy of the glyph is counter-rotated 45 degrees inside its diamond. */
+/* Shifted down to put the glyph-and-word pair back on the card's middle.
+   An element raises its glyph further than the shared rule does and then
+   drops a word below it, which left the pair sitting 7.6% of card height
+   high. Moving the box moves both and leaves the spacing between them
+   alone, where correcting the raise would have closed the gap the smaller
+   orb just opened.
+
+   The standalone translate property applies before the transform, so this
+   is a straight drop in the card's own axes rather than along the
+   diamond's rotated ones. */
+.attack-card-diamond[data-effect="element"] {
+  --orb-glyph: calc(var(--w) / 1.535 * 0.335);
+  translate: 0 calc(var(--w) / 1.535 * 0.076);
+}
+
+/* The effect has taken the whole card, so there is nothing for a diamond
+   to distinguish -- it would be a same-coloured seam around the glyph.
+   The box stays (the stacked layout is built on its rotation); only its
+   paint goes. */
+.attack-card-diamond[data-plain] {
+  background: none;
+  box-shadow: none;
+  /* With the accent gone the glyph has to hold the card on its own, and
+     it was sized to sit inside a diamond. Scaling the box rather than the
+     glyph keeps every tuned relationship inside it -- glyph to number,
+     number to caption -- and lands the glyph at roughly the 55% of card
+     height the printed cards give it. */
+  scale: 1.45;
+}
+
+.attack-card-diamond .icon {
+  width: 62%;
+  height: 62%;
+  transform: rotate(-45deg);
+  fill: #fff;
+}
+
+/* The modifier demotes to this chip once an effect owns the medallion --
+   the printed Frosthaven arrangement: a small circle in the modifier's
+   own sign colour (var(--am-sign), not the card's field -- the field is
+   the effect's colour now, so the sign has nowhere left to show except
+   here), holding the numeral or the rare glyph (Null) on its own. No
+   caption rides with it; the printed chip never carries one, only the
+   medallion does. */
+.attack-card-chip {
+  position: absolute;
+  left: 4%;
+  top: 50%;
+  transform: translateY(-50%);
+  width: calc(var(--w) / 1.535 * 0.30);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--am-sign);
+  box-shadow: inset 0 0 0 calc(var(--w) * 0.006) rgb(255 255 255 / 30%);
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.17);
+  line-height: 1;
+  /* Same fallback as the plain medallion's own numeral: --am-ink is only
+     ever set for Null's pale gold, so every other sign still gets white
+     with no rule of its own. */
+  color: var(--am-ink, #fff);
+  z-index: 2;
+}
+
+.attack-card-chip .icon {
+  width: 58%;
+  height: 58%;
+  fill: var(--am-ink, #fff);
+}
+
+/* The effect's quantity. Tucked under the glyph it was too small to read
+   at panel size, so it sits over the symbol instead -- but where exactly
+   depends on the symbol, so each one that carries a number places its own.
+   The trailing translate lands AFTER the counter-rotation, so it moves
+   along visual axes rather than the diamond's rotated ones. */
+.attack-card-diamond .attack-card-qty {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.24);
+  line-height: 1;
+  color: oklch(0.18 0.02 60);
+}
+
+/* Heal and shield keep their number INSIDE the glyph -- a drop and a
+   shield both have an interior, unlike an arrow -- but they stack like
+   the others, because the printed cards write a target beneath them and
+   that wants the same slot the other effects give their number. */
+.attack-card-diamond[data-effect="heal"] .icon,
+.attack-card-diamond[data-effect="shield"] .icon {
+  width: 46%;
+  height: 46%;
+  transform: rotate(-45deg) translate(0, -34%);
+}
+
+/* Both sit their number inside the glyph rather than beneath it, since a
+   drop and a shield each have an interior. Where inside differs: a
+   teardrop is narrow at the top and wide at the bottom, so heal's number
+   sits low and a little left of the glyph's centre, while the shield is
+   even enough to take it dead centre. */
+.attack-card-diamond[data-effect="heal"] .attack-card-qty,
+.attack-card-diamond[data-effect="shield"] .attack-card-qty {
+  font-size: calc(var(--w) / 1.535 * 0.125);
+  transform: translate(-50%, -50%) rotate(-45deg) translate(-0.10em, -0.55em);
+}
+
+/* The shield is symmetrical, so its number sits on heal's height but
+   centred rather than nudged left. */
+.attack-card-diamond[data-effect="shield"] .attack-card-qty {
+  transform: translate(-50%, -50%) rotate(-45deg) translate(0, -0.55em);
+}
+
+
+/* Any glyph with a word beneath it stacks the same way the numbered ones
+   do -- left centred, the symbol is written across its own caption. Keyed
+   on carrying a caption rather than on which effect it is, so a condition
+   that gains or loses its word needs no rule of its own. */
+.attack-card-diamond[data-caption] .icon {
+  width: 46%;
+  height: 46%;
+  transform: rotate(-45deg) translate(0, -34%);
+}
+
+/* After the caption rule above, which it has to beat: same specificity, so
+   source order decides. An element sizes its glyph against the orb rather
+   than against the diamond, and rises 40% of its own smaller self so it
+   gives back the clearance the smaller orb just won. */
+.attack-card-diamond[data-effect="element"] .icon {
+  width: var(--orb-glyph);
+  height: var(--orb-glyph);
+  border-radius: 50%;
+  background: var(--am-element);
+  /* One filled ring in the element's own colour, then a white one outside
+     it: the disc the glyph sits in, and its rim. Spread shadows draw both
+     from the glyph's own box, so the orb needs no element of its own and
+     stays centred on the glyph whatever size the card is drawn at. */
+  box-shadow:
+    0 0 0 calc(var(--orb-glyph) * 0.09) var(--am-element),
+    0 0 0 calc(var(--orb-glyph) * 0.09 + var(--w) * 0.0096) #fff;
+}
+
+/* The stacked raise is a percentage of the glyph, so a smaller glyph rises
+   less and gives back the clearance the smaller orb just won. Restated
+   here against the orb's own size rather than the shared 34%. */
+.attack-card-diamond[data-effect="element"] .icon {
+  transform: rotate(-45deg) translate(0, -40%);
+}
+
+/* The caption beneath the glyph: a target where the card states one,
+   otherwise what an element card does with its symbol. Small caps-ish,
+   since it is a word among symbols. */
+.attack-card-caption {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(-45deg) translate(0, 1.32em);
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.125);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  color: #fff;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* A plain card gives the caption the card's full width, but inside a
+   diamond the slot narrows to roughly half the card's height and the
+   longest names overrun it. Scale by the word's own length rather than
+   picking a size per word, so a name added later needs no rule: at seven
+   characters and under nothing changes, and longer words give back
+   exactly the width they took. */
+.attack-card-diamond:not([data-plain]) .attack-card-caption {
+  font-size: calc(var(--w) / 1.535 * 0.125 * min(1, 7 / var(--cap-len, 7)));
+}
+
+/* Effects whose glyph has no interior to sit in -- an arrow has no
+   inside, a bullseye's rings break up anything laid over them -- stack
+   instead: a smaller symbol raised in the diamond with the number
+   beneath it, both white. Laid over the glyph the number was unreadable,
+   and set beside it the glyph went off centre. */
+.attack-card-diamond[data-effect="push"] .icon,
+.attack-card-diamond[data-effect="pull"] .icon,
+.attack-card-diamond[data-effect="pierce"] .icon,
+.attack-card-diamond[data-effect="add-target"] .icon {
+  width: 46%;
+  height: 46%;
+  transform: rotate(-45deg) translate(0, -34%);
+}
+
+/* Pierce's spear is a wide glyph, so it fits its box by width and leaves
+   vertical slack -- painted, it stood 19.5px against push's 23.3. Scaled
+   up to stand as tall as the others. (add-target needs no such nudge: its
+   bullseye is square and already matches push to within a pixel.) */
+.attack-card-diamond[data-effect="pierce"] .icon {
+  width: 55%;
+  height: 55%;
+  transform: rotate(-45deg) translate(0, -28%);
+}
+
+/* Wings, for the two one-shot kinds. A lens of two circular arcs, sized
+   past the card so its arcs meet the top and bottom edges -- flush to
+   the pixel would leave a sliver of field showing at one edge. Width
+   tracks height because the SVG preserves aspect ratio. */
+.attack-card-wing {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.attack-card-lens {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  height: 128%;
+  width: 188%;
+  overflow: visible;
+  z-index: 0;
+}
+
+.attack-card-wing[data-wings="bless"] { --am-wing: oklch(0.70 0.150 82); }
+.attack-card-wing[data-wings="curse"] { --am-wing: oklch(0.42 0.205 303); }
+.attack-card-lens path { fill: var(--am-wing); }
+
+/* The medallion punches the card's own colour back through the wings, so
+   the modifier reads on its own field rather than on the wing colour. */
+.attack-card-wing .attack-card-medallion {
+  background: var(--am-field, var(--am-sign));
+  border-radius: 50%;
+}
+
+/* Centred in the wing itself: it runs from the medallion's edge (0.5 of
+   the medallion width) to the lens tip (0.94), so its midpoint is 0.72
+   out -- equal clearance against the disc and against the tip. */
+.attack-card-mark {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  /* The wing runs 0.44 of the medallion's width, from its edge (0.5) to
+     the lens tip (0.94). The mark fills most of it at 0.36 wide, sitting
+     at 0.70 from the card's centre -- a touch inside the wing's own
+     midpoint of 0.72, which reads better than dead centre. That leaves
+     0.02 against the medallion and 0.06 against the tip. */
+  width: 36%;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  z-index: 1;
+}
+
+.attack-card-mark[data-side="l"] { left: -38%; }
+.attack-card-mark[data-side="r"] { right: -38%; }
+/* Fill the mark. Without an explicit size the glyph falls back to the
+   width/height attributes the icon component writes -- a fixed 18px --
+   so the mark's own size had no effect on what was drawn, and the glyph
+   did not scale between card sizes either. */
+.attack-card-mark .icon {
+  width: 100%;
+  height: 100%;
+  fill: #fff;
+}
+
+.attack-deck-row-last-drawn {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.attack-deck-row-last-drawn-label {
+  color: var(--color-blues-100);
   font-size: 12px;
+}
+
+.attack-deck-draw-cards {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.attack-deck-draw-discarded-label {
+  color: var(--color-blues-100);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* The discarded half of an Advantage/Disadvantage draw reads as secondary. */
+.attack-deck-draw-discarded .attack-card {
+  opacity: 0.45;
+}
+
+/* Rolling flag: a green diamond in the top-right, as the printed perk
+   cards have it. Its own slot rather than sharing the shuffle corner,
+   because a card can be rolling and carry an effect at once. */
+.attack-card-rolling {
+  position: absolute;
+  right: 4.5%;
+  top: 7%;
+  width: calc(var(--w) * 0.145);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  transform: rotate(45deg);
+  border-radius: 12%;
+  background: oklch(0.545 0.150 149);
+  box-shadow: inset 0 0 0 calc(var(--w) * 0.006) rgb(255 255 255 / 65%);
+  z-index: 2;
+}
+
+.attack-card-rolling .icon {
+  width: 66%;
+  height: 66%;
+  transform: rotate(-45deg);
+  fill: #fff;
 }

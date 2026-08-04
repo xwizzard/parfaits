@@ -53,6 +53,95 @@
         effect-text (attack-deck/effect-label effect amount)]
     (if effect-text (str label " " effect-text) label)))
 
+(defui attack-card
+  "One attack modifier card, drawn the way the printed cards are: a flat
+   field carrying a centred medallion. `size` is :sm for the inline
+   last-drawn/log cards, :md for a standalone one.
+
+   Nothing here identifies which deck the card belongs to -- that lives
+   on the deck itself (:player/attack-deck, :scene/monster-attack-deck),
+   so the face carries only the modifier and what is attached to it."
+  [{:keys [kind effect amount rolling? target reduced? size] :or {size :sm}}]
+  (let [{:keys [fill value glyph effect-icon wings wing-glyph shuffle?
+                color field-color plain-medallion? element-color]
+         card-rolling? :rolling?
+         card-amount :amount-label
+         card-caption :caption}
+        (attack-deck/card-face kind {:effect effect :amount amount
+                                     :rolling? rolling? :target target
+                                     :reduced? reduced?})
+        ;; An effect, when the card has one, always owns the medallion --
+        ;; the modifier demotes to the small chip below instead, whatever
+        ;; its own value. The quantity rides with the glyph, as it does on
+        ;; the printed cards -- Push 1 draws its 1 under the arrow, not off
+        ;; in a corner where it would read as a separate fact.
+        centre (if effect-icon
+                 ($ :<>
+                   ($ icon {:name effect-icon :size 26})
+                   (if card-amount ($ :span.attack-card-qty card-amount))
+                   ;; The caption sits where the other stacked effects put
+                   ;; their number -- it is the same slot, doing the same
+                   ;; job of qualifying the glyph above it.
+                   (if card-caption ($ :span.attack-card-caption card-caption)))
+                 (if glyph ($ icon {:name glyph :size 26}) value))
+        medallion
+        ($ :.attack-card-medallion
+          (if effect-icon
+            ;; Kept in the tree even when nothing is drawn behind the
+            ;; glyph: this element carries the rotation the stacked
+            ;; glyph-over-number layout is built on, so removing it would
+            ;; take the layout with it.
+            ($ :.attack-card-diamond
+              {:style (cond-> {}
+                        color (assoc :background color)
+                        ;; The slot inside a diamond is narrow enough that
+                        ;; the longest condition names overrun it, so the
+                        ;; caption scales to its own length there.
+                        card-caption (assoc "--cap-len" (count card-caption)))
+               :data-plain (if plain-medallion? "true")
+               ;; Carrying a word means the glyph has to make room for one,
+               ;; whichever effect it is -- so the layout keys on having a
+               ;; caption rather than on a list of effects that have one.
+               :data-caption (if card-caption "true")
+               :data-effect (if effect (name effect))}
+              centre)
+            ($ :.attack-card-value centre)))]
+    ($ :.attack-card
+      {:data-fill (name fill)
+       :data-size (name size)
+       ;; An effect that owns the card overrides the modifier's colour;
+       ;; data-fill stays put underneath it as the fallback -- and as what
+       ;; the modifier's own chip still uses (see below), since the chip
+       ;; is what carries the sign once the field no longer does.
+       :style (cond-> {}
+                field-color   (assoc "--am-field" field-color)
+                ;; The one colour drawn at its own brightness: an element's
+                ;; orb is the bright thing on the printed card.
+                element-color (assoc "--am-element" element-color))
+       :aria-label (draw-text kind effect amount reduced?)}
+      (if wings
+        ($ :.attack-card-wing {:data-wings (name wings)}
+          ($ :svg.attack-card-lens {:viewBox "0 0 1469 1000"}
+            ($ :path {:d (str "M0,500 A789.49,789.49 0 0 1 1469,500"
+                              " A789.49,789.49 0 0 1 0,500 Z")}))
+          ($ :i.attack-card-mark {:data-side "l"} ($ icon {:name wing-glyph :size 18}))
+          ($ :i.attack-card-mark {:data-side "r"} ($ icon {:name wing-glyph :size 18}))
+          medallion)
+        medallion)
+      ;; The modifier, demoted to a small chip once an effect has the
+      ;; medallion -- shown whatever its own value, including a bare +0:
+      ;; the printed cards write it there regardless, since the chip costs
+      ;; nothing to read at that size the way a redundant "+0" would in
+      ;; the medallion itself.
+      (if effect-icon
+        ($ :.attack-card-chip (if glyph ($ icon {:name glyph :size 14}) value)))
+      ;; Rolling: resolves and the draw continues. Its own corner, since a
+      ;; card can be rolling AND carry an effect.
+      (if card-rolling?
+        ($ :.attack-card-rolling ($ icon {:name "am-rolling" :size 12})))
+      (if shuffle?
+        ($ :.attack-card-shuffle ($ icon {:name "am-shuffle" :size 14}))))))
+
 (defn ^:private effect-card-groups
   "The deck's current effect cards, grouped by their exact (kind, effect,
    amount) triple with a count -- what the composition editor's removal
@@ -332,9 +421,14 @@
         ($ :span.attack-deck-row-counts (str draw-count " draw / " discard-count " discard")))
       (if latest-draw
         ($ :.attack-deck-row-last-drawn
-          "Last drawn: "
-          (if (:draw/mode latest-draw) (str (name (:draw/mode latest-draw)) " -- "))
-          (draw-text (:draw/kind latest-draw) (:draw/effect latest-draw) (:draw/effect-amount latest-draw) reduced?)))
+          ($ :span.attack-deck-row-last-drawn-label
+            "Last drawn"
+            (if (:draw/mode latest-draw) (str " -- " (name (:draw/mode latest-draw)))))
+          ($ attack-card
+            {:kind (:draw/kind latest-draw)
+             :effect (:draw/effect latest-draw)
+             :amount (:draw/effect-amount latest-draw)
+             :reduced? reduced?})))
       ($ draw-form {:dispatch dispatch :deck-id id :disabled? (not authorized?)})
       ($ :.attack-deck-row-buttons
         ($ :button.button.button-neutral
@@ -362,10 +456,17 @@
     ($ :li.attack-deck-draw-item
       ($ :.attack-deck-draw-header
         ($ :span.attack-deck-draw-owner (:deck/name deck))
-        (if mode ($ :span.attack-deck-draw-mode (name mode)))
-        ($ :span.attack-deck-draw-kind (draw-text kind effect amount reduced?)))
-      (if other
-        ($ :.attack-deck-draw-discarded (str "discarded: " (draw-text other other-effect other-amount reduced?)))))))
+        (if mode ($ :span.attack-deck-draw-mode (name mode))))
+      ($ :.attack-deck-draw-cards
+        ($ attack-card {:kind kind :effect effect :amount amount :reduced? reduced?})
+        ;; Advantage/Disadvantage keeps one card and discards the other;
+        ;; showing both makes the comparison the mode exists for legible.
+        (if other
+          ($ :<>
+            ($ :span.attack-deck-draw-discarded-label "over")
+            ($ :.attack-deck-draw-discarded
+              ($ attack-card
+                {:kind other :effect other-effect :amount other-amount :reduced? reduced?}))))))))
 
 (defui ^:private new-deck-controls
   [{:keys [dispatch players-without-deck has-monster? host?]}]

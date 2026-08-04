@@ -1,3 +1,17 @@
+/* The face the printed attack modifier cards set their numerals in.
+   Self-hosted rather than fetched from Google Fonts because it is patched
+   and subset: the zero loses the pip floating in its counter, and the x is
+   raised onto the digits' axis so "2x" sits level with "+1"/"-1". Subset
+   to digits, arithmetic signs and the Latin alphabet -- the alphabet for
+   the short target words a card prints beneath a glyph ("Self") -- which
+   is under 4 KB. esbuild inlines it, so it costs no request and cannot
+   flash unstyled. See scratchpad patchfont.py for the build. */
+@font-face {
+  font-family: "Pirata Numerals";
+  src: url(pirata-numerals.woff2) format("woff2");
+  font-display: block;
+}
+
 :root {
   --pattern-grid: url(pattern-grid.svg);
   --pattern-fold: url(pattern-fold.svg);
