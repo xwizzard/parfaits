@@ -394,24 +394,32 @@
    digit, so it inherits the app's own serif rather than asking for
    Pirata Numerals the way every other glyph on the card does. */
 .attack-card-prose {
-  width: 94%;
-  height: 94%;
-  border-radius: 50%;
+  width: 92%;
+  padding: 4% 6%;
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 10%;
-  background: oklch(0.82 0.008 48.6);
-  box-shadow: inset 0 0 0 calc(var(--w) * 0.006) rgb(0 0 0 / 12%);
-  color: oklch(0.22 0.01 60);
-  font-size: calc(var(--w) / 1.535 * 0.082);
-  line-height: 1.18;
+  /* No disc behind it: the card's own field is already the fixed
+     neutral this effect sits on, so a lighter circle underneath the
+     text would only be a second, redundant field rather than the
+     "solid brown background" the printed cards effectively have once
+     the petal art is subtracted. */
+  color: #fff;
+  text-shadow: 0 calc(var(--w) * 0.006) 0 rgb(0 0 0 / 30%);
+  /* Every other word on these cards -- captions, the chit's numeral,
+     condition names -- is set in Pirata Numerals; a sentence in the
+     app's body serif read as an inconsistency rather than a deliberate
+     choice. The subset was widened for this (space, period, comma,
+     apostrophe, colon) -- it previously covered only bare words. */
+  font-family: "Pirata Numerals", serif;
+  font-size: calc(var(--w) / 1.535 * 0.088);
+  line-height: 1.2;
   overflow: hidden;
   /* A source that hands this component one long unbroken token (a raw
-     key, a URL) would otherwise overflow the disc outright rather than
-     wrap -- ordinary prose never triggers this, but nothing guarantees
-     the text always is ordinary prose. */
+     key, a URL) would otherwise overflow outright rather than wrap --
+     ordinary prose never triggers this, but nothing guarantees the text
+     always is ordinary prose. */
   overflow-wrap: anywhere;
 }
 

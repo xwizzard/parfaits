@@ -373,10 +373,12 @@
          base (if (:value base) (dissoc base :glyph) base)]
      (if (= effect :custom)
        ;; A custom effect is prose, not a symbol -- there is no glyph to
-       ;; reach for, and the printed cards do not reach for one either:
-       ;; they draw the sentence itself on a light disc. None of the
-       ;; glyph/amount/caption machinery below applies, so this returns
-       ;; early rather than threading a "no, not this one" through it.
+       ;; reach for. The sentence sits directly on the field, no disc
+       ;; behind it, since the field is already the fixed neutral this
+       ;; effect sits on and a second circle in a lighter tone would only
+       ;; restate it. None of the glyph/amount/caption machinery below
+       ;; applies, so this returns early rather than threading a "no, not
+       ;; this one" through it.
        ;; The field takes the same fixed neutral Heal does -- whatever a
        ;; custom effect actually does, the card has nothing more specific
        ;; to say with its colour than "this is the effect".
