@@ -137,7 +137,7 @@
               ($ :.attack-card-consume-wild
                 ($ :span.attack-card-consume-spent
                   ($ icon {:name "x-circle-fill" :color "oklch(0.505 0.213 27.518)"})))
-              ($ :span.attack-card-consume-arrow "→")
+              ($ :span.attack-card-consume-sep ":")
               ($ :.attack-card-consume-wild))
 
             effect-icon

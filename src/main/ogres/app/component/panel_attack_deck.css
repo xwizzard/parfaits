@@ -672,7 +672,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8%;
+  gap: 3%;
   width: 92%;
 }
 
@@ -719,10 +719,11 @@
   height: 100%;
 }
 
-/* The same "one becomes another" arrow the composition editor's own
-   Replace Card form already uses -- a spent element becoming a fresh one
-   is the same relationship. */
-.attack-card-consume-arrow {
+/* A colon, not an arrow -- Pirata Numerals' own subset has no arrow
+   glyph (checked its cmap directly rather than assumed), and a colon
+   was already in it. It also happens to match the printed card's own
+   separator -- two small dots -- closer than an arrow would have. */
+.attack-card-consume-sep {
   font-family: "Pirata Numerals", serif;
   font-size: calc(var(--w) / 1.535 * 0.16);
   color: #fff;
