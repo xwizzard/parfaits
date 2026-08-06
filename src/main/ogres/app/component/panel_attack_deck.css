@@ -686,7 +686,7 @@
     #e45626 60deg 120deg,
     #88a63f 120deg 180deg,
     #f4ae1c 180deg 240deg,
-    #163856 240deg 300deg,
+    #1e2228 240deg 300deg,
     #9cb1bd 300deg 360deg);
   box-shadow: 0 0 0 calc(var(--w) * 0.0096) #fff;
 }

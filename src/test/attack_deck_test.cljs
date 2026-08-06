@@ -166,14 +166,18 @@
     ;; Sampled from decks whose element blocks were read off a contact
     ;; sheet, not derived -- deriving them from the perk sheets is what put
     ;; a taupe on DARK, which is a deep navy on the card.
-    (is (= (:color (get attack-deck/element-colors :dark)) "#163856"))
     (is (= (:color (get attack-deck/element-colors :ice)) "#34c2f0")))
 
-  (testing "every element's field is its own orb at the common lightness"
+  (testing "every element but DARK has its field at the common lightness"
     ;; The card is a darker wash of the element and the orb is the bright
     ;; thing on it, which is the two-tone arrangement the printed card has.
-    (doseq [[k {:keys [field]}] attack-deck/element-colors]
-      (is (re-find #"^oklch\(0\.47 " field) (str k " sits in the common band")))))
+    ;; DARK is the one deliberate exception -- see element-colors' own
+    ;; docstring -- so it's excluded here rather than asserted against.
+    (doseq [[k {:keys [field]}] (dissoc attack-deck/element-colors :dark)]
+      (is (re-find #"^oklch\(0\.47 " field) (str k " sits in the common band"))))
+
+  (testing "DARK sits close to INVISIBLE's near-black, not the common band"
+    (is (re-find #"^oklch\(0\.3" (:field (get attack-deck/element-colors :dark))))))
 
 (deftest test-an-element-carries-its-orb-to-the-view
   (testing "the orb colour survives both layouts"

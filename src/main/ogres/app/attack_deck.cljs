@@ -241,13 +241,23 @@
 
    :field is that colour's hue and chroma at the common lightness, so the
    card reads as a darker wash of its own element, which is the two-tone
-   arrangement the printed card has."
+   arrangement the printed card has.
+
+   DARK breaks that shared lightness on purpose, the same exception
+   INVISIBLE already makes above: darkness is the element's whole meaning,
+   so it stays dark rather than lightening to the common band. Its own
+   printed medallion (Deathwalker's card, the Frosthaven element token) is
+   actually a navy blue at that common lightness, same as every other
+   element -- sampled and checked directly. Kept close to that hue rather
+   than going neutral grey, but pulled its own :color and :field both down
+   toward INVISIBLE's near-black, landing just a shade lighter than it
+   rather than matching the other five elements' mid-tone."
   {:fire  {:color "#e45626" :field "oklch(0.47 0.130 37.8)"}
    :ice   {:color "#34c2f0" :field "oklch(0.47 0.130 225.1)"}
    :air   {:color "#9cb1bd" :field "oklch(0.47 0.029 232.2)"}
    :earth {:color "#88a63f" :field "oklch(0.47 0.130 123.5)"}
    :light {:color "#f4ae1c" :field "oklch(0.47 0.130 78.2)"}
-   :dark  {:color "#163856" :field "oklch(0.47 0.067 248.7)"}})
+   :dark  {:color "#1e2228" :field "oklch(0.30 0.020 250.0)"}})
 
 (def ^:private target-labels
   "How an effect's target reads on the card."
