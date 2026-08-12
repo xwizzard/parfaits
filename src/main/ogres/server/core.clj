@@ -336,8 +336,8 @@
 
 (defn create-connector
   ([] (create-connector {}))
-  ([{:keys [port] :or {port 5000}}]
-   (-> (conn/default-connector-map port)
+  ([{:keys [host port] :or {host "localhost" port 5000}}]
+   (-> (conn/default-connector-map host port)
        (conn/with-default-interceptors)
        (conn/with-routes
          #{["/"          :get [handle-root]]
@@ -346,4 +346,4 @@
        (jetty/create-connector nil))))
 
 (defn -main [port]
-  (conn/start! (create-connector {:port (Integer/parseInt port)})))
+  (conn/start! (create-connector {:host "0.0.0.0" :port (Integer/parseInt port)})))

@@ -12,6 +12,7 @@ RUN npx esbuild \
   --bundle \
   --minify \
   --loader:.svg=dataurl \
+  --loader:.woff2=dataurl \
   --outfile=./web/release/ogres.app.css \
   ./src/main/ogres/app/resource/root.css
 
