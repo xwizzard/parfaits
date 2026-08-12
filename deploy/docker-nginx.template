@@ -7,21 +7,15 @@ server {
         alias /usr/share/nginx/app/site/web/;
     }
 
-    # App entrypoint supplied from Github Pages
+    # App entrypoint (own build, not Github Pages)
     location /play {
-        alias /usr/share/nginx/html/;
+        alias /usr/share/nginx/app/web/;
         try_files $uri $uri/index.html =404;
     }
 
     # Local release builds
     location /release/ {
         alias /usr/share/nginx/app/web/release/;
-        try_files $uri $uri/ @fallback;
-    }
-
-    # Fallback to release bundles supplied from Github Pages
-    location @fallback {
-        root /usr/share/nginx/html;
         try_files $uri $uri/ =404;
     }
 
@@ -36,7 +30,7 @@ server {
 
     # A list of available releases
     location = /releases.txt {
-        alias /usr/share/nginx/html/;
+        alias /usr/share/nginx/app/web/;
         try_files releases.txt =404;
     }
 }
@@ -53,21 +47,15 @@ server {
         alias /usr/share/nginx/app/site/web/;
     }
 
-    # App entrypoint supplied from Github Pages
+    # App entrypoint (own build, not Github Pages)
     location /play {
-        alias /usr/share/nginx/html/;
+        alias /usr/share/nginx/app/web/;
         try_files $uri $uri/index.html =404;
     }
 
     # Local release builds
     location /release/ {
         alias /usr/share/nginx/app/web/release/;
-        try_files $uri $uri/ @fallback;
-    }
-
-    # Fallback to release bundles supplied from Github Pages
-    location @fallback {
-        root /usr/share/nginx/html;
         try_files $uri $uri/ =404;
     }
 
@@ -82,7 +70,7 @@ server {
 
     # A list of available releases
     location = /releases.txt {
-        alias /usr/share/nginx/html/;
+        alias /usr/share/nginx/app/web/;
         try_files releases.txt =404;
     }
 }

@@ -1,3 +1,11 @@
 **/.git
 **/cljs-runtime
 **/manifest.edn
+
+# Local-only dev shim (see .gitignore's own comment on these same paths) --
+# never part of a real build, but nothing previously stopped a maintainer's
+# local leftover dev-mode build from silently riding along into the image
+# via `COPY . .`, since .dockerignore doesn't consult .gitignore at all.
+web/release/ogres.app.js
+web/release/ogres.app.css
+web/release/latest

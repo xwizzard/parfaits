@@ -32,6 +32,16 @@ COPY --from=node /node/web/release/icons.svg /node/web/release/ogres* ./web/rele
 RUN clojure -M -m shadow.cljs.devtools.cli release app \
   --config-merge "{:closure-defines {ogres.app.const/VERSION \"${VERSION}\" ogres.app.const/PATH \"/release/${VERSION}\" ogres.app.const/SOCKET-URL \"${SERVER_SOCKET_URL}\"}}"
 
+# web/index.html's own client-side release-detection logic defaults a
+# first-time visitor (no cached release preference in IndexedDB) to
+# "release/latest" -- point that at whatever VERSION was actually just
+# built, generated fresh on every image build. Not to be confused with
+# the *local-only* dev shim of the same name documented in .gitignore /
+# .dockerignore -- that one is a leftover from running shadow-cljs watch
+# mode directly on the host and is explicitly excluded from ever
+# reaching a real image build.
+RUN ln -sfn "${VERSION}" web/release/latest
+
 VOLUME ["/build"]
 
 # Watch build stage (for development)
