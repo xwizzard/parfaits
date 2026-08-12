@@ -47,8 +47,10 @@ services:
     volumes:
       - ./deploy/docker-nginx.template:/etc/nginx/templates/default.conf.template:ro
       - frontend:/usr/share/nginx/app
+      - /etc/ssl/parfaits:/etc/nginx/ssl:ro
     ports:
       - "8080:80"
+      - "443:443"
 
 volumes:
   frontend:

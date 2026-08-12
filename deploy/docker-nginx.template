@@ -40,3 +40,49 @@ server {
         try_files releases.txt =404;
     }
 }
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+
+    ssl_certificate     /etc/nginx/ssl/parfaits.740819.xyz.fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/parfaits.740819.xyz.key;
+
+    # Marketing
+    location / {
+        alias /usr/share/nginx/app/site/web/;
+    }
+
+    # App entrypoint supplied from Github Pages
+    location /play {
+        alias /usr/share/nginx/html/;
+        try_files $uri $uri/index.html =404;
+    }
+
+    # Local release builds
+    location /release/ {
+        alias /usr/share/nginx/app/web/release/;
+        try_files $uri $uri/ @fallback;
+    }
+
+    # Fallback to release bundles supplied from Github Pages
+    location @fallback {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ =404;
+    }
+
+    # Backend
+    location /ws {
+        proxy_pass ${SERVER_SOCKET_URL};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host $host;
+    }
+
+    # A list of available releases
+    location = /releases.txt {
+        alias /usr/share/nginx/html/;
+        try_files releases.txt =404;
+    }
+}
