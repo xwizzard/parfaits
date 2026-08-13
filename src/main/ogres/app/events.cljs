@@ -583,43 +583,102 @@
                                    (assoc (into {} current) element-id link)
                                    (dissoc (into {} current) element-id))}]))
 
+;; -- Image gallery/library membership (shared by Scene/Token/Props
+;;    Images and the Library below) --
+;;
+;; Every image is one entity keyed by :image/hash, and props/scene
+;; deliberately share a hash for the same source file (provider/image.
+;; cljs's WebP@0.80 re-encode) specifically so calibration carries over
+;; between them. That means removing an image from ONE gallery must not
+;; blindly retractEntity -- it may still be a member of another gallery
+;; or the library archive (:root/library), both of which reference the
+;; exact same shared entity. gallery-image-attr/image-still-referenced?/
+;; retract-image-from-gallery centralize that check so the four
+;; remove-family handlers below (scene/token/props remove + remove-all)
+;; all get it right instead of each re-deriving it.
+
+(def ^:private gallery-image-attr
+  {:token :root/token-images :props :root/props-images :scene :root/scene-images})
+
+(def ^:private image-membership-attrs
+  "Every root-scoped collection that can keep a shared image entity
+   alive -- the three galleries plus the library archive."
+  (conj (vec (vals gallery-image-attr)) :root/library))
+
+(defn ^:private image-still-referenced?
+  "True if [:image/hash hash] remains a member of any image-membership
+   collection OTHER than `except-attr`, i.e. it's still needed
+   somewhere even after removing it from `except-attr`."
+  [data hash except-attr]
+  (let [root (ds/entity data [:db/ident :root])]
+    (boolean
+     (some (fn [attr]
+             (and (not= attr except-attr)
+                  (some #(= hash (:image/hash %)) (get root attr))))
+           image-membership-attrs))))
+
+(defn ^:private retract-image-from-gallery
+  "Tx-data to remove [:image/hash hash] from one gallery collection --
+   retracts only that membership ref if the entity is still referenced
+   elsewhere (another gallery, or the library archive), or fully
+   retracts the entity (forgetting its calibration outright, and its
+   IndexedDB blob -- see the :tx/commit-driven cleanup in
+   provider/state.cljs's listeners) once this was its last reference."
+  [data gallery-attr hash]
+  (if-let [entity (ds/entity data [:image/hash hash])]
+    (if (image-still-referenced? data hash gallery-attr)
+      [[:db/retract [:db/ident :root] gallery-attr (:db/id entity)]]
+      [[:db/retractEntity (:db/id entity)]])
+    []))
+
 ;; -- Scene Images --
 (defmethod event-tx-fn :scene-images/create-many
-  [_ _ images]
-  (into [{:db/ident :root
-          :root/scene-images
-          (for [[{:keys [hash name size width height]} _] images]
-            {:image/hash hash
-             :image/name name
-             :image/size size
-             :image/width width
-             :image/height height})}] cat
-        (for [[image thumbnail] images]
-          (if (= (:hash image) (:hash thumbnail))
-            [{:image/hash (:hash image) :image/thumbnail [:image/hash (:hash image)]}]
-            [{:image/hash (:hash thumbnail)
-              :image/name (:name thumbnail)
-              :image/size (:size thumbnail)
-              :image/width (:width thumbnail)
-              :image/height (:height thumbnail)}
-             {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}]))))
+  [data _ images]
+  (let [added-at (.now js/Date)]
+    (into [{:db/ident :root
+            :root/scene-images
+            (for [[{:keys [hash name size width height]} _] images
+                  :let [existing (ds/entity data [:image/hash hash])]]
+              (cond-> {:image/hash hash
+                       :image/name name
+                       :image/size size
+                       :image/width width
+                       :image/height height}
+                (nil? (:library/gallery existing)) (assoc :library/gallery :scene)
+                (nil? (:library/added-at existing)) (assoc :library/added-at added-at)))}
+           {:db/ident :root
+            :root/library
+            (for [[{:keys [hash]} _] images] {:image/hash hash})}] cat
+          (for [[image thumbnail] images]
+            (if (= (:hash image) (:hash thumbnail))
+              [{:image/hash (:hash image) :image/thumbnail [:image/hash (:hash image)]}]
+              [{:image/hash (:hash thumbnail)
+                :image/name (:name thumbnail)
+                :image/size (:size thumbnail)
+                :image/width (:width thumbnail)
+                :image/height (:height thumbnail)}
+               {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}])))))
 
 (defmethod
-  ^{:doc "Removes the scene image by the given identifying hash, along with
-          any board pieces in any scene that reference it -- otherwise
-          they'd be left with a dangling :board/image ref."}
+  ^{:doc "Removes the scene image by the given identifying hash from
+          this gallery, along with any board pieces in any scene that
+          reference it -- otherwise they'd be left with a dangling
+          :board/image ref. The image entity itself (and its
+          thumbnail, retracted along with it via :image/thumbnail's
+          own :isComponent cascade) is only fully forgotten once it's
+          no longer referenced by any other gallery or the library
+          archive -- see retract-image-from-gallery. `thumb` is no
+          longer used directly (kept for call-site compatibility): the
+          thumbnail entity is always owned by `image` via a component
+          ref, so it's never independently retracted."}
   event-tx-fn :scene-images/remove
-  [data _ image thumb]
+  [data _ image _thumb]
   (let [root (ds/entity data [:db/ident :root])
         pieces (for [scene (:root/scenes root)
                      piece (:scene/board scene)
                      :when (= image (:image/hash (:board/image piece)))]
                  [:db/retractEntity (:db/id piece)])]
-    (into (if (= image thumb)
-            [[:db/retractEntity [:image/hash image]]]
-            [[:db/retractEntity [:image/hash image]]
-             [:db/retractEntity [:image/hash thumb]]])
-          pieces)))
+    (into (retract-image-from-gallery data :root/scene-images image) pieces)))
 
 ;; -- Scene --
 (defn ^:private assoc-scene
@@ -2783,25 +2842,32 @@
 (defmethod event-tx-fn :token-images/create-many
   ([_ event images]
    [[:db.fn/call event-tx-fn event images false]])
-  ([_ _ images public?]
-   (into [{:db/ident :root
-           :root/token-images
-           (for [[{:keys [hash name size width height]} _] images]
-             {:image/hash hash
-              :image/name name
-              :image/size size
-              :image/public public?
-              :image/width width
-              :image/height height})}] cat
-         (for [[image thumbnail] images]
-           (if (= (:hash image) (:hash thumbnail))
-             [{:image/hash (:hash image) :image/thumbnail [:image/hash (:hash image)]}]
-             [{:image/hash (:hash thumbnail)
-               :image/name (:name thumbnail)
-               :image/size (:size thumbnail)
-               :image/width (:width thumbnail)
-               :image/height (:height thumbnail)}
-              {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}])))))
+  ([data _ images public?]
+   (let [added-at (.now js/Date)]
+     (into [{:db/ident :root
+             :root/token-images
+             (for [[{:keys [hash name size width height]} _] images
+                   :let [existing (ds/entity data [:image/hash hash])]]
+               (cond-> {:image/hash hash
+                        :image/name name
+                        :image/size size
+                        :image/public public?
+                        :image/width width
+                        :image/height height}
+                 (nil? (:library/gallery existing)) (assoc :library/gallery :token)
+                 (nil? (:library/added-at existing)) (assoc :library/added-at added-at)))}
+            {:db/ident :root
+             :root/library
+             (for [[{:keys [hash]} _] images] {:image/hash hash})}] cat
+           (for [[image thumbnail] images]
+             (if (= (:hash image) (:hash thumbnail))
+               [{:image/hash (:hash image) :image/thumbnail [:image/hash (:hash image)]}]
+               [{:image/hash (:hash thumbnail)
+                 :image/name (:name thumbnail)
+                 :image/size (:size thumbnail)
+                 :image/width (:width thumbnail)
+                 :image/height (:height thumbnail)}
+                {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}]))))))
 
 (defmethod
   ^{:doc "Change the visibility of the given token image to public (true)
@@ -2811,16 +2877,28 @@
   [[:db/add -1 :image/hash hash]
    [:db/add -1 :image/public public?]])
 
-(defmethod event-tx-fn :token-images/remove
-  [_ _ image thumb]
-  (if (= image thumb)
-    [[:db/retractEntity [:image/hash image]]]
-    [[:db/retractEntity [:image/hash image]]
-     [:db/retractEntity [:image/hash thumb]]]))
+(defmethod
+  ^{:doc "Removes the token image from this gallery. `thumb` is no
+          longer used directly (kept for call-site compatibility) --
+          see retract-image-from-gallery."}
+  event-tx-fn :token-images/remove
+  [data _ image _thumb]
+  (retract-image-from-gallery data :root/token-images image))
 
-(defmethod event-tx-fn :token-images/remove-all
-  []
-  [[:db/retract [:db/ident :root] :root/token-images]])
+(defmethod
+  ^{:doc "Clears the token gallery. Per-hash reference-counted, same as
+          a single :token-images/remove -- a hash still needed by the
+          library archive or another gallery survives; only truly
+          orphaned entities are forgotten. The `hashes` argument some
+          older call sites still pass is ignored -- the current
+          membership of :root/token-images is read directly from `data`
+          instead, which is always accurate and needs no client-side
+          bookkeeping."}
+  event-tx-fn :token-images/remove-all
+  [data & _]
+  (let [root (ds/entity data [:db/ident :root])
+        hashes (map :image/hash (:root/token-images root))]
+    (mapcat #(retract-image-from-gallery data :root/token-images %) hashes)))
 
 (defmethod event-tx-fn :token-images/change-thumbnail
   [_ _ hash thumb rect rotation]
@@ -3206,148 +3284,119 @@
           include metadata like image dimensions, filename, and their
           thumbnails. Uniquely identified by their SHA-1 hash digest."}
   event-tx-fn :props-images/create-many
-  [_ _ images]
-  (into
-   [{:db/ident :root
-     :root/props-images
-     (for [[{:keys [hash name size width height]} _] images]
-       {:image/hash hash
-        :image/name name
-        :image/size size
-        :image/width width
-        :image/height height})}] cat
-   (for [[image thumbnail] images]
-     (if (= (:hash image) (:hash thumbnail))
-       [{:image/hash (:hash image) :image/thumbnail [:image/hash (:hash image)]}]
-       [{:image/hash (:hash thumbnail)
-         :image/name (:name thumbnail)
-         :image/size (:size thumbnail)
-         :image/width (:width thumbnail)
-         :image/height (:height thumbnail)}
-        {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}]))))
+  [data _ images]
+  (let [added-at (.now js/Date)]
+    (into
+     [{:db/ident :root
+       :root/props-images
+       (for [[{:keys [hash name size width height]} _] images
+             :let [existing (ds/entity data [:image/hash hash])]]
+         (cond-> {:image/hash hash
+                  :image/name name
+                  :image/size size
+                  :image/width width
+                  :image/height height}
+           (nil? (:library/gallery existing)) (assoc :library/gallery :props)
+           (nil? (:library/added-at existing)) (assoc :library/added-at added-at)))}
+      {:db/ident :root
+       :root/library
+       (for [[{:keys [hash]} _] images] {:image/hash hash})}] cat
+     (for [[image thumbnail] images]
+       (if (= (:hash image) (:hash thumbnail))
+         [{:image/hash (:hash image) :image/thumbnail [:image/hash (:hash image)]}]
+         [{:image/hash (:hash thumbnail)
+           :image/name (:name thumbnail)
+           :image/size (:size thumbnail)
+           :image/width (:width thumbnail)
+           :image/height (:height thumbnail)}
+          {:image/hash (:hash image) :image/thumbnail [:image/hash (:hash thumbnail)]}])))))
 
 (defmethod
-  ^{:doc "Removes all prop images as well as any props from all scenes."}
+  ^{:doc "Removes all prop images as well as any props from all scenes.
+          Per-hash reference-counted, same as a single :props-images/
+          remove -- see retract-image-from-gallery."}
   event-tx-fn :props-images/remove-all
   [data _ _]
-  (let [user (ds/entity data [:db/ident :user])
-        xfrm (comp (map :camera/scene) (mapcat :scene/props) (map :db/id))]
-    (into [[:db/retract [:db/ident :root] :root/props-images]]
+  (let [root (ds/entity data [:db/ident :root])
+        user (ds/entity data [:db/ident :user])
+        xfrm (comp (map :camera/scene) (mapcat :scene/props) (map :db/id))
+        hashes (map :image/hash (:root/props-images root))]
+    (into (mapcat #(retract-image-from-gallery data :root/props-images %) hashes)
           (for [id (sequence xfrm (:user/cameras user))]
             [:db/retractEntity id]))))
 
 (defmethod
-  ^{:doc "Removes a prop image as well as any instances of that image
-          in all scenes."}
+  ^{:doc "Removes a prop image from this gallery, as well as any
+          instances of that image in all scenes. The image entity
+          itself is only fully forgotten once it's no longer
+          referenced by any other gallery or the library archive --
+          see retract-image-from-gallery. This also fixes a real
+          pre-existing gap: this handler never deleted its IndexedDB
+          blob at all (unlike scene/token remove) -- now covered
+          uniformly by the :tx/commit-driven cleanup in
+          provider/state.cljs, since that's keyed off actual entity
+          retraction rather than this specific event name."}
   event-tx-fn :props-images/remove
   [data _ hash]
   (let [user (ds/entity data [:db/ident :user])
         xfrm (comp
               (mapcat (comp :scene/props :camera/scene))
               (filter (comp #{hash} :image/hash :prop/image)))]
-    (into [[:db/retractEntity [:image/hash hash]]]
+    (into (retract-image-from-gallery data :root/props-images hash)
           (for [entity (sequence xfrm (:user/cameras user))]
             [:db/retractEntity (:db/id entity)]))))
 
-;; --- Image Libraries ---
-;; See ogres.app.library for the plain-EDN export/import file format and
-;; its own sanitization -- this event only ever receives an already-
-;; sanitized {:keys [gallery entries]} manifest, `gallery` one of
-;; :token/:props/:scene.
-
-(def ^:private library-gallery-attr
-  {:token :root/token-images :props :root/props-images :scene :root/scene-images})
-
-(defn ^:private anchor->vec2
-  [[x y]]
-  (Vec2. x y))
-
-(defn ^:private library-entry-tx
-  "One sanitized library entry (ogres.app.library/sanitize-entry) -> a
-   seq of tx-data ops attaching/upgrading its image, or an empty seq to
-   skip it outright. `existing` is (ds/entity data [:image/hash hash])
-   or nil.
-
-   Skipped when the hash isn't already a real local entity AND the entry
-   carries no :location to fetch it from -- there's nothing to
-   reconstruct pixels from, and a bare calibration-only entity would
-   just be a permanently broken gallery thumbnail (provider/image.cljs's
-   use-image falls back to requesting the image over the session relay,
-   and there's no host to ever answer that request for data that was
-   never really present on this install).
-
-   An entry WITH a :location that isn't yet locally known gets a minimal
-   entity -- hash, whatever metadata the exporter captured, and a
-   thumbnail that self-references its own full image, the same graceful
-   fallback use-image-url-adder itself falls back to when its own
-   thumbnail-cropping request fails -- rather than re-running that crop/
-   measure pipeline a second time here.
-
-   :image/cell-px/:rotation/:anchor are filled in only when `existing`
-   doesn't already have a value for them, unless `overwrite?` is true --
-   :image/set-cell-scale and :image/set-rotation both retroactively
-   rescale every already-placed instance sharing that hash (~1110-1154),
-   so blindly overwriting on import would desync anything already on a
-   live map."
-  [existing overwrite?
-   {:keys [hash location name width height size cell-px
-           rotation anchor public default-label url]}]
-  (if-not (or (some? existing) (some? location))
-    []
-    (let [fill? (fn [k v] (and (some? v) (or overwrite? (nil? (get existing k)))))]
-      [(cond-> {:image/hash hash}
-         (nil? existing)
-         (assoc :image/thumbnail [:image/hash hash])
-         (and (nil? existing) (some? name))
-         (assoc :image/name name)
-         (and (nil? existing) (some? width))
-         (assoc :image/width width)
-         (and (nil? existing) (some? height))
-         (assoc :image/height height)
-         (and (nil? existing) (some? size))
-         (assoc :image/size size)
-         (fill? :image/cell-px cell-px)
-         (assoc :image/cell-px cell-px)
-         (fill? :image/rotation rotation)
-         (assoc :image/rotation rotation)
-         (fill? :image/anchor anchor)
-         (assoc :image/anchor (anchor->vec2 anchor))
-         (fill? :image/public public)
-         (assoc :image/public public)
-         (fill? :token-image/default-label default-label)
-         (assoc :token-image/default-label default-label)
-         (fill? :token-image/url url)
-         (assoc :token-image/url url))])))
+;; --- Image Library ---
+;; A persistent, cross-session index/archive of every image ever
+;; uploaded or linked -- distinct from "currently active in a gallery's
+;; small drag-to-place grid" (see gallery-image-attr and
+;; retract-image-from-gallery above, and :root/library's schema entry
+;; in provider/state.cljs). Membership in :root/library and calibration
+;; both live directly on the shared [:image/hash h] entity, so there's
+;; one source of truth and library data rides along with the app's
+;; existing whole-conn backup/restore for free -- see panel_data.cljs.
 
 (defmethod
-  ^{:doc "Imports a previously-exported per-gallery image library (see
-          ogres.app.library) into the given gallery. Host-gated, same
-          convention as use-image-url-adder (image.cljs ~376-377) -- a
-          library file is authored data, and there's no guest-to-host
-          relay path for something this multi-step, unlike the simpler
-          use-image-uploader relay.
+  ^{:doc "Sets (or, given a blank value, clears) an image's library
+          folder/category label -- a plain, unregistered string, same
+          convention as :game-type/category (provider/state.cljs)."}
+  event-tx-fn :library/set-category
+  [_ _ hash category]
+  (let [value (if (string? category) (trim category) "")]
+    (if (= value "")
+      [[:db/retract [:image/hash hash] :library/category]]
+      [[:db/add [:image/hash hash] :library/category value]])))
 
-          Attaches each resolvable entry's hash to this gallery's root
-          collection -- idempotent, since :root/token-images and friends
-          are all unique-identity component refs, so re-attaching an
-          already-present hash merges rather than duplicates -- and see
-          library-entry-tx for the per-entry fill-absent-only calibration
-          and skip-when-unrecoverable behavior."}
-  event-tx-fn :image-library/import
-  [data _ {:keys [gallery entries]} overwrite?]
-  (let [user (ds/entity data [:db/ident :user])
-        root-attr (library-gallery-attr gallery)]
-    (if (and (:user/host user) root-attr)
-      (let [txs (into [] (mapcat (fn [entry]
-                                    (library-entry-tx
-                                     (ds/entity data [:image/hash (:hash entry)])
-                                     overwrite? entry)))
-                       entries)
-            hashes (into [] (comp (map :image/hash) (distinct)) txs)]
-        (if (seq hashes)
-          (conj txs (assoc {:db/ident :root} root-attr (for [h hashes] {:image/hash h})))
-          txs))
+(defmethod
+  ^{:doc "Pulls an already-library-known image back into gallery
+          `gallery`'s active collection -- the 'reuse an archived
+          image' action. The entity and its calibration already exist
+          locally (this only ever targets a hash already present in
+          :root/library), so unlike the old file-based :image-library/
+          import this replaces, there's no possibly-unknown-hash/
+          possibly-needs-refetching case to handle -- just an
+          idempotent ref-add."}
+  event-tx-fn :library/add-to-gallery
+  [data _ hash gallery]
+  (let [root-attr (gallery-image-attr gallery)]
+    (if (and root-attr (ds/entity data [:image/hash hash]))
+      [{:db/ident :root root-attr [{:image/hash hash}]}]
       [])))
+
+(defmethod
+  ^{:doc "Permanently forgets a library-archived image -- unlinks it
+          from every gallery it's currently active in and the library
+          archive itself, then retracts the entity outright (its
+          calibration, and its IndexedDB blob via the :tx/commit-driven
+          cleanup in provider/state.cljs). Unlike a plain gallery
+          remove, this always ends in retractEntity regardless of
+          current gallery membership -- it's the explicit 'delete from
+          the library' action, expected to be confirm-gated in the UI."}
+  event-tx-fn :library/remove-image
+  [data _ hash]
+  (if-let [entity (ds/entity data [:image/hash hash])]
+    [[:db/retractEntity (:db/id entity)]]
+    []))
 
 ;; --- Props ---
 

@@ -55,26 +55,46 @@
   (.then (js/Promise.all (.map (js/Object.entries record) marshal-value))
          js/Object.fromEntries))
 
-(defn ^:private marshal-store [idb store]
-  (js/Promise.
-   (fn [resolve]
-     (let [tx (.transaction idb #js [store] "readonly")
-           st (.objectStore tx store)
-           rq (.getAll st)]
-       (.addEventListener rq "success"
-         (fn [event]
-           (.then (js/Promise.all (.map (.. event -target -result) marshal-record))
-                  (fn [records] (resolve #js [store records])))))))))
+(defn ^:private marshal-store
+  "Reads every record from `store`, marshaled for MessagePack encoding.
+   `keep?`, when given, is a predicate over each raw record used to
+   drop it from the backup entirely -- see marshal."
+  ([idb store] (marshal-store idb store nil))
+  ([idb store keep?]
+   (js/Promise.
+    (fn [resolve]
+      (let [tx (.transaction idb #js [store] "readonly")
+            st (.objectStore tx store)
+            rq (.getAll st)]
+        (.addEventListener rq "success"
+          (fn [event]
+            (let [records (.. event -target -result)
+                  records (if keep? (.filter records keep?) records)]
+              (.then (js/Promise.all (.map records marshal-record))
+                     (fn [records] (resolve #js [store records])))))))))))
 
 (defn ^:private marshal
   "Returns a Promise which resolves with a single object, a cloned
    instance of the given IndexedDB object, whose keys are the names
    of the object stores and whose values is an array of the store's
-   records."
-  [idb]
-  (let [stores (js/Array.from (.-objectStoreNames idb))
-        stores (.map stores (fn [store] (marshal-store idb store)))]
-    (.then (js/Promise.all stores) js/Object.fromEntries)))
+   records.
+
+   `keep-image-checksum?`, when given, is a predicate applied only to
+   the \"images\" store -- everything else (including \"app\", the
+   DataScript conn, which carries every image's :root/library
+   membership and calibration directly on its own entity) is always
+   backed up in full. This lets a backup skip blob bytes for images
+   that are archived in the library but not currently active in any
+   gallery, without losing their identity/calibration metadata."
+  ([idb] (marshal idb nil))
+  ([idb keep-image-checksum?]
+   (let [stores (js/Array.from (.-objectStoreNames idb))
+         stores (.map stores
+                  (fn [store]
+                    (marshal-store idb store
+                      (if (and keep-image-checksum? (= store "images"))
+                        (fn [record] (keep-image-checksum? (aget record "checksum")))))))]
+     (.then (js/Promise.all stores) js/Object.fromEntries))))
 
 (defn ^:private unmarshal-value [value]
   (if (instance? js/Uint8Array. value)
@@ -127,12 +147,18 @@
     ;; Marshals the IndexedDB database as a MessagePack binary then
     ;; automatically downloads it to the user's filesystem. This
     ;; backup file can be used to restore the application state,
-    ;; including all images.
+    ;; including every library entry's identity + calibration
+    ;; (unconditionally, since that's part of the "app" store's own
+    ;; DataScript dump) and the actual image bytes for whatever is
+    ;; currently active in a gallery (`active-hashes`, computed by the
+    ;; caller -- see panel_data.cljs). Called with no argument, this
+    ;; still backs up every blob, same as before -- filtering only
+    ;; happens when the caller opts in.
     (events/use-subscribe :store/create-backup
       (uix/use-callback
-       (fn []
+       (fn [& [active-hashes]]
          (js-await [idb req]
-           (-> (marshal idb)
+           (-> (marshal idb (if active-hashes #(contains? active-hashes %)))
                (.then MessagePack/encode)
                (.then (fn [bytes] (js/Blob. #js [bytes] #js {"type" "application/octet-stream"})))
                (.then (fn [bytes] (download bytes "ogres.app.backup")))))) [req]))

@@ -1,9 +1,9 @@
 (ns ogres.app.component.panel-tokens
   (:require [goog.object :as object :refer [getValueByKeys]]
             [ogres.app.component :as component :refer [icon]]
+            [ogres.app.component.panel-library-browser :refer [panel-library-browser]]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
-            [ogres.app.library :as library]
             [ogres.app.util :refer [separate]]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec]
@@ -38,16 +38,7 @@
   [{:root/user [:user/host]}
    {:root/token-images
     [:image/hash
-     :image/name
-     :image/width
-     :image/height
-     :image/size
      :image/public
-     :image/cell-px
-     :image/rotation
-     :image/anchor
-     :token-image/default-label
-     :token-image/url
      {:image/thumbnail
       [:image/hash]}]}])
 
@@ -374,7 +365,20 @@
          :on-pointer-down (.. drag -listeners -onPointerDown)}
         children))))
 
-(defui ^:private editor [props]
+(defui
+  ^{:doc "The token crop/rotate editor's actual workspace -- an image,
+          a draggable/resizable crop region over it, and rotate-left/
+          rotate-right/apply controls. Public (not ^:private) so
+          panel_library_browser.cljs can reuse it directly for an
+          archived (not necessarily placed in any gallery) token --
+          it's keyed entirely off `(:image props)` (a pulled image
+          entity carrying at least :image/hash/:width/:height, plus
+          :image/thumbnail-rect/:thumbnail-rotation when already
+          calibrated), never off a live placed object, so it works the
+          same whether or not the token is currently active anywhere.
+          `token-editor` below is just this plus a gallery-picker
+          wrapper for the Tokens panel's own multi-select workflow."}
+  editor [props]
   (let [{{hash   :image/hash
           width  :image/width
           height :image/height} :image
@@ -590,90 +594,54 @@
             {:on-click (:on-close props)}
             "Exit"))))))
 
+(defn ^:private render-token-editor
+  "Passed to panel-library-browser as its `render-editor` prop -- see
+   that namespace's docstring for why this indirection exists (avoids
+   a circular require, since panel_tokens.cljs already requires
+   panel_library_browser.cljs for its own 'Browse Library' button).
+   `entry`'s own hash is enough to crop/rotate it regardless of
+   whether it's currently placed anywhere -- the same publish/dispatch
+   path token-editor's own per-token save uses."
+  [publish host entry on-done]
+  ($ editor
+    {:image entry
+     :on-change
+     (fn [hash bounds rotation]
+       (if host
+         (publish :image/change-thumbnail hash bounds rotation)
+         (publish :image/change-thumbnail-request hash bounds rotation))
+       (on-done))}))
+
 (defui ^:memo actions []
   (let [[editing set-editing] (uix/use-state false)
-        [overwrite? set-overwrite!] (uix/use-state false)
-        [notice set-notice!] (uix/use-state nil)
+        [browsing? set-browsing!] (uix/use-state false)
         dispatch (hooks/use-dispatch)
+        publish  (hooks/use-publish)
         result   (hooks/use-query query-actions [:db/ident :root])
         {{host :user/host} :root/user
-         images :root/token-images} result
-        upload   (hooks/use-image-uploader {:type :token})
-        input    (uix/use-ref)
-        import-input (uix/use-ref)]
+         images :root/token-images} result]
     ($ :<>
       (if editing
         ($ token-editor {:on-close #(set-editing false)}))
+      (if browsing?
+        ($ panel-library-browser
+          {:gallery :token
+           :on-close #(set-browsing! false)
+           :render-editor (partial render-token-editor publish host)}))
       ($ :button.button.button-neutral
-        {:type     "button"
-         :title    "Upload token image"
-         :on-click #(.click (deref input))}
-        ($ :input
-          {:type "file" :hidden true :accept "image/*" :multiple true :ref input
-           :on-change
-           (fn [event]
-             (upload (.. event -target -files))
-             (set! (.. event -target -value) ""))})
-        ($ icon {:name "camera-fill" :size 16}) "Upload images")
-      ($ component/image-url-form {:type :token})
+        {:type "button" :on-click #(set-browsing! true)}
+        ($ icon {:name "images" :size 16}) "Browse Library")
       ($ :button.button.button-neutral
         {:type "button"
          :title "Crop"
          :disabled (not (seq (filter (comp (if host any? true?) :image/public) images)))
          :on-click (partial set-editing not)}
         ($ icon {:name "crop" :size 18})
-        "Edit images")
+        "Edit")
       ($ :button.button.button-danger
         {:type "button"
-         :title "Remove all tokens"
+         :title "Remove all from this gallery -- stays in the library archive"
          :aria-label "Remove all tokens"
          :disabled (or (not host) (not (seq images)))
-         :on-click
-         (fn []
-           (let [xf (mapcat (juxt :image/hash (comp :image/hash :image/thumbnail)))]
-             (dispatch :token-images/remove-all (into #{} xf images))))}
-        ($ icon {:name "trash3-fill" :size 16}))
-      ($ :button.button.button-neutral
-        {:type "button"
-         :title "Export a reusable library of every token image, including
-                 its calibrated scale/rotation/anchor, for reuse in a
-                 future session"
-         :disabled (not (seq images))
-         :on-click
-         (fn []
-           (library/export! :token "tokens" (map library/image->entry images)))}
-        ($ icon {:name "box-arrow-up-right" :size 16}) "Export library")
-      (if host
-        ($ :<>
-          ($ :button.button.button-neutral
-            {:type "button"
-             :title "Import a token image library exported from a previous
-                     session"
-             :on-click #(.click (deref import-input))}
-            ($ icon {:name "door-open" :size 16}) "Import library"
-            ($ :input
-              {:ref import-input
-               :type "file"
-               :hidden true
-               :accept ".token-library,text/plain"
-               :on-change
-               (fn [event]
-                 (if-let [file (first (array-seq (.. event -target -files)))]
-                   (library/import!
-                    :token file
-                    (fn [manifest]
-                      (if manifest
-                        (do (dispatch :image-library/import manifest overwrite?)
-                            (set-notice! (str "Imported " (count (:entries manifest))
-                                               " image(s) from \"" (:name manifest) "\".")))
-                        (set-notice! "That file isn't a valid token image library.")))))
-                 (set! (.. event -target -value) ""))}))
-          ($ :label.checkbox
-            ($ :input
-              {:type "checkbox"
-               :checked overwrite?
-               :on-change #(set-overwrite! (.. % -target -checked))})
-            ($ icon {:name "check" :size 20})
-            "Overwrite existing calibration")))
-      (if notice
-        ($ :.form-notice notice)))))
+         :on-click (fn [] (dispatch :token-images/remove-all))}
+        ($ icon {:name "trash3-fill" :size 16})))))

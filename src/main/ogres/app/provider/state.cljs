@@ -38,6 +38,14 @@
    :prop/image-alt       {:db/valueType :db.type/ref}
    :roll/owner           {:db/valueType :db.type/ref}
    :root/game-types      {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
+   ;; Deliberately NOT :isComponent, unlike the three gallery collections
+   ;; below -- library membership is advisory, not ownership. The same
+   ;; image entity can be a member of :root/library and zero or more of
+   ;; :root/token-images/:root/props-images/:root/scene-images at once;
+   ;; see events.cljs's reference-counting remove logic, which treats an
+   ;; entity as truly gone only once none of these four collections
+   ;; reference it any longer.
+   :root/library         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many}
    :root/players         {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scene-images    {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
    :root/scenes          {:db/valueType :db.type/ref :db/cardinality :db.cardinality/many :db/isComponent true}
@@ -248,23 +256,26 @@
 
 (defui ^:private listeners []
   (let [write (idb/use-writer "images")]
-    ;; Removes the given scene image and its thumbnail from the
-    ;; IndexedDB images object store.
-    (events/use-subscribe :scene-images/remove
+    ;; Deletes an image's IndexedDB blob once a transaction actually
+    ;; retracts its :image/hash entity -- not on every remove-family
+    ;; event by name (scene/token/props remove, remove-all,
+    ;; :library/remove-image), which may just unlink ONE gallery's
+    ;; membership while the entity survives elsewhere (see events.cljs's
+    ;; retract-image-from-gallery: the same hash can be shared across
+    ;; galleries and the library archive). Driving this off the actual
+    ;; committed :tx/commit report, rather than trusting whichever event
+    ;; fired, correctly covers every retraction path with one listener
+    ;; -- including :props-images/remove, which never deleted its blob
+    ;; at all before this.
+    (events/use-subscribe :tx/commit
       (uix/use-callback
-       (fn [& hashes] (write :delete hashes)) [write]))
-
-    ;; Removes the given token image and its thumbnail from the
-    ;; IndexedDB images object store.
-    (events/use-subscribe :token-images/remove
-      (uix/use-callback
-       (fn [& hashes] (write :delete hashes)) [write]))
-
-    ;; Removes the given token images from the IndexedDB images
-    ;; object store.
-    (events/use-subscribe :token-images/remove-all
-      (uix/use-callback
-       (fn [hashes] (write :delete hashes)) [write]))))
+       (fn [report]
+         (let [hashes (into []
+                             (comp (filter (fn [d] (and (= (:a d) :image/hash) (not (:added d)))))
+                                   (map :v))
+                             (:tx-data report))]
+           (if (seq hashes) (write :delete hashes))))
+       [write]))))
 
 (def ^:private ignored-attrs
   #{:user/host :user/ready :session/status})

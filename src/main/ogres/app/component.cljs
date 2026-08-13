@@ -145,7 +145,7 @@
            (set-error nil)
            (set-open not))}
         ($ icon {:name "globe-americas" :size 16})
-        "Link images")
+        "Link")
       (if open?
         ($ :form.image-url-form
           {:ref form

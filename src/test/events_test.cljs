@@ -2385,6 +2385,22 @@
             [[{:hash hash :name hash :size 1 :width 1 :height 1}
               {:hash hash :name hash :size 1 :width 1 :height 1}]]))
 
+(defn ^:private seed-token-image!
+  "Test helper -- the :token-images/create-many analogue of
+   seed-props-image!."
+  [conn hash]
+  (dispatch conn :token-images/create-many
+            [[{:hash hash :name hash :size 1 :width 1 :height 1}
+              {:hash hash :name hash :size 1 :width 1 :height 1}]]))
+
+(defn ^:private seed-scene-image!
+  "Test helper -- the :scene-images/create-many analogue of
+   seed-props-image!."
+  [conn hash]
+  (dispatch conn :scene-images/create-many
+            [[{:hash hash :name hash :size 1 :width 1 :height 1}
+              {:hash hash :name hash :size 1 :width 1 :height 1}]]))
+
 (deftest test-default-cell-px-baseline
   (testing "a campaign-wide pixel-per-cell baseline, so a host whose whole
             asset set shares one density doesn't have to calibrate each
@@ -5109,110 +5125,126 @@
           (is (nil? (:scene/grid-size (current-scene conn)))
               "and the grid is untouched"))))))
 
-;; --- Image Libraries ---
+;; --- Image Library ---
+;; A persistent, cross-session archive layered directly onto the same
+;; shared [:image/hash h] entity every gallery already uses (not a
+;; downloadable file -- see the superseded :image-library/import this
+;; section used to cover). Membership lives in :root/library;
+;; calibration is the same :image/cell-px/:rotation/:anchor these
+;; galleries have always carried.
 
-(deftest test-image-library-import-fills-absent-calibration-only
-  (testing "an entry whose hash is already known locally gets attached to
-            this gallery and has any ABSENT calibration filled in --
-            never overwriting a value that's already there, unless
-            overwrite? is true, since :image/set-cell-scale/-rotation
-            both retroactively rescale every placed instance sharing
-            that hash"
+(deftest test-create-many-stamps-library-membership
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "tile")
+    (let [image (entity @conn [:image/hash "tile"])]
+      (is (= (:library/gallery image) :props))
+      (is (number? (:library/added-at image)))
+      (is (some (comp #{"tile"} :image/hash) (:root/library (root conn)))))))
+
+(deftest test-create-many-does-not-clobber-existing-library-added-at
+  (testing "re-uploading (or re-linking) an already-known hash doesn't
+            reset its archive metadata -- :library/gallery/:added-at
+            are filled in only once, the first time a hash is seen"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "tile")
+      (let [first-added-at (:library/added-at (entity @conn [:image/hash "tile"]))]
+        (seed-props-image! conn "tile")
+        (is (= (:library/added-at (entity @conn [:image/hash "tile"])) first-added-at))))))
+
+(deftest test-props-remove-keeps-entity-alive-while-still-in-library
+  (testing "removing from ONE gallery's active grid doesn't touch the
+            library archive -- the whole point of the redesign"
     (let [conn (ds/conn-from-db (initial-data true))]
       (seed-props-image! conn "tile")
       (transact! conn [{:image/hash "tile" :image/cell-px 70}])
-      (dispatch conn :image-library/import
-                {:gallery :props
-                 :entries [{:hash "tile" :cell-px 999 :rotation 45 :anchor [3 4]}]}
-                false)
+      (dispatch conn :props-images/remove "tile")
       (let [image (entity @conn [:image/hash "tile"])]
-        (is (= (:image/cell-px image) 70) "already-present value untouched")
-        (is (= (:image/rotation image) 45) "absent value filled in")
-        (is (= (:image/anchor image) (Vec2. 3 4))
-            "anchor is reconstructed from the plain [x y] entry back into a Vec2")))))
+        (is (some? image) "still archived in the library")
+        (is (= (:image/cell-px image) 70) "calibration survives")
+        (is (not (some (comp #{"tile"} :image/hash) (:root/props-images (root conn))))
+            "no longer active in the props gallery")))))
 
-(deftest test-image-library-import-overwrite-true-replaces-existing-calibration
+(deftest test-props-remove-forgets-entity-once-fully-orphaned
+  (testing "once a hash has no library membership either, removing its
+            last gallery reference fully forgets it -- same behavior
+            as before this redesign, for a hash that was never archived"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "tile")
+      (let [id (:db/id (entity @conn [:image/hash "tile"]))]
+        (transact! conn [[:db/retract [:db/ident :root] :root/library id]]))
+      (dispatch conn :props-images/remove "tile")
+      (is (nil? (entity @conn [:image/hash "tile"]))))))
+
+(deftest test-token-images-remove-all-is-reference-counted
+  (testing "remove-all is per-hash, not a blind wholesale retract -- a
+            hash still archived in the library survives even though
+            it's cleared from the active gallery"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-token-image! conn "a")
+      (seed-token-image! conn "b")
+      (let [id-a (:db/id (entity @conn [:image/hash "a"]))]
+        (transact! conn [[:db/retract [:db/ident :root] :root/library id-a]]))
+      (dispatch conn :token-images/remove-all)
+      (is (nil? (entity @conn [:image/hash "a"])) "no other reference -- fully forgotten")
+      (is (some? (entity @conn [:image/hash "b"])) "still archived in the library")
+      (is (empty? (:root/token-images (root conn)))))))
+
+(deftest test-remove-from-one-gallery-does-not-affect-another-sharing-the-hash
+  (testing "props/scene deliberately share a hash for the same source
+            file -- removing from one gallery must not disturb the
+            other, or the shared calibration"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "shared")
+      (seed-scene-image! conn "shared")
+      (transact! conn [{:image/hash "shared" :image/cell-px 70}])
+      (dispatch conn :props-images/remove "shared")
+      (let [image (entity @conn [:image/hash "shared"])]
+        (is (some? image) "still referenced by scene (and the library)")
+        (is (= (:image/cell-px image) 70))
+        (is (not (some (comp #{"shared"} :image/hash) (:root/props-images (root conn)))))
+        (is (some (comp #{"shared"} :image/hash) (:root/scene-images (root conn))))))))
+
+(deftest test-library-set-category
   (let [conn (ds/conn-from-db (initial-data true))]
     (seed-props-image! conn "tile")
-    (transact! conn [{:image/hash "tile" :image/cell-px 70}])
-    (dispatch conn :image-library/import
-              {:gallery :props :entries [{:hash "tile" :cell-px 999}]}
-              true)
-    (is (= (:image/cell-px (entity @conn [:image/hash "tile"])) 999))))
+    (dispatch conn :library/set-category "tile" "Dungeon")
+    (is (= (:library/category (entity @conn [:image/hash "tile"])) "Dungeon"))
+    (dispatch conn :library/set-category "tile" "   ")
+    (is (nil? (:library/category (entity @conn [:image/hash "tile"])))
+        "blank clears rather than storing whitespace")))
 
-(deftest test-image-library-import-unknown-hash-with-location-creates-minimal-entity
-  (testing "an entry not already known locally, but with a :location,
-            gets a minimal entity -- hash, captured metadata, and a
-            thumbnail that self-references its own full image, the same
-            graceful fallback use-image-url-adder itself uses when its
-            thumbnail-cropping request fails"
+(deftest test-library-add-to-gallery-pulls-an-archived-image-back-in
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-token-image! conn "goblin")
+    (dispatch conn :token-images/remove "goblin" "goblin")
+    (is (not (some (comp #{"goblin"} :image/hash) (:root/token-images (root conn))))
+        "removed from the active gallery, but still archived")
+    (dispatch conn :library/add-to-gallery "goblin" :token)
+    (is (some (comp #{"goblin"} :image/hash) (:root/token-images (root conn)))
+        "pulled back into the active gallery")))
+
+(deftest test-library-add-to-gallery-is-idempotent
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-token-image! conn "goblin")
+    (dispatch conn :library/add-to-gallery "goblin" :token)
+    (dispatch conn :library/add-to-gallery "goblin" :token)
+    (is (= (count (:root/token-images (root conn))) 1))))
+
+(deftest test-library-add-to-gallery-unknown-hash-is-a-no-op
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :library/add-to-gallery "not-a-real-hash" :token)
+    (is (empty? (:root/token-images (root conn))))))
+
+(deftest test-library-remove-image-forgets-entity-even-if-still-active
+  (testing "the explicit 'delete from the library' action always ends
+            in retractEntity, regardless of current gallery membership"
     (let [conn (ds/conn-from-db (initial-data true))]
-      (dispatch conn :image-library/import
-                {:gallery :token
-                 :entries [{:hash "https://example.com/goblin.png"
-                            :location "https://example.com/goblin.png"
-                            :name "goblin.png" :width 64 :height 64
-                            :cell-px 70}]}
-                false)
-      (let [image (entity @conn [:image/hash "https://example.com/goblin.png"])]
-        (is (some? image))
-        (is (= (:image/name image) "goblin.png"))
-        (is (= (:image/cell-px image) 70))
-        (is (= (:image/hash (:image/thumbnail image)) (:image/hash image))
-            "self-referential thumbnail fallback")
-        (is (some (comp #{(:db/id image)} :db/id) (:root/token-images (root conn)))
-            "attached to the requested gallery's root collection")))))
-
-(deftest test-image-library-import-skips-unresolvable-entries
-  (testing "unknown hash, no :location -- nothing to reconstruct pixels
-            from, so it's skipped outright rather than creating a
-            permanently-broken phantom gallery entry"
-    ;; initial-data seeds two demo card-back/card-front props images
-    ;; (provider/state.cljs's seed-props-images, for the Props panel's
-    ;; "Add Card Pile" demo button) -- :root/props-images is never
-    ;; actually empty on a fresh conn, so these tests check the
-    ;; baseline count/hashes are unchanged rather than emptiness.
-    (let [conn (ds/conn-from-db (initial-data true))
-          baseline (into #{} (map :image/hash) (:root/props-images (root conn)))]
-      (dispatch conn :image-library/import
-                {:gallery :props :entries [{:hash "gone-forever" :cell-px 70}]}
-                false)
-      (is (nil? (entity @conn [:image/hash "gone-forever"])))
-      (is (= (into #{} (map :image/hash) (:root/props-images (root conn))) baseline)))))
-
-(deftest test-image-library-import-is-host-only
-  (testing "no guest-relay path for this import, same convention as
-            use-image-url-adder -- a non-host dispatch is a no-op"
-    (let [conn (ds/conn-from-db (initial-data false))
-          baseline (into #{} (map :image/hash) (:root/props-images (root conn)))]
-      (dispatch conn :image-library/import
-                {:gallery :props :entries [{:hash "tile" :location "https://example.com/x.png"}]}
-                false)
+      (seed-props-image! conn "tile")
+      (dispatch conn :library/remove-image "tile")
       (is (nil? (entity @conn [:image/hash "tile"])))
-      (is (= (into #{} (map :image/hash) (:root/props-images (root conn))) baseline)))))
+      (is (not (some (comp #{"tile"} :image/hash) (:root/props-images (root conn))))))))
 
-(deftest test-image-library-import-respects-gallery-isolation
-  (testing "the same hash can be attached to token, props, and scene
-            galleries independently -- each import only ever writes its
-            own gallery's root collection"
-    (let [conn (ds/conn-from-db (initial-data true))
-          baseline (into #{} (map :image/hash) (:root/props-images (root conn)))]
-      (dispatch conn :image-library/import
-                {:gallery :token
-                 :entries [{:hash "https://example.com/a.png"
-                            :location "https://example.com/a.png"}]}
-                false)
-      (is (seq (:root/token-images (root conn))))
-      (is (= (into #{} (map :image/hash) (:root/props-images (root conn))) baseline)
-          "props-images is untouched (still just the two seeded demo images)")
-      (is (empty? (:root/scene-images (root conn)))))))
-
-(deftest test-image-library-import-reimport-is-idempotent
-  (testing "re-attaching an already-present hash merges rather than
-            duplicates -- :root/token-images et al are unique-identity
-            component refs"
-    (let [conn (ds/conn-from-db (initial-data true))
-          entries [{:hash "https://example.com/a.png" :location "https://example.com/a.png"}]]
-      (dispatch conn :image-library/import {:gallery :token :entries entries} false)
-      (dispatch conn :image-library/import {:gallery :token :entries entries} false)
-      (is (= (count (:root/token-images (root conn))) 1)))))
+(deftest test-library-remove-image-unknown-hash-is-a-no-op
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (dispatch conn :library/remove-image "not-a-real-hash")
+    (is true "no exception thrown")))

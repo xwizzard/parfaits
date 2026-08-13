@@ -10,14 +10,12 @@
 
 (def ^:private hash-fn "SHA-1")
 
-(defn url?
+(defn ^:private url?
   "True if the given :image/hash value is a live URL reference (added via
    use-image-url-adder, or a bundled data: URI seeded at boot -- see
    provider/state.cljs's seed-props-images) rather than a SHA-1 checksum
    key into IndexedDB -- SHA-1 hex digests never start with 'http' or
-   'data:', so this is an unambiguous discriminator. Public (not
-   ^:private) so ogres.app.library can share this exact discriminator
-   rather than duplicating the three-prefix test."
+   'data:', so this is an unambiguous discriminator."
   [s]
   (or (string/starts-with? s "http://")
       (string/starts-with? s "https://")

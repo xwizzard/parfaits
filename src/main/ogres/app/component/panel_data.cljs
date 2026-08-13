@@ -16,11 +16,31 @@
 (def ^:private confirm-restore
   "Delete all your local data and restore this application using the provided backup?")
 
+;; Every image's identity + calibration lives on the same shared entity
+;; as its :root/library membership (see events.cljs), so it's already
+;; included in full by the plain transit dump of the DataScript "app"
+;; store below -- no separate query needed for that. This query exists
+;; only to compute which image *blobs* (the IndexedDB "images" store)
+;; are worth backing up: everything currently active in a gallery, not
+;; every archived-only library entry, which keeps a backup file from
+;; ballooning with bytes for images the user isn't currently using.
+(def ^:private query-backup
+  [{:root/token-images [:image/hash {:image/thumbnail [:image/hash]}]}
+   {:root/props-images [:image/hash {:image/thumbnail [:image/hash]}]}
+   {:root/scene-images [:image/hash {:image/thumbnail [:image/hash]}]}])
+
 (defui ^:memo panel []
   (let [[file-name set-file-name] (uix/use-state nil)
         releases (uix/use-context release/context)
         dispatch (hooks/use-dispatch)
-        input (uix/use-ref)]
+        input (uix/use-ref)
+        backup-result (hooks/use-query query-backup [:db/ident :root])
+        active-hashes
+        (into #{}
+              (mapcat (juxt :image/hash (comp :image/hash :image/thumbnail)))
+              (concat (:root/token-images backup-result)
+                      (:root/props-images backup-result)
+                      (:root/scene-images backup-result)))]
     ($ :.form-help
       ($ :header ($ :h2 "Data"))
       ($ :fieldset.fieldset
@@ -61,7 +81,7 @@
               {:on-click
                (fn []
                  (if-let [_ (js/confirm confirm-backup)]
-                   (dispatch :store/create-backup)))} "Create Backup")
+                   (dispatch :store/create-backup active-hashes)))} "Create Backup")
             ($ :br)
             ($ :p {:style {:margin-bottom 4}}
               "Select a backup file to restore your data and images. Note that "
