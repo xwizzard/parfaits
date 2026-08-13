@@ -3249,6 +3249,106 @@
           (for [entity (sequence xfrm (:user/cameras user))]
             [:db/retractEntity (:db/id entity)]))))
 
+;; --- Image Libraries ---
+;; See ogres.app.library for the plain-EDN export/import file format and
+;; its own sanitization -- this event only ever receives an already-
+;; sanitized {:keys [gallery entries]} manifest, `gallery` one of
+;; :token/:props/:scene.
+
+(def ^:private library-gallery-attr
+  {:token :root/token-images :props :root/props-images :scene :root/scene-images})
+
+(defn ^:private anchor->vec2
+  [[x y]]
+  (Vec2. x y))
+
+(defn ^:private library-entry-tx
+  "One sanitized library entry (ogres.app.library/sanitize-entry) -> a
+   seq of tx-data ops attaching/upgrading its image, or an empty seq to
+   skip it outright. `existing` is (ds/entity data [:image/hash hash])
+   or nil.
+
+   Skipped when the hash isn't already a real local entity AND the entry
+   carries no :location to fetch it from -- there's nothing to
+   reconstruct pixels from, and a bare calibration-only entity would
+   just be a permanently broken gallery thumbnail (provider/image.cljs's
+   use-image falls back to requesting the image over the session relay,
+   and there's no host to ever answer that request for data that was
+   never really present on this install).
+
+   An entry WITH a :location that isn't yet locally known gets a minimal
+   entity -- hash, whatever metadata the exporter captured, and a
+   thumbnail that self-references its own full image, the same graceful
+   fallback use-image-url-adder itself falls back to when its own
+   thumbnail-cropping request fails -- rather than re-running that crop/
+   measure pipeline a second time here.
+
+   :image/cell-px/:rotation/:anchor are filled in only when `existing`
+   doesn't already have a value for them, unless `overwrite?` is true --
+   :image/set-cell-scale and :image/set-rotation both retroactively
+   rescale every already-placed instance sharing that hash (~1110-1154),
+   so blindly overwriting on import would desync anything already on a
+   live map."
+  [existing overwrite?
+   {:keys [hash location name width height size cell-px
+           rotation anchor public default-label url]}]
+  (if-not (or (some? existing) (some? location))
+    []
+    (let [fill? (fn [k v] (and (some? v) (or overwrite? (nil? (get existing k)))))]
+      [(cond-> {:image/hash hash}
+         (nil? existing)
+         (assoc :image/thumbnail [:image/hash hash])
+         (and (nil? existing) (some? name))
+         (assoc :image/name name)
+         (and (nil? existing) (some? width))
+         (assoc :image/width width)
+         (and (nil? existing) (some? height))
+         (assoc :image/height height)
+         (and (nil? existing) (some? size))
+         (assoc :image/size size)
+         (fill? :image/cell-px cell-px)
+         (assoc :image/cell-px cell-px)
+         (fill? :image/rotation rotation)
+         (assoc :image/rotation rotation)
+         (fill? :image/anchor anchor)
+         (assoc :image/anchor (anchor->vec2 anchor))
+         (fill? :image/public public)
+         (assoc :image/public public)
+         (fill? :token-image/default-label default-label)
+         (assoc :token-image/default-label default-label)
+         (fill? :token-image/url url)
+         (assoc :token-image/url url))])))
+
+(defmethod
+  ^{:doc "Imports a previously-exported per-gallery image library (see
+          ogres.app.library) into the given gallery. Host-gated, same
+          convention as use-image-url-adder (image.cljs ~376-377) -- a
+          library file is authored data, and there's no guest-to-host
+          relay path for something this multi-step, unlike the simpler
+          use-image-uploader relay.
+
+          Attaches each resolvable entry's hash to this gallery's root
+          collection -- idempotent, since :root/token-images and friends
+          are all unique-identity component refs, so re-attaching an
+          already-present hash merges rather than duplicates -- and see
+          library-entry-tx for the per-entry fill-absent-only calibration
+          and skip-when-unrecoverable behavior."}
+  event-tx-fn :image-library/import
+  [data _ {:keys [gallery entries]} overwrite?]
+  (let [user (ds/entity data [:db/ident :user])
+        root-attr (library-gallery-attr gallery)]
+    (if (and (:user/host user) root-attr)
+      (let [txs (into [] (mapcat (fn [entry]
+                                    (library-entry-tx
+                                     (ds/entity data [:image/hash (:hash entry)])
+                                     overwrite? entry)))
+                       entries)
+            hashes (into [] (comp (map :image/hash) (distinct)) txs)]
+        (if (seq hashes)
+          (conj txs (assoc {:db/ident :root} root-attr (for [h hashes] {:image/hash h})))
+          txs))
+      [])))
+
 ;; --- Props ---
 
 (defn ^:private image-cell-scale

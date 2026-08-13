@@ -5108,3 +5108,111 @@
               "a token is still 5 scene units -- one cell -- regardless")
           (is (nil? (:scene/grid-size (current-scene conn)))
               "and the grid is untouched"))))))
+
+;; --- Image Libraries ---
+
+(deftest test-image-library-import-fills-absent-calibration-only
+  (testing "an entry whose hash is already known locally gets attached to
+            this gallery and has any ABSENT calibration filled in --
+            never overwriting a value that's already there, unless
+            overwrite? is true, since :image/set-cell-scale/-rotation
+            both retroactively rescale every placed instance sharing
+            that hash"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (seed-props-image! conn "tile")
+      (transact! conn [{:image/hash "tile" :image/cell-px 70}])
+      (dispatch conn :image-library/import
+                {:gallery :props
+                 :entries [{:hash "tile" :cell-px 999 :rotation 45 :anchor [3 4]}]}
+                false)
+      (let [image (entity @conn [:image/hash "tile"])]
+        (is (= (:image/cell-px image) 70) "already-present value untouched")
+        (is (= (:image/rotation image) 45) "absent value filled in")
+        (is (= (:image/anchor image) (Vec2. 3 4))
+            "anchor is reconstructed from the plain [x y] entry back into a Vec2")))))
+
+(deftest test-image-library-import-overwrite-true-replaces-existing-calibration
+  (let [conn (ds/conn-from-db (initial-data true))]
+    (seed-props-image! conn "tile")
+    (transact! conn [{:image/hash "tile" :image/cell-px 70}])
+    (dispatch conn :image-library/import
+              {:gallery :props :entries [{:hash "tile" :cell-px 999}]}
+              true)
+    (is (= (:image/cell-px (entity @conn [:image/hash "tile"])) 999))))
+
+(deftest test-image-library-import-unknown-hash-with-location-creates-minimal-entity
+  (testing "an entry not already known locally, but with a :location,
+            gets a minimal entity -- hash, captured metadata, and a
+            thumbnail that self-references its own full image, the same
+            graceful fallback use-image-url-adder itself uses when its
+            thumbnail-cropping request fails"
+    (let [conn (ds/conn-from-db (initial-data true))]
+      (dispatch conn :image-library/import
+                {:gallery :token
+                 :entries [{:hash "https://example.com/goblin.png"
+                            :location "https://example.com/goblin.png"
+                            :name "goblin.png" :width 64 :height 64
+                            :cell-px 70}]}
+                false)
+      (let [image (entity @conn [:image/hash "https://example.com/goblin.png"])]
+        (is (some? image))
+        (is (= (:image/name image) "goblin.png"))
+        (is (= (:image/cell-px image) 70))
+        (is (= (:image/hash (:image/thumbnail image)) (:image/hash image))
+            "self-referential thumbnail fallback")
+        (is (some (comp #{(:db/id image)} :db/id) (:root/token-images (root conn)))
+            "attached to the requested gallery's root collection")))))
+
+(deftest test-image-library-import-skips-unresolvable-entries
+  (testing "unknown hash, no :location -- nothing to reconstruct pixels
+            from, so it's skipped outright rather than creating a
+            permanently-broken phantom gallery entry"
+    ;; initial-data seeds two demo card-back/card-front props images
+    ;; (provider/state.cljs's seed-props-images, for the Props panel's
+    ;; "Add Card Pile" demo button) -- :root/props-images is never
+    ;; actually empty on a fresh conn, so these tests check the
+    ;; baseline count/hashes are unchanged rather than emptiness.
+    (let [conn (ds/conn-from-db (initial-data true))
+          baseline (into #{} (map :image/hash) (:root/props-images (root conn)))]
+      (dispatch conn :image-library/import
+                {:gallery :props :entries [{:hash "gone-forever" :cell-px 70}]}
+                false)
+      (is (nil? (entity @conn [:image/hash "gone-forever"])))
+      (is (= (into #{} (map :image/hash) (:root/props-images (root conn))) baseline)))))
+
+(deftest test-image-library-import-is-host-only
+  (testing "no guest-relay path for this import, same convention as
+            use-image-url-adder -- a non-host dispatch is a no-op"
+    (let [conn (ds/conn-from-db (initial-data false))
+          baseline (into #{} (map :image/hash) (:root/props-images (root conn)))]
+      (dispatch conn :image-library/import
+                {:gallery :props :entries [{:hash "tile" :location "https://example.com/x.png"}]}
+                false)
+      (is (nil? (entity @conn [:image/hash "tile"])))
+      (is (= (into #{} (map :image/hash) (:root/props-images (root conn))) baseline)))))
+
+(deftest test-image-library-import-respects-gallery-isolation
+  (testing "the same hash can be attached to token, props, and scene
+            galleries independently -- each import only ever writes its
+            own gallery's root collection"
+    (let [conn (ds/conn-from-db (initial-data true))
+          baseline (into #{} (map :image/hash) (:root/props-images (root conn)))]
+      (dispatch conn :image-library/import
+                {:gallery :token
+                 :entries [{:hash "https://example.com/a.png"
+                            :location "https://example.com/a.png"}]}
+                false)
+      (is (seq (:root/token-images (root conn))))
+      (is (= (into #{} (map :image/hash) (:root/props-images (root conn))) baseline)
+          "props-images is untouched (still just the two seeded demo images)")
+      (is (empty? (:root/scene-images (root conn)))))))
+
+(deftest test-image-library-import-reimport-is-idempotent
+  (testing "re-attaching an already-present hash merges rather than
+            duplicates -- :root/token-images et al are unique-identity
+            component refs"
+    (let [conn (ds/conn-from-db (initial-data true))
+          entries [{:hash "https://example.com/a.png" :location "https://example.com/a.png"}]]
+      (dispatch conn :image-library/import {:gallery :token :entries entries} false)
+      (dispatch conn :image-library/import {:gallery :token :entries entries} false)
+      (is (= (count (:root/token-images (root conn))) 1)))))

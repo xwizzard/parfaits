@@ -1,6 +1,7 @@
 (ns ogres.app.component.panel-props
   (:require [ogres.app.component :as component :refer [icon]]
             [ogres.app.hooks :as hooks]
+            [ogres.app.library :as library]
             [ogres.app.provider.state :as state]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec :refer [Vec2]]
@@ -17,6 +18,18 @@
      :image/height
      {:image/thumbnail
       [:image/hash]}]}])
+
+(def ^:private query-actions
+  [{:root/user [:user/host]}
+   {:root/props-images
+    [:image/hash
+     :image/name
+     :image/width
+     :image/height
+     :image/size
+     :image/cell-px
+     :image/rotation
+     :image/anchor]}])
 
 (defui ^:private element [props]
   (let [{{hash :image/hash
@@ -105,10 +118,15 @@
   [{:user/camera [[:camera/point :default vec/zero]]}])
 
 (defui ^:memo actions []
-  (let [dispatch (hooks/use-dispatch)
+  (let [[overwrite? set-overwrite!] (uix/use-state false)
+        [notice set-notice!] (uix/use-state nil)
+        dispatch (hooks/use-dispatch)
         upload (hooks/use-image-uploader {:type :props})
         input (uix/use-ref)
-        {{point :camera/point} :user/camera} (hooks/use-query query-camera)]
+        import-input (uix/use-ref)
+        {{point :camera/point} :user/camera} (hooks/use-query query-camera)
+        {{host :user/host} :root/user
+         images :root/props-images} (hooks/use-query query-actions [:db/ident :root])]
     ($ :<>
       ($ :input
         {:ref input
@@ -139,4 +157,48 @@
         "Add Card Pile (Demo)")
       ($ :button.button.button-danger
         {:on-click (fn [] (dispatch :props-images/remove-all))}
-        ($ icon {:name "trash3-fill" :size 16})))))
+        ($ icon {:name "trash3-fill" :size 16}))
+      ($ :button.button.button-neutral
+        {:type "button"
+         :title "Export a reusable library of every prop image, including
+                 its calibrated scale/rotation/anchor, for reuse in a
+                 future session"
+         :disabled (not (seq images))
+         :on-click
+         (fn []
+           (library/export! :props "props" (map library/image->entry images)))}
+        ($ icon {:name "box-arrow-up-right" :size 16}) "Export library")
+      (if host
+        ($ :<>
+          ($ :button.button.button-neutral
+            {:type "button"
+             :title "Import a prop image library exported from a previous
+                     session"
+             :on-click #(.click (deref import-input))}
+            ($ icon {:name "door-open" :size 16}) "Import library"
+            ($ :input
+              {:ref import-input
+               :type "file"
+               :hidden true
+               :accept ".props-library,text/plain"
+               :on-change
+               (fn [event]
+                 (if-let [file (first (array-seq (.. event -target -files)))]
+                   (library/import!
+                    :props file
+                    (fn [manifest]
+                      (if manifest
+                        (do (dispatch :image-library/import manifest overwrite?)
+                            (set-notice! (str "Imported " (count (:entries manifest))
+                                               " image(s) from \"" (:name manifest) "\".")))
+                        (set-notice! "That file isn't a valid props image library.")))))
+                 (set! (.. event -target -value) ""))}))
+          ($ :label.checkbox
+            ($ :input
+              {:type "checkbox"
+               :checked overwrite?
+               :on-change #(set-overwrite! (.. % -target -checked))})
+            ($ icon {:name "check" :size 20})
+            "Overwrite existing calibration")))
+      (if notice
+        ($ :.form-notice notice)))))

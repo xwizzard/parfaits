@@ -3,6 +3,7 @@
             [ogres.app.component :as component :refer [icon]]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
+            [ogres.app.library :as library]
             [ogres.app.util :refer [separate]]
             [ogres.app.segment :as seg]
             [ogres.app.vec :as vec]
@@ -37,7 +38,16 @@
   [{:root/user [:user/host]}
    {:root/token-images
     [:image/hash
+     :image/name
+     :image/width
+     :image/height
+     :image/size
      :image/public
+     :image/cell-px
+     :image/rotation
+     :image/anchor
+     :token-image/default-label
+     :token-image/url
      {:image/thumbnail
       [:image/hash]}]}])
 
@@ -582,12 +592,15 @@
 
 (defui ^:memo actions []
   (let [[editing set-editing] (uix/use-state false)
+        [overwrite? set-overwrite!] (uix/use-state false)
+        [notice set-notice!] (uix/use-state nil)
         dispatch (hooks/use-dispatch)
         result   (hooks/use-query query-actions [:db/ident :root])
         {{host :user/host} :root/user
          images :root/token-images} result
         upload   (hooks/use-image-uploader {:type :token})
-        input    (uix/use-ref)]
+        input    (uix/use-ref)
+        import-input (uix/use-ref)]
     ($ :<>
       (if editing
         ($ token-editor {:on-close #(set-editing false)}))
@@ -619,4 +632,48 @@
          (fn []
            (let [xf (mapcat (juxt :image/hash (comp :image/hash :image/thumbnail)))]
              (dispatch :token-images/remove-all (into #{} xf images))))}
-        ($ icon {:name "trash3-fill" :size 16})))))
+        ($ icon {:name "trash3-fill" :size 16}))
+      ($ :button.button.button-neutral
+        {:type "button"
+         :title "Export a reusable library of every token image, including
+                 its calibrated scale/rotation/anchor, for reuse in a
+                 future session"
+         :disabled (not (seq images))
+         :on-click
+         (fn []
+           (library/export! :token "tokens" (map library/image->entry images)))}
+        ($ icon {:name "box-arrow-up-right" :size 16}) "Export library")
+      (if host
+        ($ :<>
+          ($ :button.button.button-neutral
+            {:type "button"
+             :title "Import a token image library exported from a previous
+                     session"
+             :on-click #(.click (deref import-input))}
+            ($ icon {:name "door-open" :size 16}) "Import library"
+            ($ :input
+              {:ref import-input
+               :type "file"
+               :hidden true
+               :accept ".token-library,text/plain"
+               :on-change
+               (fn [event]
+                 (if-let [file (first (array-seq (.. event -target -files)))]
+                   (library/import!
+                    :token file
+                    (fn [manifest]
+                      (if manifest
+                        (do (dispatch :image-library/import manifest overwrite?)
+                            (set-notice! (str "Imported " (count (:entries manifest))
+                                               " image(s) from \"" (:name manifest) "\".")))
+                        (set-notice! "That file isn't a valid token image library.")))))
+                 (set! (.. event -target -value) ""))}))
+          ($ :label.checkbox
+            ($ :input
+              {:type "checkbox"
+               :checked overwrite?
+               :on-change #(set-overwrite! (.. % -target -checked))})
+            ($ icon {:name "check" :size 20})
+            "Overwrite existing calibration")))
+      (if notice
+        ($ :.form-notice notice)))))

@@ -5,6 +5,7 @@
             [ogres.app.game-type :as game-type]
             [ogres.app.geom :as geom]
             [ogres.app.hooks :as hooks]
+            [ogres.app.library :as library]
             [ogres.app.segment :as seg]
             [ogres.app.util :refer [display-size]]
             [ogres.app.vec :as vec :refer [Vec2]]
@@ -18,12 +19,18 @@
     [:db/id
      :image/hash
      :image/name
+     :image/width
+     :image/height
      :image/size
+     :image/cell-px
+     :image/rotation
+     :image/anchor
      {:image/thumbnail
       [:image/hash]}]}
    :root/default-cell-px
    {:root/user
-    [{:user/camera
+    [:user/host
+     {:user/camera
       [:db/id
        :camera/label
        {:camera/scene
@@ -255,12 +262,16 @@
 
 (defui ^:memo panel []
   (let [[preview set-preview] (uix/use-state nil)
+        [overwrite? set-overwrite!] (uix/use-state false)
+        [notice set-notice!] (uix/use-state nil)
         dispatch (hooks/use-dispatch)
         upload   (hooks/use-image-uploader {:type :scene})
         input    (uix/use-ref)
+        import-input (uix/use-ref)
         data     (hooks/use-query query [:db/ident :root])
         {{{scene :camera/scene} :user/camera
-          camera :user/camera} :root/user
+          camera :user/camera
+          host :user/host} :root/user
          default-cell-px :root/default-cell-px} data
         enabled-elements (:game-type/enabled-elements (:scene/game-type scene) #{})
         ;; "No-grid mode": the active game-type has no grid layout enabled
@@ -337,6 +348,51 @@
                            (set! (.. event -target -value) ""))})
                       ($ icon {:name "camera-fill" :size 16}) "Upload images")
                     ($ component/image-url-form {:type :scene})
+                    ($ :button.button.button-neutral
+                      {:type "button"
+                       :title "Export a reusable library of every scene/
+                               board image, including its calibrated
+                               scale/rotation/anchor, for reuse in a
+                               future session"
+                       :disabled (not (seq (:root/scene-images data)))
+                       :on-click
+                       (fn []
+                         (library/export! :scene "scenes" (map library/image->entry (:root/scene-images data))))}
+                      ($ icon {:name "box-arrow-up-right" :size 16}) "Export library")
+                    (if host
+                      ($ :<>
+                        ($ :button.button.button-neutral
+                          {:type "button"
+                           :title "Import a scene/board image library
+                                   exported from a previous session"
+                           :on-click #(.click (deref import-input))}
+                          ($ icon {:name "door-open" :size 16}) "Import library"
+                          ($ :input
+                            {:ref import-input
+                             :type "file"
+                             :hidden true
+                             :accept ".scene-library,text/plain"
+                             :on-change
+                             (fn [event]
+                               (if-let [file (first (array-seq (.. event -target -files)))]
+                                 (library/import!
+                                  :scene file
+                                  (fn [manifest]
+                                    (if manifest
+                                      (do (dispatch :image-library/import manifest overwrite?)
+                                          (set-notice! (str "Imported " (count (:entries manifest))
+                                                             " image(s) from \"" (:name manifest) "\".")))
+                                      (set-notice! "That file isn't a valid scene image library.")))))
+                               (set! (.. event -target -value) ""))}))
+                        ($ :label.checkbox
+                          ($ :input
+                            {:type "checkbox"
+                             :checked overwrite?
+                             :on-change #(set-overwrite! (.. % -target -checked))})
+                          ($ icon {:name "check" :size 20})
+                          "Overwrite existing calibration")))
+                    (if notice
+                      ($ :.form-notice notice))
                     (if (> pages 1)
                       ($ component/pagination
                         {:name "scenes-gallery"
